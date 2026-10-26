@@ -33,6 +33,10 @@ jobs:
         run: python3 tools/mkesp-test.py
       - name: The kernel's version string is made as it should be
         run: python3 tools/kernel-version-test.py
+      - name: The boot-argument catalogue is read from the source, and is current
+        run: |
+          python3 tools/boot-args-test.py
+          python3 tools/boot-args.py --check
       - name: The kernel patch applies to Apple's tree
         run: |
           git clone -q --depth 1 --branch xnu-8796.121.2 https://github.com/apple-oss-distributions/xnu.git /tmp/xnu
