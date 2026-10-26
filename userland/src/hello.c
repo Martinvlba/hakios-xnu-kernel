@@ -39,6 +39,7 @@ syscall6(long num, long a, long b, long c, long d, long e, long f)
 #define SYS_open    5
 #define SYS_getpid  20
 #define SYS_getuid  24
+#define SYS_select  93
 #define SYS_sysctlbyname 274
 #define O_RDWR      2
 
@@ -71,6 +72,63 @@ put_number(int fd, long v)
 	put(fd, buf + i);
 }
 
+/* "name=value" for a string sysctl, or nothing at all if the kernel has no such name (the driver is off) */
+static void
+show_string(int fd, const char *name)
+{
+	char value[1100];
+	u64 size = sizeof(value);
+
+	if (syscall6(SYS_sysctlbyname, (long)name, length(name), (long)value, (long)&size, 0, 0) == 0) {
+		put(fd, name);
+		put(fd, "=");
+		put(fd, value);
+		put(fd, "\n");
+	}
+}
+
+/* ... for an int sysctl (four bytes) */
+static void
+show_int(int fd, const char *name)
+{
+	int value = 0;
+	u64 size = sizeof(value);
+
+	if (syscall6(SYS_sysctlbyname, (long)name, length(name), (long)&value, (long)&size, 0, 0) == 0) {
+		put(fd, name);
+		put(fd, "=");
+		if (value < 0) {
+			put(fd, "-");
+			value = -value;
+		}
+		put_number(fd, value);
+		put(fd, "\n");
+	}
+}
+
+/* hello_wait=N in the kernel's command line (kern.bootargs): N, or 0 */
+static long
+wait_seconds(void)
+{
+	char args[700];
+	u64 size = sizeof(args);
+	long n = 0;
+
+	if (syscall6(SYS_sysctlbyname, (long)"kern.bootargs", 13, (long)args, (long)&size, 0, 0) != 0) {
+		return 0;
+	}
+	for (char *c = args; *c; c++) {
+		if (c[0] == 'h' && c[1] == 'e' && c[2] == 'l' && c[3] == 'l' && c[4] == 'o' && c[5] == '_' && c[6] == 'w' &&
+		    c[7] == 'a' && c[8] == 'i' && c[9] == 't' && c[10] == '=') {
+			for (c += 11; *c >= '0' && *c <= '9'; c++) {
+				n = n * 10 + (*c - '0');
+			}
+			return n;
+		}
+	}
+	return 0;
+}
+
 void
 start(void)
 {
@@ -97,6 +155,26 @@ start(void)
 		put(fd, "kernel.ver=");
 		put(fd, failed ? "(sysctl kern.hakios.version not available)" : version);
 		put(fd, "\n");
+	}
+
+	/* What the drivers that are on say about the chip, through the same door (a driver that is off has no such name) */
+	show_string(fd, "kern.hakios.soc_name");
+	show_int(fd, "kern.hakios.soc_id");
+	show_int(fd, "kern.hakios.pmic_peripherals");
+	show_string(fd, "kern.hakios.thermal_sensors");
+
+	/*
+	 * hello_wait=N: stay N seconds, and say once in five how warm the SoC is. Process 1 is not supposed to exit (doing so
+	 * panics the kernel, which ends the test run), so this is also how a run is made to last.
+	 */
+	for (long second = 0, wait = wait_seconds(); second < wait; second++) {
+		long tv[2] = { 1, 0 };
+
+		syscall6(SYS_select, 0, 0, 0, 0, (long)tv, 0);
+		if (second % 5 == 4) {
+			show_int(fd, "kern.hakios.thermal_max_mc");
+			show_string(fd, "kern.hakios.thermal_hottest");
+		}
 	}
 
 	/* Process 1 is not supposed to exit; doing so panics the kernel, which ends the test run. */

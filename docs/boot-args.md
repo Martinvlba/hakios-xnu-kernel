@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **304 arguments**: 255 read by the kernel, 14 by the loader, 44 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **314 arguments**: 265 read by the kernel, 14 by the loader, 44 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
@@ -178,7 +178,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_mpss_mem` | K | `hakios.mpss.c` |  |  |
 | `soc_pas_ipa` | K | `hakios.mpss.c` |  |  |
 | `soc_pas_mpss` | K | `hakios.mpss.c` |  |  |
-| `soc_smem` | K | `hakios.mpss.c` |  |  |
+| `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` |  |  |
 
 ## Audio and battery (31)
 
@@ -312,6 +312,21 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `torch` | KL | `hakios.torch.c`, `loader.c` |  |  |
 | `torch_max_s` | K | `hakios.torch.c` |  |  |
 | `torch_secs` | K | `hakios.torch.c` |  |  |
+
+## Chip, thermal and PMIC (10)
+
+| Argument | Layer | Read by | Configuration | Set by |
+|---|---|---|---|---|
+| `pmic` | K | `hakios.pmic.c` |  |  |
+| `pmic_list` | K | `hakios.pmic.c` |  |  |
+| `soc_smem_size` | K | `hakios.socinfo.c` |  |  |
+| `socinfo` | K | `hakios.socinfo.c` |  |  |
+| `thermal` | K | `hakios.thermal.c` |  |  |
+| `thermal_log` | K | `hakios.thermal.c` |  |  |
+| `thermal_poll` | K | `hakios.thermal.c` |  |  |
+| `thermal_stop` | K | `hakios.thermal.c` |  |  |
+| `thermal_tm0` | K | `hakios.thermal.c` |  |  |
+| `thermal_tm1` | K | `hakios.thermal.c` |  |  |
 
 ## Version (1)
 

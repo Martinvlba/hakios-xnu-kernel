@@ -191,6 +191,8 @@ modem_wait	k
 modem_wda_off	k
 net_names	k
 net_trace	k
+pmic	k
+pmic_list	k
 privs	k
 rd	kl
 rec_mb	k
@@ -220,6 +222,8 @@ soc_mpss_mem	k
 soc_pas_ipa	k
 soc_pas_mpss	k
 soc_smem	k
+soc_smem_size	k
+socinfo	k
 sound	k
 sound_below	k
 sound_gain	k
@@ -234,6 +238,12 @@ switcher_wallpaper	u
 syssleep	k
 systrace	k
 systrace_name	k
+thermal	k
+thermal_log	k
+thermal_poll	k
+thermal_stop	k
+thermal_tm0	k
+thermal_tm1	k
 torch	kl
 torch_max_s	k
 torch_secs	k

@@ -65,6 +65,7 @@ GROUPS = [
     ("Storage and APFS", r"hakios\.(ufs|ufshc|virtio_blk|sparse|apfs_check)\.|apfs_vfsops\."),
     ("Network", r"hakios\.(net|virtio_net)\."),
     ("Haptics and torch", r"hakios\.(haptic|torch)\."),
+    ("Chip, thermal and PMIC", r"hakios\.(socinfo|thermal|pmic)\."),
     ("Version", r"hakios\.version\."),
     ("CPU, memory and boot", r"hakios\.cpufreq\.|GenericARMPE|loader_return|\(patch\)"),
     ("Debugging", r"user_exception_trace"),

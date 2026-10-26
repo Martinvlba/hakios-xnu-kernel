@@ -59,3 +59,6 @@ net      bsd/dev/hakios.net.c
 net      bsd/dev/hakios.virtio_net.c
 
 core     bsd/dev/hakios.version.c
+core    bsd/dev/hakios.socinfo.c
+power   bsd/dev/hakios.thermal.c
+power   bsd/dev/hakios.pmic.c
