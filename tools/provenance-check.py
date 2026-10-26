@@ -52,8 +52,8 @@ FLASHY_C = re.compile(r"\bwrite_blocks\s*\(|\bBLOCK_OP_WRITE\b")
 C_WRITERS = re.compile(r"^(xnuloader/[^/]+|xnu/files/bsd/dev/hakios\.ufs[^/]*)\.c$")
 SCRIPT_DIRS = ("tools/", "devices/", "qemu/", "sysimage/", "xnuloader/", "userland/build.sh")
 SCRIPT_FILES = ("xl", "Makefile", "xnu-build.sh")
-# this file and the doctor mention these commands in order to look for them
-SKIP_SCAN = {"tools/provenance-check.py", "tools/doctor.sh"}
+# this file, its test and the doctor mention these commands in order to look for them (the test has them as data)
+SKIP_SCAN = {"tools/provenance-check.py", "tools/provenance-test.py", "tools/doctor.sh"}
 
 
 def tracked(root):
