@@ -66,6 +66,9 @@ SYMBOLS = [
     ("NET_NAMES", "bool", "net_names", "a log line for every name asked of a DNS server and every TCP connection begun "
                                         "(the names go to the log: for debugging only)", None, None),
     ("VIRTIO_NET", "bool", "virtio_net", "QEMU's virtio network device as en0 (QEMU only; its bus address means nothing on a phone)", None, None),
+    # Linux's CONFIG_CMDLINE: whatever the symbols above do not cover, as name=value words in quotes. It is not an escape
+    # from the checks: every name must be one the source reads (configs/boot-args.lst), so a typo is an error, not a no-op.
+    ("BOOTARGS", "args", None, "more kernel arguments, as `name=value` words in quotes; each name must be one docs/boot-args.md lists", None, None),
 ]
 BY_NAME = {s[0]: s for s in SYMBOLS}
 FIRMWARE_VALUES = ("device", "none")
@@ -130,11 +133,31 @@ def typed(name, value):
     if not (len(value) >= 2 and value[0] == '"' and value[-1] == '"'):
         raise ConfigError("CONFIG_%s is a string in quotes (got %s)" % (name, value))
     text = value[1:-1]
+    if kind == "args":
+        return split_args(text)
     if name == "FIRMWARE" and text not in FIRMWARE_VALUES:
         raise ConfigError('CONFIG_FIRMWARE is "device" or "none" (got "%s")' % text)
     if not re.fullmatch(r"[A-Za-z0-9._-]*", text):
         raise ConfigError("CONFIG_%s holds letters, digits, dots, dashes and underscores (got %s)" % (name, value))
     return text
+
+
+def split_args(text):
+    """CONFIG_BOOTARGS as a list of name=value words. A word is name=value with no space, quote or backslash in it (the
+    value is carried through a shell, a payload and a command line that has a length limit and no quoting)."""
+    words = text.split()
+    for word in words:
+        if not re.fullmatch(r"[a-z][a-z0-9_.\-]*=[A-Za-z0-9_.:,/+@\-]+", word):
+            raise ConfigError('CONFIG_BOOTARGS: "%s" is not name=value (lowercase name, a value of letters, digits and . _ : , / + @ -)' % word)
+    return words
+
+
+def known_args(root=None):
+    """The names the source reads, from configs/boot-args.lst (tools/boot-args.py --lst makes it); None if there is no list."""
+    path = os.path.join(root or os.path.dirname(HERE), "configs", "boot-args.lst")
+    if not os.path.isfile(path):
+        return None
+    return {line.split("\t")[0].strip() for line in open(path, encoding="utf-8") if line.strip()}
 
 
 def config_dir(root):
@@ -227,6 +250,21 @@ def check(config):
             if have is None or (value and str(have) != value):
                 problems.append("CONFIG_%s requires CONFIG_%s%s" % (name, wanted, "=" + value if value else ""))
     args = boot_args(parsed)
+    extra = parsed.get("BOOTARGS", [])
+    known = known_args() if extra else None
+    owned = {s[2]: s[0] for s in SYMBOLS if s[2] and s[0] in parsed}      # argument -> the symbol that already sets it
+    seen = set()
+    for word in extra:
+        arg = word.partition("=")[0]
+        if known is not None and arg not in known:
+            close = difflib.get_close_matches(arg, known, n=1)
+            problems.append("CONFIG_BOOTARGS: nothing reads the argument %s (docs/boot-args.md lists them)%s" %
+                            (arg, "; did you mean %s?" % close[0] if close else ""))
+        if arg in owned:
+            problems.append("CONFIG_BOOTARGS: %s is already set by CONFIG_%s: say it there" % (arg, owned[arg]))
+        if arg in seen:
+            problems.append("CONFIG_BOOTARGS: %s twice" % arg)
+        seen.add(arg)
     length = len(" ".join(args))
     if length > KERNEL_LINE - RUN_OVERHEAD:
         problems.append("the boot-arguments take %d characters; a run adds about %d of its own and the kernel's command line holds %d: "
@@ -238,10 +276,12 @@ def boot_args(parsed):
     """['cpus=8', 'gpu=1', ...] in the order of the symbol table."""
     args = []
     for name, kind, arg, _help, _needs, _requires in SYMBOLS:
-        if name not in parsed or arg is None:
+        if name not in parsed or (arg is None and kind != "args"):
             continue
         value = parsed[name]
-        if kind == "bool":
+        if kind == "args":
+            args.extend(value)
+        elif kind == "bool":
             args.append("%s=1" % arg)
         elif kind == "hex":
             args.append("%s=0x%x" % (arg, value))

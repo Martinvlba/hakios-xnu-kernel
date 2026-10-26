@@ -155,6 +155,26 @@ try:
     problems, _ = hc.check({"CPUS": "8", "BOOTCPU": "7", "UFS": "2", "MODEM": "y", "MODEM_BUFFER": "0xa8000000", "FIRMWARE": '"device"'})
     check("a command line that cannot fit is a problem", any("the end of it would be lost" in p for p in problems), problems)
 
+    # CONFIG_BOOTARGS: Linux's CMDLINE, but every name is checked against what the source reads
+    hc.KERNEL_LINE = 607
+    base = {"CPUS": "4", "FIRMWARE": '"device"'}
+    problems, a = hc.check(dict(base, BOOTARGS='"fb_beat=2 loader_return_after=5"'))
+    check("BOOTARGS: names the source reads are fine, and come after the symbols' own", not problems and a == ["cpus=4", "fb_beat=2", "loader_return_after=5"], (problems, a))
+    problems, _ = hc.check(dict(base, BOOTARGS='"fb_beet=2"'))
+    check("BOOTARGS: a name nothing reads is an error, with a suggestion", any("nothing reads the argument fb_beet" in p and "did you mean fb_beat" in p for p in problems), problems)
+    problems, _ = hc.check(dict(base, BOOTARGS='"cpus=8"'))
+    check("BOOTARGS: an argument a symbol already sets is refused", any("already set by CONFIG_CPUS" in p for p in problems), problems)
+    problems, _ = hc.check(dict(base, BOOTARGS='"fb_beat=2 fb_beat=3"'))
+    check("BOOTARGS: the same name twice is refused", any("fb_beat twice" in p for p in problems), problems)
+    for bad in ('"fb_beat"', '"fb_beat=a b"', '"fb_beat=\\"x"', '"FB_BEAT=1"'):
+        problems, _ = hc.check(dict(base, BOOTARGS=bad))
+        check("BOOTARGS: %s is not name=value" % bad, any("is not name=value" in p or "not name=value" in p for p in problems), problems)
+    problems, _ = hc.check(dict(base, BOOTARGS="fb_beat=2"))
+    check("BOOTARGS without quotes is refused", any("string in quotes" in p for p in problems), problems)
+    long = " ".join("modem_ipa_data_trace=%d" % i for i in range(30))
+    problems, _ = hc.check(dict(base, BOOTARGS='"%s"' % long))
+    check("BOOTARGS counts toward the length limit", any("the end of it would be lost" in p for p in problems), problems)
+
     # help, show, list
     r = run("help", "gpu")
     check("help GPU: the argument, the firmware", "gpu=1" in r.stdout and "fw-gpu/" in r.stdout, r.stdout)
