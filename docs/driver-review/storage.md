@@ -288,3 +288,20 @@ UFS mailbox (`hakios.ufs.c`) and loader service:
 - Whether the kernel configuration masks or traps long interrupt-off sections (F9).
 - Dynamic behaviour: nothing was run, no log read; F1, F3, F6 and F10 need a trace to move from PLAUSIBLE.
 - The modem and cellular files (mpss, qmi, nas, ipa) are out of scope and were not read; `hakios.mpss.c:3592-3610` was looked at only as a caller of `hakios_ufs_read_partition`.
+
+## Fix status
+
+Each finding was re-read in the current tree first. Nothing was built or run; edits were re-read for syntax only. Kernel files are under `drivers/storage/`. The write guard (`ufs_write`, `ufs_cwrite`, `block_poll`'s write branch, the `ufs_write=` parse) was not touched.
+
+- F1: FIXED. `xnuloader/loader.c`: the log read-back in `write_logs()` now goes into its own `log_verify` buffer (new, `sizeof(out_buf) + 8192`, with a `flush_dcache` after the read) instead of `block_buffer`, so it can no longer overwrite what the kernel is copying out of the mailbox buffer.
+- F2: FIXED. `hakios.ufshc.c`: in `hc_complete`'s sleeping wait, once `hc_dead` is set a waiter does not sleep again: a slot whose doorbell bit is clear is taken as done, any other returns ETIMEDOUT at once (one message). `hc_off()` also wakes every slot's waiter. A dead path now costs one 10 s timeout for the whole read, not one per slot.
+- F3: FIXED. `hakios.ufs.c` `ufs_read_mailbox`: `bounce` is allocated after `ufs_lock` is taken, with an unlock on the ENOMEM return.
+- F4: FIXED. `hakios.ufs.c` `ufs_native_check`: `crc32` only runs for a header size of 92..4096, otherwise the CRC is reported WRONG. The early "no memory" return now frees `h`, `ufs_cmp_x` and `ufs_cmp_y`.
+- F5: FIXED. `hakios.sparse.c`: `sparse_block()` treats a slot above `sparse_present` as absent; the header checks in `hakios_sparse_init` are rewritten with subtractions and divisions (`off`, `sh_data_off`, `sh_table_off`, `sparse_present`, `sparse_block_count`, plus a count x size overflow test) so none can wrap.
+- F6: FIXED. `hakios.virtio_blk.c`: after the 10 s timeout `blk_ready` is cleared (the device is off from then on, like `ufs_dead`), and `blk_read` re-checks `blk_ready` under its lock so a request that waited for the lock does not start on the stale queue.
+- F7: NOT A BUG / SKIPPED. Documented behaviour (`docs/install.md:11`, `tools/provenance.allow:28`); giving `logdump` a guard like darwin's is a design change in the loader's write path, not a mechanical fix.
+- F8: SKIPPED. The only fix is in the loader's `ufs_write=` parse, which is the write guard's enable switch; the report itself cannot say what the kernel's `PE_parse_boot_argn` does with duplicates (XNU source not here). Both sides must agree, so the stricter wins as today.
+- F9: SKIPPED. Needs hardware knowledge (how long the doorbell takes to clear, whether interrupts may stay off); the report itself says NEEDS-HARDWARE.
+- F10: SKIPPED. Design change (keep the mounted block size apart from the transient one) and depends on what `spec_open` does in this XNU, which is not in the tree.
+- F11: FIXED. `hakios.ufs.c`: `ufs_read()` now refuses a read that leaves its partition (`offset > size || len > size - offset`, EINVAL), and the check in `hakios_ufs_read_partition` is written without the wrapping sum. Reads only; `ufs_write` and its checks are unchanged.
+- F12: SKIPPED. The code is in `apfs_lib.c`, which is not one of the files this pass may edit.

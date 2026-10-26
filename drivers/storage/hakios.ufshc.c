@@ -575,6 +575,10 @@ hc_off(void)
 	hc_dead = true;
 	lck_mtx_lock(&hc_lock);
 	wakeup(&hc_free);
+	/* those who sleep on a slot's answer look at hc_dead now, not after their own 1 s tick */
+	for (uint32_t i = 0; i < SLOTS; i++) {
+		wakeup(&hc_slots[i]);
+	}
 	lck_mtx_unlock(&hc_lock);
 }
 
@@ -648,6 +652,20 @@ hc_complete(struct hc_slot *s, const char *what, bool tur)
 			wakeup((void *)&hc_waiting);
 		}
 		while ((hc_done & bit) == 0) {
+			/*
+			 * The path went off while this one waited (another slot of the same read timed out):
+			 * do not wait out a fresh 10 s per slot (31 slots would hold the read for 310 s).
+			 * A slot whose doorbell bit is already clear did finish, so it is read as done.
+			 */
+			if (hc_dead) {
+				hc_waiting &= ~bit;
+				if ((hc_read(UFSHC_UTRLDBR) & bit) == 0) {
+					break;
+				}
+				lck_mtx_unlock(&hc_lock);
+				hc_say("ufs: native: slot %u (%s) not waited for: this path is already off\n", s->number, what);
+				return ETIMEDOUT;
+			}
 			(void)msleep(s, &hc_lock, PRIBIO, "ufshc-io", &second);
 			us = hc_us_since(started);
 			if ((hc_done & bit) == 0 && us > TIMEOUT_MS * 1000ULL) {

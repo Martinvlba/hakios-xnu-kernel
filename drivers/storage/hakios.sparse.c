@@ -83,7 +83,8 @@ sparse_block(uint64_t blk)
 		return NULL;
 	}
 	memcpy(&slot, sparse_table + blk * 4, sizeof(slot));
-	if (slot == 0) {
+	/* a slot past the blocks the image holds (a cut or hand-made image) would be read from beyond it */
+	if (slot == 0 || slot > sparse_present) {
 		return NULL;
 	}
 	return sparse_data + (uint64_t)(slot - 1) * sparse_block_size;
@@ -228,7 +229,8 @@ hakios_sparse_init(void)
 		printf("sparse: md0 is not a memory disk this can be read from\n");
 		return;
 	}
-	if (off + sizeof(*hdr) > size) {
+	/* (no sum that can wrap: off is a boot-arg) */
+	if (off > size || sizeof(*hdr) > size - off) {
 		printf("sparse: offset %llu is past the end of md0 (%llu bytes)\n",
 		    (unsigned long long)off, (unsigned long long)size);
 		return;
@@ -248,8 +250,14 @@ hakios_sparse_init(void)
 		printf("sparse: the header makes no sense\n");
 		return;
 	}
-	if (off + hdr->sh_data_off + sparse_present * sparse_block_size > size ||
-	    off + hdr->sh_table_off + sparse_block_count * 4 > size) {
+	/*
+	 * The sizes come from the image: every test is a subtraction or a division, so a huge value
+	 * cannot wrap into a small sum and pass. sparse_strategy multiplies count by size as well.
+	 */
+	if (sparse_block_count > ~0ULL / sparse_block_size ||
+	    hdr->sh_data_off > size - off || hdr->sh_table_off > size - off ||
+	    sparse_present > (size - off - hdr->sh_data_off) / sparse_block_size ||
+	    sparse_block_count > (size - off - hdr->sh_table_off) / 4) {
 		printf("sparse: the image does not fit in md0 (%llu bytes)\n",
 		    (unsigned long long)size);
 		return;

@@ -281,9 +281,12 @@ find_log_partition(void)
 			}
 		}
 		if (match && !EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
+			/* (the handle array is pool memory the caller owns; this runs on every log write) */
+			BS->free_pool(handles);
 			return bio;
 		}
 	}
+	BS->free_pool(handles);
 	return NULL;
 }
 
@@ -293,9 +296,15 @@ find_log_partition(void)
  * fetches over USB (fastboot get_staged).
  */
 static char out_buf[2 * 1024 * 1024];
-/* the storage's reads for the kernel land here (block_poll); also where the log is read back */
+/* the storage's reads for the kernel land here (block_poll), and nothing else may be put in it */
 #define BLOCK_BUFFER_SIZE  (4u << 20)
 static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));
+/*
+ * Where the log is read back to compare it (write_logs). Not block_buffer: that is the kernel's
+ * mailbox buffer, and a read-back landing in it while the kernel runs on the other core would
+ * overwrite data the kernel is still copying out of it.
+ */
+static uint8_t log_verify[sizeof(out_buf) + 8192] __attribute__((aligned(0x2000)));
 static const char *staged_data = out_buf;   /* what "upload" sends: normally the log in out_buf */
 static uint64_t staged_len;
 
@@ -367,9 +376,10 @@ write_logs(const char *klog, uint64_t klog_len)
 		 * driver must leave possible (the controller is shared with this one). The line goes into
 		 * the copy the host fetches over USB, not into the partition, which already has the rest.
 		 */
-		if (len <= sizeof(block_buffer)) {
-			rs = bio->read_blocks(bio, bio->media->media_id, 0, len, block_buffer);
-			same = !EFI_ERROR(rs) && memcmp(block_buffer, out_buf, len) == 0;
+		if (len <= sizeof(log_verify)) {
+			rs = bio->read_blocks(bio, bio->media->media_id, 0, len, log_verify);
+			flush_dcache((uint64_t)(uintptr_t)log_verify, (uint64_t)(uintptr_t)log_verify + len);
+			same = !EFI_ERROR(rs) && memcmp(log_verify, out_buf, len) == 0;
 		}
 	}
 	print("log: %d bytes written to logdump (%x), read back %s (%x)\n", len, ws,
@@ -391,6 +401,9 @@ flush_log(void)
 
 struct dt_writer {
 	uint8_t *base, *cur;
+	uint8_t *end;         /* the first byte after the room reserved for the tree */
+	int overflow;         /* something did not fit: nothing more is written, run_kernel refuses the tree */
+	uint32_t scratch[2];  /* the counts of a node that was not written (after an overflow) */
 	uint32_t *counts[16]; /* [depth] -> {nProperties, nChildren} of the open node */
 	int depth;
 };
@@ -398,12 +411,22 @@ struct dt_writer {
 static void
 dt_prop(struct dt_writer *w, const char *name, const void *data, uint32_t len)
 {
+	uint64_t padded = ((uint64_t)len + 3) & ~3ULL;
+
+	/*
+	 * Not past the room reserved for the tree (boot_args follows it), and not a name longer than the
+	 * 32-byte field: either would overwrite what is next to it with no message.
+	 */
+	if (w->overflow || str_len(name) > 32 ||(uint64_t)(w->end - w->cur) < 36 + padded) {
+		w->overflow = 1;
+		return;
+	}
 	memset(w->cur, 0, 32);
 	memcpy(w->cur, name, str_len(name));
 	*(uint32_t *)(w->cur + 32) = len;
-	memset(w->cur + 36, 0, (len + 3) & ~3u);
+	memset(w->cur + 36, 0, (size_t)padded);
 	memcpy(w->cur + 36, data, len);
-	w->cur += 36 + ((len + 3) & ~3u);
+	w->cur += 36 + padded;
 	w->counts[w->depth - 1][0]++;
 }
 
@@ -497,6 +520,12 @@ dt_begin(struct dt_writer *w, const char *name)
 {
 	if (w->depth > 0) {
 		w->counts[w->depth - 1][1]++;
+	}
+	if (w->overflow || (uint64_t)(w->end - w->cur) < 8) {
+		/* no room: the node is not written, the depth is kept so that dt_end still pairs with it */
+		w->overflow = 1;
+		w->counts[w->depth++] = w->scratch;
+		return;
 	}
 	w->counts[w->depth++] = (uint32_t *)w->cur;
 	memset(w->cur, 0, 8);
@@ -944,6 +973,11 @@ static int wdt_armed;
  * for the commands that the host sends meanwhile (usb_poll_command).
  */
 static const struct kernel_live *running_live;
+/*
+ * Set for the whole of run_on_other_cpu(), whether the kernel has a live block or not.
+ * running_live is NULL for a kernel without one, so it cannot say that a kernel is running.
+ */
+static int run_active;
 static uint64_t running_slide;
 static void usb_poll_command(void);
 
@@ -1401,6 +1435,8 @@ ufs_survey(void)
 			    bio->media->read_only ? "read only" : "writable", (uint64_t)bio->media->io_align);
 			ufs_check_gpt(bio, units - 1);
 		}
+		/* (the handle array is pool memory this function owns) */
+		BS->free_pool(handles);
 	}
 	/* the GPT partitions, with the hash of those there are images of */
 	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
@@ -1432,6 +1468,7 @@ ufs_survey(void)
 			ufs_dump_userdata(bio);
 		}
 	}
+	BS->free_pool(handles);
 	print("ufs: %d raw units, %d partitions\n", units, partitions);
 }
 
@@ -1890,6 +1927,8 @@ block_start(void)
 			units[nunits].lun = device_path_print(nunits, dp);
 			nunits++;
 		}
+		/* (the handle array is pool memory this function owns; units[] holds the protocols, not the array) */
+		BS->free_pool(handles);
 	}
 	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
 		print("ufs: no partition information: the block service is off\n");
@@ -1933,6 +1972,7 @@ block_start(void)
 			block_io2_probe(handles[i], bio);
 		}
 	}
+	BS->free_pool(handles);
 	for (uint64_t u = 0; u < nunits; u++) {
 		struct loader_block_part *bp = &block_shared.part[block_shared.parts];
 		char *n = bp->name;
@@ -2253,6 +2293,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 	int arrived = 0, watching_only = 0;
 
 	running_live = live;
+	run_active = 1;
 	running_slide = slide;
 	other_cpu_start.entry = entry;
 	other_cpu_start.boot_args = boot_args_pa;
@@ -2363,6 +2404,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 		}
 	}
 	running_live = NULL;
+	run_active = 0;
 
 	if (watching_only) {
 		__asm__ volatile ("msr S3_0_C12_C12_7, %0\nisb" : : "r" (group1));
@@ -2485,6 +2527,7 @@ install_exception_hook(void)
 
 struct payload_info {
 	const uint8_t *kernel;
+	uint32_t kernel_size;           /* the kernel entry's size: what its Mach-O header may point into */
 	const uint8_t *ramdisk;
 	uint32_t ramdisk_size;
 	const char *cmdline;
@@ -2509,6 +2552,15 @@ parse_number(const char *c, unsigned base)
 	return v;
 }
 
+/* How many bytes after the header the walk over a payload's entries may cover: the header's size, but never more than fits */
+static uint64_t
+payload_walk_size(uint32_t header_size)
+{
+	uint64_t most = PAYLOAD_MAX_SIZE - 0x100000ULL - sizeof(struct payload_header);
+
+	return header_size < most ? header_size : most;
+}
+
 static int
 parse_payload(struct payload_info *pi, int verbose)
 {
@@ -2520,7 +2572,11 @@ parse_payload(struct payload_info *pi, int verbose)
 		print("no payload at %x (magic %x)\n", PAYLOAD_BASE, (uint64_t)ph->magic);
 		return 0;
 	}
-	const uint8_t *p = (const uint8_t *)(ph + 1), *pend = p + ph->size;
+	/*
+	 * The size in the header is not trusted past what the payload region can hold (the file's size is not
+	 * known here), so a wild value cannot send the walk through memory that is not the payload.
+	 */
+	const uint8_t *p = (const uint8_t *)(ph + 1), *pend = p + payload_walk_size(ph->size);
 	while (p + sizeof(struct payload_entry) <= pend) {
 		const struct payload_entry *e = (const struct payload_entry *)p;
 		const char *text = (const char *)(p + sizeof(*e));
@@ -2530,11 +2586,20 @@ parse_payload(struct payload_info *pi, int verbose)
 		if (verbose) {
 			print("payload entry '%s' size %x\n", e->name, (uint64_t)e->size);
 		}
+		/*
+		 * An entry that claims more bytes than are left is a torn or made-up payload: the ramdisk copy would read
+		 * past it, and the 32-bit rounding below would wrap. Not booted, as with a payload of the wrong magic.
+		 */
+		if ((uint64_t)e->size > (uint64_t)(pend - (p + sizeof(*e)))) {
+			print("payload entry is larger than the payload (size %x): not used\n", (uint64_t)e->size);
+			return 0;
+		}
 		if (str_eq(e->name, "ramdisk")) {
 			pi->ramdisk = p + sizeof(*e);             /* becomes /dev/md0, the root device */
 			pi->ramdisk_size = e->size;
 		} else if (str_eq(e->name, "kernel")) {
 			pi->kernel = p + sizeof(*e);
+			pi->kernel_size = e->size;
 		} else if (str_eq(e->name, "cmdline")) {
 			pi->cmdline = text;
 		} else if (str_eq(e->name, "physbase")) {
@@ -2740,8 +2805,13 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	const uint8_t *kernel = pi.kernel;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
-	if (mh->magic != MH_MAGIC_64) {
+	if (pi.kernel_size < sizeof(*mh) || mh->magic != MH_MAGIC_64) {
 		print("kernel is not a 64-bit Mach-O\n");
+		return 0;
+	}
+	/* the load commands must lie inside the kernel entry, or the walk below reads whatever follows it */
+	if (mh->sizeofcmds > pi.kernel_size - sizeof(*mh)) {
+		print("kernel: the load commands are longer than the kernel\n");
 		return 0;
 	}
 
@@ -2749,10 +2819,35 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t vm_lo = ~0ULL, vm_hi = 0, entry_va = 0;
 	const struct load_command *lc = (const struct load_command *)(mh + 1);
 	for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const uint8_t *)lc + lc->cmdsize)) {
+		/*
+		 * Every command must fit in the commands the header counts, and be at least its own header long: a
+		 * cmdsize of 0 would keep the walk on one command for up to 2^32 rounds, a huge one would leave the kernel.
+		 */
+		uint64_t at = (uint64_t)((const uint8_t *)lc - (const uint8_t *)(mh + 1));
+
+		if (at > mh->sizeofcmds || sizeof(*lc) > mh->sizeofcmds - at || lc->cmdsize < sizeof(*lc) ||
+		    lc->cmdsize > mh->sizeofcmds - at) {
+			print("kernel: load command %d does not fit in the load commands\n", (uint64_t)i);
+			return 0;
+		}
 		if (lc->cmd == LC_SEGMENT_64) {
 			const struct segment_command_64 *sg = (const void *)lc;
+			if (lc->cmdsize < sizeof(*sg)) {
+				print("kernel: segment command %d is too short\n", (uint64_t)i);
+				return 0;
+			}
 			if (sg->vmsize == 0) {
 				continue;
+			}
+			/*
+			 * What is loaded must be inside the kernel (file) and inside its own extent: a vmaddr + vmsize that
+			 * wraps, a filesize above vmsize, or a file range past the entry would write over, or read from, memory
+			 * that is not the kernel's.
+			 */
+			if (sg->vmaddr + sg->vmsize < sg->vmaddr || sg->filesize > sg->vmsize || sg->fileoff > pi.kernel_size ||
+			    sg->filesize > pi.kernel_size - sg->fileoff) {
+				print("kernel: segment %d is outside the kernel or wraps\n", (uint64_t)i);
+				return 0;
 			}
 			if (sg->vmaddr < vm_lo) {
 				vm_lo = sg->vmaddr;
@@ -2760,13 +2855,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			if (sg->vmaddr + sg->vmsize > vm_hi) {
 				vm_hi = sg->vmaddr + sg->vmsize;
 			}
-		} else if (lc->cmd == LC_UNIXTHREAD) {
-			/* cmd, cmdsize, flavor, count, x0..x28, fp, lr, sp, pc */
+		} else if (lc->cmd == LC_UNIXTHREAD && lc->cmdsize >= 16 + 33 * 8) {
+			/* cmd, cmdsize, flavor, count, x0..x28, fp, lr, sp, pc (a command too short to hold pc gives no entry) */
 			entry_va = ((const uint64_t *)((const uint8_t *)lc + 16))[32];
 		}
 	}
 	print("kernel va %x..%x entry %x\n", vm_lo, vm_hi, entry_va);
-	if (vm_lo < KERNEL_VIRT_BASE + KERNEL_LINK_OFFSET || entry_va == 0) {
+	/* (a kernel that reaches more than the largest window past the virtual base is no kernel of this loader's) */
+	if (vm_lo < KERNEL_VIRT_BASE + KERNEL_LINK_OFFSET || entry_va == 0 || vm_hi < vm_lo ||
+	    vm_hi - KERNEL_VIRT_BASE > MAX_MEM_SIZE) {
 		print("unexpected kernel layout\n");
 		return 0;
 	}
@@ -2785,6 +2882,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t rd1_pa = 0, rd1_size = 0;
 
 	if (pi.resident_rd != 0) {
+		/*
+		 * The size is the payload's word: one that does not even fit above the resident address would wrap
+		 * the page rounding or the device tree address below, and the room check after them would pass.
+		 * (Whatever fits is still held to the room check as before.)
+		 */
+		if (win_size <= RESIDENT_RD_OFFSET || pi.resident_rd > win_size - RESIDENT_RD_OFFSET) {
+			print("rdres %x does not fit in the memory window\n", pi.resident_rd);
+			return 0;
+		}
 		resident_rd_size = pi.resident_rd;
 	}
 	if (resident_rd_size != 0) {
@@ -2851,6 +2957,13 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * loader asked for (the loader stays resident across runs) */
 	block_write_requested = 0;
 	block_write_part = -1;
+	/*
+	 * the same for the other storage requests (they are only ever OR-ed in below): without this a run
+	 * that did not ask for ufs=2 is still offered a stale page and given its ufs_shared_pa
+	 */
+	hc_requested = 0;
+	block_probe_requested = 0;
+	block_enabled = 0;
 	for (const char *c = pi.cmdline; *c; c++) {
 		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
@@ -3046,7 +3159,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	/* --- device tree ---------------------------------------------------- */
 	const struct platform *plat = PLAT;
-	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
+	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .end = (uint8_t *)(dt_pa + dt_max), .depth = 0 };
 	uint64_t cntfrq = READ_SYSREG(CNTFRQ_EL0);
 	uint64_t ranges[3] = { 0, plat->io_base, plat->io_size };
 	uint64_t reg2[2];
@@ -3284,6 +3397,11 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	dt_end(&w);
 
+	/* a tree that did not fit in the room before boot_args was cut short by dt_prop: not handed to the kernel */
+	if (w.overflow) {
+		print("device tree does not fit in %x bytes: not started\n", dt_max);
+		return 0;
+	}
 	uint32_t dt_len = (uint32_t)(w.cur - w.base);
 	ba->deviceTreeP = dt_pa - slide;
 	ba->deviceTreeLength = dt_len;
@@ -3545,7 +3663,7 @@ usb_wait(uint8_t endpoint)
 			return -1;
 		}
 		/* with a kernel running, a host that went away must not keep this core from watching it */
-		if (running_live != NULL && READ_SYSREG(CNTVCT_EL0) - began > 3 * freq) {
+		if (run_active && READ_SYSREG(CNTVCT_EL0) - began > 3 * freq) {
 			return -1;
 		}
 		if (msg == UsbDeviceEventTransferNotification && data.transfer.endpoint_index == endpoint) {
@@ -3624,7 +3742,8 @@ starts_with(const char *s, const char *prefix)
 static void
 fb_command(char *cmd)
 {
-	int busy = running_live != NULL;
+	/* a kernel runs on another core, with a live block or without one (running_live alone is NULL without) */
+	int busy = run_active;
 
 	{
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
@@ -3633,7 +3752,7 @@ fb_command(char *cmd)
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
-			if (busy) {
+			if (busy && running_live != NULL) {
 				((struct kernel_live *)(uintptr_t)running_live)->stop = 1;
 			}
 			fb_reply("OKAY", "");
@@ -3663,6 +3782,8 @@ fb_command(char *cmd)
 
 			if (starts_with(cmd, "oem ramdisk none")) {
 				resident_rd_size = 0;
+				/* (an "oem ramdisk" before this one must not leave the next download aimed at the resident area) */
+				download_to_ramdisk = 0;
 				fb_reply("OKAY", "");
 				return;
 			}
@@ -3683,6 +3804,10 @@ fb_command(char *cmd)
 			download_to_ramdisk = 0;
 			if (to_ramdisk) {
 				limit = win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE;
+				/* the answer to "download:" carries the size in 32 bits: a larger one would be answered as another size */
+				if (limit > 0xffffffffULL) {
+					limit = 0xffffffffULL;
+				}
 				dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
 				resident_rd_size = 0;
 			}
@@ -3690,6 +3815,16 @@ fb_command(char *cmd)
 				fb_reply("FAIL", "bad size");
 				return;
 			}
+			/*
+			 * A download over the payload makes the payload no payload until it is whole: the XNUP magic
+			 * is taken out when it arrives and put back at the end, so that a transfer that stops half-way
+			 * leaves something "oem run" refuses, not a mix of the new and the old.
+			 */
+			if (!to_ramdisk) {
+				*(volatile uint32_t *)dest = 0;
+			}
+			uint32_t magic_held = 0;
+			int magic_taken = 0;
 			fb_reply_data(total);
 			while (got < total) {
 				uint64_t want = total - got > USB_CHUNK ? USB_CHUNK : total - got;
@@ -3697,10 +3832,22 @@ fb_command(char *cmd)
 				if (r <= 0) {
 					break;
 				}
+				/* (a controller that reports more than was asked for must not carry the copy past the end) */
+				if (r > (int64_t)want) {
+					r = (int64_t)want;
+				}
 				memcpy(dest + got, usb_rx_buf, (size_t)r);
+				if (!to_ramdisk && !magic_taken && got + (uint64_t)r >= 4) {
+					magic_held = *(volatile uint32_t *)dest;
+					*(volatile uint32_t *)dest = 0;
+					magic_taken = 1;
+				}
 				got += (uint64_t)r;
 			}
 			if (got == total) {
+				if (magic_taken) {
+					*(volatile uint32_t *)dest = magic_held;
+				}
 				if (to_ramdisk) {
 					resident_rd_size = total;
 				}
@@ -3777,7 +3924,7 @@ fb_command(char *cmd)
 			print_memory_map();
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "oem log")) {
-			if (busy) {
+			if (busy && running_live != NULL) {
 				compose_live_log(running_live, running_slide);
 			} else {
 				compose_logs(NULL, 0);
@@ -4042,11 +4189,15 @@ payload_kernel_version(void)
 	if (ph->magic != PAYLOAD_MAGIC) {
 		return NULL;
 	}
-	const uint8_t *p = (const uint8_t *)(ph + 1), *pend = p + ph->size;
+	/* (the same limits as parse_payload: a header size or an entry size that reaches past the payload ends the walk) */
+	const uint8_t *p = (const uint8_t *)(ph + 1), *pend = p + payload_walk_size(ph->size);
 	while (p + sizeof(struct payload_entry) <= pend) {
 		const struct payload_entry *e = (const struct payload_entry *)p;
 
 		if (e->name[0] == 0) {
+			break;
+		}
+		if ((uint64_t)e->size > (uint64_t)(pend - (p + sizeof(*e)))) {
 			break;
 		}
 		if (str_eq(e->name, "kernel.ver")) {

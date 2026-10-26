@@ -452,13 +452,18 @@ ufs_read_mailbox(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
 	static uint8_t *bounce;
 	int error = 0;
 
+	lck_mtx_lock(&ufs_lock);
+	/*
+	 * Allocated under the lock: two first readers at once would both allocate (one 4 MB leak),
+	 * and one could copy out of a buffer the other has just replaced and never filled.
+	 */
 	if (bounce == NULL) {
 		bounce = kalloc_data(ufs_buffer_size, Z_WAITOK);
 		if (bounce == NULL) {
+			lck_mtx_unlock(&ufs_lock);
 			return ENOMEM;
 		}
 	}
-	lck_mtx_lock(&ufs_lock);
 	if (ufshc_list_in()) {
 		/* this kernel's own transfer list is in the controller: UEFI's driver must not be asked to ring */
 		if (ufs_mailbox_refused++ < 4) {
@@ -533,6 +538,16 @@ ufs_native_out(const char *why)
 static int
 ufs_read(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
 {
+	/*
+	 * No read leaves its partition on the native path either (the loader's path refuses it already):
+	 * a short partition would otherwise be read together with the one that follows it. Written
+	 * without a sum that can wrap.
+	 */
+	uint64_t part_size = ufs_part_bytes(part);
+
+	if (offset > part_size || len > part_size - offset) {
+		return EINVAL;
+	}
 	if (ufs_native_on && ufs_lun[part] != 0xff) {
 		int error = ufs_read_native(part, offset, dst, len);
 
@@ -1091,7 +1106,8 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
 	if (len == 0) {
 		return 0;
 	}
-	if (offset + len > ufs_part_bytes(part)) {
+	/* (written without a sum: offset + len wraps for an offset near 2^64) */
+	if (offset > ufs_part_bytes(part) || len > ufs_part_bytes(part) - offset) {
 		return EINVAL;
 	}
 	return ufs_read(part, offset, dst, len);
@@ -1281,6 +1297,18 @@ ufs_native_check(void)
 	ufs_cmp_y = kalloc_data(UFS_CMP_BUFFER, Z_WAITOK);
 	if (h == NULL || ufs_cmp_x == NULL || ufs_cmp_y == NULL) {
 		printf("ufs: native check: no memory\n");
+		/* what was got is given back: the early return would leak it */
+		if (h != NULL) {
+			kfree_data(h, 4096);
+		}
+		if (ufs_cmp_x != NULL) {
+			kfree_data(ufs_cmp_x, UFS_CMP_BUFFER);
+			ufs_cmp_x = NULL;
+		}
+		if (ufs_cmp_y != NULL) {
+			kfree_data(ufs_cmp_y, UFS_CMP_BUFFER);
+			ufs_cmp_y = NULL;
+		}
 		return;
 	}
 	printf("ufs: native check: through the loader and through this kernel's own driver, compared\n");
@@ -1304,7 +1332,12 @@ ufs_native_check(void)
 		table = (count * size + 4095) / 4096;
 		want = *(uint32_t *)(h + 16);
 		*(uint32_t *)(h + 16) = 0;
-		got = crc32(0, h, *(uint32_t *)(h + 12));
+		/* the header size comes from the flash: crc32 over more than the 4096 bytes read would run off the buffer */
+		if (*(uint32_t *)(h + 12) >= 92 && *(uint32_t *)(h + 12) <= 4096) {
+			got = crc32(0, h, *(uint32_t *)(h + 12));
+		} else {
+			got = ~want;                    /* (reported as WRONG below) */
+		}
 		printf("ufs: native check: %s (LUN %u): GPT header crc %s (%x), table at block %llu, %llu entries of %llu bytes, "
 		    "backup header at block %llu\n", e->name, ufs_lun[i], got == want ? "right" : "WRONG", got, entries_lba, count,
 		    size, alt);

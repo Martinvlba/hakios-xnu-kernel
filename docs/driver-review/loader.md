@@ -312,3 +312,20 @@ Device tree
   the assembly (loader_save_ctx, return stubs, other_cpu_entry), the watchdog SMC code and the exception hook. Only skimmed or not read.
 - The ufs_survey/ufs_check_gpt/ufs_dump_super diagnostics read flash-controlled GPT/liblp data; I looked at their size arithmetic (all reads stay inside the 1 MiB ufs_buffer) but did not audit them line by line.
 - docs/ and Makefile/qemu scripts beyond what is quoted above; tools/darwin-write.py (the build side of the darwin identity constants).
+
+## Fix status
+
+Each finding was re-read in the current tree first. Nothing was built or run; edits were re-read for syntax only. All edits are in `xnuloader/loader.c`. The write guard (`block_is_darwin`, the write branch of `block_poll`, the `ufs_write=` parse) was not touched.
+
+- L1: FIXED. New `run_active` flag, set for the whole of `run_on_other_cpu()`. `fb_command` (`busy`) and `usb_wait` (the 3 s give-up) use it; `oem stop` and `oem log` still need `running_live != NULL` for the live block itself.
+- L2: ALREADY FIXED (the header's magic is zeroed before the pages are freed in `load_payload_from_volume`).
+- L3: ALREADY FIXED (the volume load now claims the whole 64 MiB region).
+- L4: FIXED, in part. `payload_walk_size()` caps the header's size at what the region holds; `parse_payload` refuses a payload (returns 0, one message) whose entry claims more than is left, and `payload_kernel_version` stops the walk there; so the 32-bit rounding cannot wrap and the ramdisk copy cannot read past the payload. SKIPPED: the check that text entries hold a NUL (mkpayload.py always writes one, and the entry-size bound limits the over-read).
+- L5: FIXED. `parse_payload` records `kernel_size`; `run_kernel` now refuses a kernel whose `sizeofcmds` exceeds it, a load command shorter than its header or past `sizeofcmds` (also stops a `cmdsize` of 0), a segment whose `vmaddr + vmsize` wraps, whose `filesize > vmsize` or whose file range leaves the kernel entry, a `vm_hi` more than `MAX_MEM_SIZE` past the virtual base, and an LC_UNIXTHREAD too short to hold pc.
+- L6: FIXED. An `rdres` larger than the window above `RESIDENT_RD_OFFSET` is refused before it is stored (not the 768 MiB `RESIDENT_RD_RESERVE` of the `download:` path: that would reject setups the room check accepts today).
+- L7: FIXED. `dt_writer` has an `end` (`dt_pa + dt_max`) and an `overflow` flag: `dt_prop` and `dt_begin` write nothing that does not fit (and refuse a name over 32 bytes), `run_kernel` prints "device tree does not fit" and returns 0 instead of handing the kernel a tree that overwrote boot_args.
+- L8: FIXED, in part. The `download:` limit in ramdisk mode is capped at 0xffffffff (the reply carries 32 bits), and the received count `r` is clamped to `want`. SKIPPED: advertising the real limit in `getvar:max-download-size`.
+- L9: FIXED, two of three. `oem ramdisk none` clears `download_to_ramdisk`; a `download:` over the payload takes the XNUP magic out as soon as it arrives and puts it back only when the whole file is in, so a failed transfer leaves no payload instead of a mix. SKIPPED: the `kernel_may_be_alive` flag after OTHER_CPU_HUNG (a design change in what the loader accepts after a hang).
+- L10: FIXED. `hc_requested`, `block_probe_requested` and `block_enabled` are reset at the start of each run, next to the existing `block_write_requested` reset.
+- L11: FIXED. `BS->free_pool(handles)` after every `locate_handle_buffer` use: `find_log_partition` (both exits), `ufs_survey` (both calls), `block_start` (both calls).
+- L12: SKIPPED. The fix changes the bound check that gates both the read and the write branch of `block_poll`, which is the write guard's function; the report finds the guard itself sound, so it is left as it is.

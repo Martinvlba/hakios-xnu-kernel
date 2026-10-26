@@ -190,6 +190,11 @@ blk_read(struct blk_device *d, uint64_t offset, void *data, size_t len)
 	}
 
 	lck_mtx_lock(&d->lock);
+	/* a request that waited for the lock while an earlier one timed out must not start on a queue left in that state */
+	if (!blk_ready) {
+		lck_mtx_unlock(&d->lock);
+		return ENXIO;
+	}
 
 	d->hdr->type = VIRTIO_BLK_T_IN;
 	d->hdr->reserved = 0;
@@ -247,6 +252,12 @@ blk_read(struct blk_device *d, uint64_t offset, void *data, size_t len)
 		if (mach_absolute_time() > deadline) {
 			printf("virtio-blk: a read of %lu bytes at %llu went unanswered\n",
 			    (unsigned long)len, offset);
+			/*
+			 * The request stays published on the queue and the caller may reuse its buffer: a late
+			 * answer would land in it, and the next request would take this stale completion as
+			 * its own. So the device is off from now on.
+			 */
+			blk_ready = false;
 			lck_mtx_unlock(&d->lock);
 			return EIO;
 		}
