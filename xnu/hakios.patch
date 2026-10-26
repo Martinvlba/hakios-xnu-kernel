@@ -62,10 +62,10 @@ index a4d25040f38f..aad72993d139 100644
  kern_debug.o_INCFLAGS += -I$(SRCROOT)/osfmk
  
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..be702e28890d 100644
+index 44274016a4cf..711845d36f49 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,41 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,42 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -87,6 +87,7 @@ index 44274016a4cf..be702e28890d 100644
 +bsd/dev/hakios.virtio_sound.c	standard
 +bsd/dev/hakios.speaker.c	standard
 +bsd/dev/hakios.guard.c		standard
++bsd/dev/hakios.version.c	standard
 +bsd/dev/hakios.haptic.c		standard
 +bsd/dev/hakios.torch.c		standard
 +bsd/dev/hakios.camera.c	standard
@@ -107,7 +108,7 @@ index 44274016a4cf..be702e28890d 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +190,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +191,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -122,7 +123,7 @@ index 44274016a4cf..be702e28890d 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +404,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +405,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -130,7 +131,7 @@ index 44274016a4cf..be702e28890d 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +427,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +428,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -357,10 +358,10 @@ index 3e6bffa8c48e..43cffb98bdcc 100644
  mdevremoveall(void)
  {
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index 4df41ba1f61b..4a6e0ccfc590 100644
+index 4df41ba1f61b..b5a79a02a3f5 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -147,6 +147,13 @@
+@@ -147,6 +147,14 @@
  #include <net/if_ether.h>               /* for ether_family_init() */
  #include <net/if_gif.h>                 /* for gif_init() */
  #include <miscfs/devfs/devfsdefs.h>     /* for devfs_kernel_mount() */
@@ -368,13 +369,14 @@ index 4df41ba1f61b..4a6e0ccfc590 100644
 +#include <sys/hakios.audio.h>
 +#include <sys/hakios.virtio_blk.h>
 +#include <sys/hakios.sparse.h>
++#include <sys/hakios.version.h>
 +#if APFS
 +#include <sys/hakios.apfs_check.h>
 +#endif
  #include <vm/vm_kern.h>                 /* for kmem_suballoc() */
  #include <sys/proc_uuid_policy.h>       /* proc_uuid_policy_init() */
  #include <netinet/flow_divert.h>        /* flow_divert_init() */
-@@ -490,7 +497,7 @@ bsd_init(void)
+@@ -490,7 +498,7 @@ bsd_init(void)
  	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_BSD_INIT);
  #endif
  
@@ -383,10 +385,11 @@ index 4df41ba1f61b..4a6e0ccfc590 100644
  
  #if DEBUG_BSDINIT
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
-@@ -976,6 +983,14 @@ bsd_init(void)
+@@ -976,6 +984,15 @@ bsd_init(void)
  
  		bsd_init_kprintf("calling devfs_kernel_mount\n");
  		devfs_kernel_mount(mounthere);
++		hakios_version_init();         /* kern.hakios.version, and the version in the boot log */
 +		hakios_input_init();           /* /dev/hakios-touch */
 +		hakios_audio_init();           /* /dev/hakios-audio */
 +		hakios_virtio_blk_init();      /* /dev/rvblk0, a disk image of the host (QEMU) */

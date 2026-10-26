@@ -19,11 +19,27 @@ syscall3(long num, long a, long b, long c)
 	return x0;
 }
 
+/* the same with six arguments, for sysctlbyname(name, namelen, old, &oldlen, new, newlen) */
+static long
+syscall6(long num, long a, long b, long c, long d, long e, long f)
+{
+	register long x16 __asm__("x16") = num;
+	register long x0 __asm__("x0") = a;
+	register long x1 __asm__("x1") = b;
+	register long x2 __asm__("x2") = c;
+	register long x3 __asm__("x3") = d;
+	register long x4 __asm__("x4") = e;
+	register long x5 __asm__("x5") = f;
+	__asm__ volatile ("svc #0x80" : "+r" (x0) : "r" (x16), "r" (x1), "r" (x2), "r" (x3), "r" (x4), "r" (x5) : "memory", "cc");
+	return x0;
+}
+
 #define SYS_exit    1
 #define SYS_write   4
 #define SYS_open    5
 #define SYS_getpid  20
 #define SYS_getuid  24
+#define SYS_sysctlbyname 274
 #define O_RDWR      2
 
 static unsigned
@@ -68,6 +84,20 @@ start(void)
 	put(fd, ", console fd ");
 	put_number(fd, fd);
 	put(fd, ".\n");
+
+	/*
+	 * The kernel's own version: sysctl kern.hakios.version, which the loader gave the kernel on its command line
+	 * (hakios_kver, from the payload's kernel.ver). The same string the banner shows under hello hackios-kernel!
+	 */
+	{
+		char version[96];
+		u64 size = sizeof(version);
+		long failed = syscall6(SYS_sysctlbyname, (long)"kern.hakios.version", 19, (long)version, (long)&size, 0, 0);
+
+		put(fd, "kernel.ver=");
+		put(fd, failed ? "(sysctl kern.hakios.version not available)" : version);
+		put(fd, "\n");
+	}
 
 	/* Process 1 is not supposed to exit; doing so panics the kernel, which ends the test run. */
 	syscall3(SYS_exit, 0, 0, 0);
