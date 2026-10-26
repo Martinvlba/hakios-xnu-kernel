@@ -14,6 +14,8 @@
 #   make prebuilt        refresh prebuilt/ from what was built (tools/update-prebuilt.sh)
 #   make clean           build output of the kernel, loader and images
 #   make doctor          check this machine and a phone on adb for what HakiOS needs (tools/doctor.sh)
+#   make esp             an EFI system partition tree in build/esp: the loader and a payload it reads itself,
+#                        to copy to a FAT32 volume (UEFI-native boot, no fastboot; docs/uefi-boot.md)
 #
 # Configuration, the way Linux's make does it (configs/, tools/hakios-config.py; docs/configs.md):
 #   make redwood_defconfig   .config from configs/defconfig + configs/redwood_defconfig (any NAME_defconfig)
@@ -42,8 +44,10 @@ ARGS ?= touchscreen=1 gpu=1 adsp=1 sound=4 wifi=1 haptic=5 modem=1 modem_again=1
 RUNNER_BASE =
 endif
 IMAGE_OPTS ?= REST=1
+ESP_DIR ?= build/esp
+PAYLOAD ?= qemu/payload.bin
 
-.PHONY: help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig
+.PHONY: help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig esp
 
 help:
 	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
@@ -97,6 +101,12 @@ qemu-open: kernel loader-open hello
 phone:
 	[ ! -f .config ] || tools/hakios-config.py check
 	XL_SB_DELAY=8 $(RUNNER_BASE) tools/modem-cycle.sh "$(ARGS)" $(SECS)
+
+# The loader and a payload (make qemu-open makes qemu/payload.bin; xnuloader/mkpayload.py makes any other) as the files an
+# EFI system partition holds, which the loader reads itself: UEFI-native boot. The default tree is made again each time.
+esp:
+	[ "$(ESP_DIR)" != build/esp ] || rm -rf build/esp
+	tools/mkesp.py $(ESP_DIR) $(PAYLOAD)
 
 # ---- configuration (configs/, tools/hakios-config.py) ---------------------------------------------------------
 defconfig:

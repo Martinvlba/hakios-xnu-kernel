@@ -173,6 +173,39 @@ typedef struct efi_block_io {
 	efi_status (EFIAPI *flush_blocks)(struct efi_block_io *self);
 } efi_block_io;
 
+/*
+ * Loaded Image, Simple File System and File: how a UEFI application finds a file on the volume it was started
+ * from. The loader uses them to read its payload (the kernel and the small root image) from \EFI\hakios\payload.bin
+ * when none was put in memory for it: the ordinary way a UEFI boot loader boots, from the EFI system partition.
+ * Slots that are not used are void pointers, so that the layouts match the UEFI specification.
+ */
+typedef struct {
+	uint32_t revision; uint32_t pad;
+	efi_handle parent;
+	void *system_table;
+	efi_handle device;                      /* the device the image was loaded from: the volume to look on */
+} efi_loaded_image;                             /* (the specification goes on; nothing more is read) */
+
+typedef struct efi_file {
+	uint64_t revision;
+	efi_status (EFIAPI *open)(struct efi_file *self, struct efi_file **file, const char16 *name, uint64_t mode, uint64_t attributes);
+	efi_status (EFIAPI *close)(struct efi_file *self);
+	void *remove;
+	efi_status (EFIAPI *read)(struct efi_file *self, uint64_t *size, void *buffer);
+	void *write, *get_position, *set_position;
+	efi_status (EFIAPI *get_info)(struct efi_file *self, const efi_guid *type, uint64_t *size, void *buffer);
+	void *set_info, *flush;
+} efi_file;
+
+typedef struct efi_simple_fs {
+	uint64_t revision;
+	efi_status (EFIAPI *open_volume)(struct efi_simple_fs *self, efi_file **root);
+} efi_simple_fs;
+
+#define EFI_FILE_MODE_READ      1ULL
+/* EFI_FILE_INFO: a size, then the file's size at offset 8 (the rest -- times, attributes, the name -- is not read) */
+#define EFI_FILE_INFO_FILE_SIZE_OFFSET 8
+
 /* Block I/O 2: the same reads, asynchronous -- a token's event is signalled when one is done */
 typedef struct {
 	void *event;
@@ -255,6 +288,9 @@ typedef struct {
 #define EFI_BLOCK_IO_GUID       { 0x964e5b21, 0x6459, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
 #define EFI_BLOCK_IO2_GUID      { 0xa77b2472, 0xe282, 0x4e9f, { 0xa2, 0x45, 0xc2, 0xc0, 0xe2, 0x7b, 0xbc, 0xc1 } }
 #define EFI_DEVICE_PATH_GUID    { 0x09576e91, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
+#define EFI_LOADED_IMAGE_GUID   { 0x5b1b31a1, 0x9562, 0x11d2, { 0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
+#define EFI_SIMPLE_FILE_SYSTEM_GUID { 0x964e5b22, 0x6459, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
+#define EFI_FILE_INFO_GUID      { 0x09576e92, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
 #define EFI_PARTITION_INFO_GUID { 0x8cf2f62c, 0xbc9b, 0x4821, { 0x80, 0x8d, 0xec, 0x9e, 0xc4, 0x21, 0xa1, 0xa0 } }
 #define QCOM_CHARGER_EX_GUID     { 0x6edc8a6d, 0x2663, 0x43cd, { 0x90, 0xff, 0x46, 0x21, 0xff, 0xd1, 0x0d, 0xf5 } }
 #define QCOM_CHARGER_GUID        { 0x21bfb78b, 0x02ea, 0x4ab7, { 0x99, 0x40, 0xb5, 0x8a, 0x2a, 0xd6, 0x58, 0x29 } }

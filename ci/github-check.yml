@@ -29,6 +29,8 @@ jobs:
         run: bash tools/soc-only-changes-test.sh
       - name: Configurations - defconfigs, fragments, the arguments made from them
         run: python3 tools/hakios-config-test.py
+      - name: The EFI system partition tree is laid out as the loader looks for it
+        run: python3 tools/mkesp-test.py
       - name: The kernel's version string is made as it should be
         run: python3 tools/kernel-version-test.py
       - name: The kernel patch applies to Apple's tree

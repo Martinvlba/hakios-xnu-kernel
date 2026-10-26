@@ -3939,6 +3939,89 @@ ramfb_phone_screen(void)
 }
 
 /*
+ * UEFI-native boot: a payload from the volume the loader was started from.
+ *
+ * On the phone the payload (the kernel, the small root image, the command line) is put in memory at PAYLOAD_BASE
+ * before the loader runs: by the boot shim behind Project Silicium's image (fastboot boot), or by QEMU's loader
+ * device. This is the other way, the one every UEFI boot loader has: when there is no payload in memory, look for
+ * \EFI\hakios\payload.bin on the volume this image was loaded from (the EFI system partition, where
+ * \EFI\BOOT\BOOTAA64.EFI is the loader itself), read it to PAYLOAD_BASE and go on as if it had been there all along.
+ * That is what lets the kernel start from a boot menu, a USB stick or an SD card, without fastboot.
+ *
+ * It prints nothing (the banner has not been drawn yet): volume_payload_bytes and volume_payload_note say what
+ * happened, and efi_main says it under the banner. The file has to fit in the payload region (less the last MiB,
+ * which holds the panic log), and the region has to be free: where a firmware keeps it reserved, the allocation is
+ * refused and the loader goes on without a payload, as it always did.
+ * Only the kernel and a root image that fits in the payload come this way; the big iOS system image does not
+ * (docs/uefi-boot.md says what does).
+ */
+static uint64_t volume_payload_bytes;           /* 0: nothing was read; else the payload's size */
+static const char *volume_payload_note;         /* why not, if it was looked for */
+
+static int
+load_payload_from_volume(void)
+{
+	static const efi_guid image_guid = EFI_LOADED_IMAGE_GUID, fs_guid = EFI_SIMPLE_FILE_SYSTEM_GUID,
+	    info_guid = EFI_FILE_INFO_GUID;
+	static const char16 path[] = u"\\EFI\\hakios\\payload.bin";
+	efi_loaded_image *image = NULL;
+	efi_simple_fs *fs = NULL;
+	efi_file *root = NULL, *file = NULL;
+	uint8_t info[512] __attribute__((aligned(8)));
+	uint64_t info_size = sizeof(info), size, done = 0, pages;
+	uint64_t address = PAYLOAD_BASE;
+
+	if (EFI_ERROR(BS->handle_protocol(IMAGE, &image_guid, (void **)&image)) || image == NULL || image->device == NULL ||
+	    EFI_ERROR(BS->handle_protocol(image->device, &fs_guid, (void **)&fs)) || fs == NULL) {
+		volume_payload_note = "the loader was not started from a volume with a file system";
+		return 0;
+	}
+	if (EFI_ERROR(fs->open_volume(fs, &root)) || root == NULL) {
+		volume_payload_note = "the volume cannot be opened";
+		return 0;
+	}
+	if (EFI_ERROR(root->open(root, &file, path, EFI_FILE_MODE_READ, 0)) || file == NULL) {
+		volume_payload_note = "there is no \\EFI\\hakios\\payload.bin on the volume";
+		root->close(root);
+		return 0;
+	}
+	if (EFI_ERROR(file->get_info(file, &info_guid, &info_size, info))) {
+		volume_payload_note = "the size of \\EFI\\hakios\\payload.bin cannot be read";
+		goto close;
+	}
+	size = *(uint64_t *)(info + EFI_FILE_INFO_FILE_SIZE_OFFSET);
+	if (size < sizeof(struct payload_header) || size > PAYLOAD_MAX_SIZE - 0x100000ULL) {
+		volume_payload_note = "\\EFI\\hakios\\payload.bin is empty or does not fit in the payload region (63 MiB)";
+		goto close;
+	}
+	pages = (size + 0xfff) / 0x1000;
+	if (EFI_ERROR(BS->allocate_pages(2 /* AllocateAddress */, 2 /* EfiLoaderData */, pages, &address))) {
+		volume_payload_note = "the payload region is not free (the firmware keeps it reserved)";
+		goto close;
+	}
+	while (done < size) {
+		uint64_t chunk = size - done < 0x100000ULL ? size - done : 0x100000ULL;       /* 1 MiB at a time */
+
+		if (EFI_ERROR(file->read(file, &chunk, (void *)(uintptr_t)(PAYLOAD_BASE + done))) || chunk == 0) {
+			volume_payload_note = "\\EFI\\hakios\\payload.bin could not be read to its end";
+			BS->free_pages(PAYLOAD_BASE, pages);
+			goto close;
+		}
+		done += chunk;
+	}
+	if (((const struct payload_header *)PAYLOAD_BASE)->magic != PAYLOAD_MAGIC) {
+		volume_payload_note = "\\EFI\\hakios\\payload.bin is not a payload (no XNUP at its start)";
+		BS->free_pages(PAYLOAD_BASE, pages);
+		goto close;
+	}
+	volume_payload_bytes = size;
+close:
+	file->close(file);
+	root->close(root);
+	return volume_payload_bytes != 0;
+}
+
+/*
  * The version of the kernel in the payload (the entry kernel.ver, made by xnuloader/mkpayload.py from
  * tools/kernel-version.py), or NULL if the payload has none. A look at the payload that changes
  * nothing and prints nothing, so that the banner can use it before the rest of the loader runs.
@@ -4001,8 +4084,18 @@ efi_main(efi_handle image, efi_system_table *st)
 	IMAGE = image;
 
 	BS->set_watchdog_timer(0, 0, 0, NULL);
+	/* no payload in memory (nobody put one there): the volume this loader came from may have one, as a UEFI boot loader's does */
+	if (((const struct payload_header *)PAYLOAD_BASE)->magic != PAYLOAD_MAGIC) {
+		load_payload_from_volume();
+	}
 	print("== XNULOADER v3 ==\n");
 	print_banner();
+	if (volume_payload_bytes != 0) {
+		print("payload: %d bytes from \\EFI\\hakios\\payload.bin on the volume this loader was started from\n",
+		    volume_payload_bytes);
+	} else if (volume_payload_note != NULL) {
+		print("payload: none in memory, and %s\n", volume_payload_note);
+	}
 	print("CurrentEL=%x MIDR=%x MMFR0=%x CNTFRQ=%d image=%x\n", READ_SYSREG(CurrentEL) >> 2, READ_SYSREG(MIDR_EL1),
 	    READ_SYSREG(ID_AA64MMFR0_EL1), READ_SYSREG(CNTFRQ_EL0), (uint64_t)(uintptr_t)&__ImageBase);
 
