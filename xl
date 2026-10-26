@@ -27,6 +27,8 @@
 #   XL_CMDLINE  extra kernel boot-args; default "-v": the boot is shown as text on the phone's screen
 #               (XL_CMDLINE="" for a blank screen, XL_CMDLINE="-v systrace=1" to trace failing syscalls)
 #   XL_SECS     seconds after which the kernel returns to the loader on its own (default 8)
+#   XL_REBOOT_AFTER=1  when the run is over, send the phone back to Android (it charges there; in the loader it does not,
+#               and its screen stays on: a phone left in the loader overnight is a flat one by morning)
 #   XL_SB_DELAY seconds SpringBoard waits before it starts (default 8; see userland/src/inject_sb.c)
 #               Among XL_CMDLINE, for the phone: bootcpu=7 runs the kernel on the biggest core instead of
 #               the small one the firmware starts on (the loader then watches from the first core, and a
@@ -183,6 +185,12 @@ run() { # run <oem command> <label>
 		fb reboot >/dev/null
 		return 2 ;;
 	esac
+	# XL_REBOOT_AFTER=1: the run is over and the phone goes back to Android, which charges it. A phone left in the loader
+	# keeps its screen on and charges nothing, so a battery is flat by morning; for a run nobody waits for.
+	if [ -n "$XL_REBOOT_AFTER" ]; then
+		echo "xl: XL_REBOOT_AFTER: the phone goes back to Android (it charges there)"
+		fb reboot >/dev/null
+	fi
 }
 
 recording() { # recording [file.mp4]
