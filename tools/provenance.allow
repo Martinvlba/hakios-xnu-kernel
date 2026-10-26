@@ -23,5 +23,9 @@ pending  xnu/files/bsd/dev/hakios.focaltech_fw.h   FocalTech's firmware as a C a
 vendor   devices/poco-x5-pro/uefi/files/Binaries/redwood/*       UEFI drivers extracted from the vendor's xbl firmware (QcomPkg, MiPkg, RawFiles and the EDK2 modules as the vendor built them)
 vendor   devices/poco-x5-pro/prebuilt/SILICIUM_UEFI.fd           the built UEFI image: carries those drivers
 
-# --- scripts that may write to the phone's storage -----------------------------------------------------------
-flash    tools/userdata-carve.py                  prints the dd commands that cut the `darwin` partition off the end of Android's userdata (a new GPT); a person runs them once, by hand, under Android, and only for ufs_write=1 / var_store=1 persistence; the default run writes nothing
+# --- everything that can write to the phone's storage: a short list, each limited in code --------------------
+# (the default run writes one thing: the loader's own log into the phone's logdump partition)
+flash    xnuloader/loader.c                       the loader writes its own log (a few KB) into the phone's `logdump` partition at the end of a run and, only with ufs_write=1, into the partition `darwin` from BLOCK_WRITE_FIRST on; it REFUSES every other write (BLOCK_OP_WRITE: "not darwin ... never")
+flash    xnu/files/bsd/dev/hakios.ufs.c           the kernel's side: no write at all without ufs_write=1, then only /dev/rufs_darwin, whole blocks from UFS_WRITE_FIRST on, and one writer at a time
+flash    tools/darwin-write.py                    writes an image into `darwin` from Android (adb, root) after checking the GPT, the partition's identity and the block range, only to /dev/block/by-name/darwin, reading every write back; every attempt is logged
+flash    tools/userdata-carve.py                  prints the dd commands that cut the `darwin` partition off the end of Android's userdata (a new GPT); a person runs them once, by hand, under Android, and only for the optional persistence; the default run needs no such partition

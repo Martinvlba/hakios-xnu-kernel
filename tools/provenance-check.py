@@ -46,6 +46,10 @@ HEX_LINES_LIMIT = 200
 FLASHY = re.compile(r"fastboot\s+(flash|erase|format|flashing|oem\s+unlock|oem\s+lock|set_active)\b|"
                     r"\bdd\s+[^|;&\n]*of=/dev/(block|mmcblk|sd[a-z]|nvme)|\bmke2fs\b.*\b/dev/|"
                     r"\badb\s+(shell\s+)?(su\s+-c\s+)?['\"]?(flash_image|erase_image|blkdiscard)")
+# ... and in C: the loader's write to a block device, and the kernel's UFS driver's. Both are limited in code to
+# the partitions named in the `flash` lines of tools/provenance.allow, and both are declared there.
+FLASHY_C = re.compile(r"\bwrite_blocks\s*\(|\bBLOCK_OP_WRITE\b")
+C_WRITERS = re.compile(r"^(xnuloader/[^/]+|xnu/files/bsd/dev/hakios\.ufs[^/]*)\.c$")
 SCRIPT_DIRS = ("tools/", "devices/", "qemu/", "sysimage/", "xnuloader/", "userland/build.sh")
 SCRIPT_FILES = ("xl", "Makefile", "xnu-build.sh")
 # this file and the doctor mention these commands in order to look for them
@@ -139,16 +143,17 @@ def main():
                 problems.append("%s: %s -- marked vendor (proprietary): remove it from the tree" % (path, why))
             elif status == "pending":
                 warnings.append("%s: %s -- pending: %s" % (path, why, reason))
-        # scripts that would write to the phone's flash
-        if path not in SKIP_SCAN and (path in SCRIPT_FILES or path.startswith(SCRIPT_DIRS)) and \
-                path.endswith((".sh", ".py", "xl", "Makefile")):
+        # scripts, and C code of the loader and the UFS driver, that would write to the phone's storage
+        scan_c = bool(C_WRITERS.match(path))
+        is_script = (path in SCRIPT_FILES or path.startswith(SCRIPT_DIRS)) and path.endswith((".sh", ".py", "xl", "Makefile"))
+        if path not in SKIP_SCAN and (scan_c or is_script):
             try:
                 text = open(full, "r", errors="replace").read()
             except OSError:
                 continue
             for n, line in enumerate(text.splitlines(), 1):
                 code = line.split("#", 1)[0] if path.endswith((".sh", "xl", "Makefile")) else line
-                found = FLASHY.search(code)
+                found = (FLASHY_C if scan_c else FLASHY).search(code)
                 if not found:
                     continue
                 hit = match(rules, path, flash=True)
@@ -164,6 +169,14 @@ def main():
                                     % (path, hit[1]))
                 break
 
+    # a declared writer is a statement about a file, so it is listed even if no pattern fired in it today
+    for status, glob, reason, _ in rules:
+        if status == "flash":
+            for p in files:
+                if fnmatch.fnmatchcase(p, glob) and p not in used:
+                    used.add(p)
+                    explained.append((p, "declared writer to the phone's storage", "flash", reason,
+                                      os.path.getsize(os.path.join(root, p))))
     # an entry that matches nothing has gone stale: a rule for a file that left the tree is clutter that
     # would explain a file that comes back
     # (a `vendor` line is a tripwire: it stays after the files are gone, so that putting them back fails)

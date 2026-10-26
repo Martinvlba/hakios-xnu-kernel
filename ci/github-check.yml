@@ -23,11 +23,8 @@ jobs:
           # (This replaces two lines of the form `! git ls-files | grep ...`: bash -e does not stop on
           # a negated pipeline, so the first of them could never fail, and a committed screenshot passed.)
           python3 tools/provenance-check.py
-      - name: The provenance check itself catches what it should
-        run: |
-          d=$(mktemp -d); git init -q "$d"; cp tools/provenance-check.py "$d/"; mkdir "$d/tools"; mv "$d/provenance-check.py" "$d/tools/"; : > "$d/tools/provenance.allow"
-          printf '\x89PNG\r\n\x1a\nx' > "$d/shot.png"; git -C "$d" add -A
-          if python3 "$d/tools/provenance-check.py" >/dev/null; then echo "a screenshot got through the provenance check"; exit 1; fi
+      - name: The provenance check itself: what it lets through and what it stops
+        run: python3 tools/provenance-test.py
       - name: The kernel patch applies to Apple's tree
         run: |
           git clone -q --depth 1 --branch xnu-8796.121.2 https://github.com/apple-oss-distributions/xnu.git /tmp/xnu
