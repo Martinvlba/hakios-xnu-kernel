@@ -3,6 +3,7 @@
 # is named here.
 /*
 !/.gitignore
+!/.gitattributes
 !/README.md
 !/CONTRIBUTING.md
 !/ci/

@@ -61,7 +61,27 @@ def u32(value, index=0):
     return struct.unpack_from('>I', value, index * 4)[0]
 
 
+def aoss_mailbox(nodes):
+    """The address of the AOSS QMP mailbox, which one phone's device tree describes in two ways.
+
+    A tree from a mainline-style kernel has a node whose compatible is qcom,<soc>-aoss-qmp (the
+    reference tree here: qcom,sm8350-aoss-qmp on /soc/power-controller@c300000). A tree from the
+    phone's own Android (vendor) kernel, which is what /sys/firmware/fdt gives on the phone, calls the
+    same hardware /soc/qcom,qmp-aop@c300000 with the compatible qcom,qmp-mbox; the reference tree
+    even has such a node as well, but without a reg. Both carry the same address. Only a node that
+    has a reg counts, and the mainline form is preferred when both are there."""
+    for path, props in nodes.items():
+        kinds = props.get('compatible', b'').split(b'\0')
+        if any(k.startswith(b'qcom,') and k.endswith(b'-aoss-qmp') for k in kinds) and len(props.get('reg', b'')) >= 4:
+            return u32(props['reg'], 0)
+    for path, props in nodes.items():
+        if path.rsplit('/', 1)[-1].split('@', 1)[0] == 'qcom,qmp-aop' and len(props.get('reg', b'')) >= 4:
+            return u32(props['reg'], 0)
+    return None
+
+
 def main():
+    sys.stdout.reconfigure(newline="\n")        # LF on Windows too: the output becomes a file of boot-args
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     nodes = nodes_of(open(sys.argv[1], 'rb').read())
@@ -80,7 +100,9 @@ def main():
             args.append((arg, u32(props['reg'], cell)))
 
     block('qcom,ipcc', 'soc_ipcc')                      # cell 0: the address
-    block('qcom,sm8350-aoss-qmp', 'soc_aoss')           # the AOSS mailbox (its compatible varies by SoC)
+    aoss = aoss_mailbox(nodes)                          # the AOSS mailbox: see aoss_mailbox() for the two ways it is described
+    if aoss is not None:
+        args.append(('soc_aoss', aoss))
     block('qcom,rpmh-rsc', 'soc_rsc', cell=4)           # drv-2 (the application processors') is the third addr/size pair (reg-names drv-0/1/2)
     _, smmu = find_named(nodes, 'apps-smmu')            # not by compatible: the GPU's SMMU shares qcom,qsmmu-v500
     if smmu and 'reg' in smmu:

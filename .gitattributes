@@ -1,0 +1,11 @@
+# Text is LF in the working tree on every platform. Git for Windows (core.autocrlf=true) otherwise
+# turns it into CRLF, which breaks things quietly: a shell script with CRs ("bash\r: No such file"),
+# and files of boot-arguments (devices/*/soc.args) whose lines are joined into the kernel's command
+# line with a CR left inside every value. Git tells text from binary by content, so nothing here has
+# to list the binaries.
+* text=auto eol=lf
+
+# A patch is not converted at all: the Mu-Silicium files it patches have CRLF line endings upstream, and
+# the context lines of its hunks carry them (BootManager.c, BootManagerLib.inf). Turning them into LF
+# would make the patch fail to apply.
+*.patch -text
