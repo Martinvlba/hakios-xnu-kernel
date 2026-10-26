@@ -363,7 +363,9 @@ ddr_look(void)
 			char name[9] = { 0 };
 
 			memcpy(name, entry[i].id, 8);
-			if (entry[i].length >= sizeof(aux) && slave->data_offset + entry[i].offset + sizeof(aux) < CMD_DB_SIZE - 0x40) {
+			/* (the data starts after the header, so the header counts: this keeps the read inside the mapped database) */
+			if (entry[i].length >= sizeof(aux) &&
+			    sizeof(*db) + slave->data_offset + entry[i].offset + sizeof(aux) <= CMD_DB_SIZE) {
 				memcpy(&aux, db->data + slave->data_offset + entry[i].offset, sizeof(aux));
 			}
 			tell("ddr: BCM %-8s at %#x: unit %u, width %u, vcd %u (aux %u bytes)\n", name, entry[i].address, aux.unit,
@@ -558,7 +560,7 @@ void
 hakios_cpufreq_init(void)
 {
 	const ml_topology_info_t *topology = ml_get_topology_info();
-	uint32_t enabled = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
+	uint32_t enabled = 0, membench = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
 
 	load_start();
 	enabled = 2;
@@ -585,9 +587,11 @@ hakios_cpufreq_init(void)
 		}
 	}
 	printf("cpufreq: on core %u a loop ran at %u, now at %u\n", here, before, loop_speed());
-	if (PE_parse_boot_argn("membench", &enabled, sizeof(enabled)) && enabled == 1) {
+	/* membench has its own variable: when the boot-arg is absent, the cpufreq value (2 means on) must not start the benchmark */
+	PE_parse_boot_argn("membench", &membench, sizeof(membench));
+	if (membench == 1) {
 		memory_bench();
-	} else if (enabled == 2) {
+	} else if (membench == 2) {
 		thread_t thread;
 
 		if (kernel_thread_start(bench_all, NULL, &thread) == KERN_SUCCESS) {

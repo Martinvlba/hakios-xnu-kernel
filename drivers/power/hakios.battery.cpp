@@ -115,7 +115,8 @@ family_code(int usb_type)
 void
 HakiosBattery::report(const struct hakios_battery_state * b)
 {
-	int percent = (b->percent_hundredths + 50) / 100;
+	/* (rounded in 64 bits: the DSP's value near INT32_MAX plus 50 would overflow an int) */
+	int percent = (int) (((int64_t) b->percent_hundredths + 50) / 100);
 	bool charging = b->external && b->status == 1;          /* POWER_SUPPLY_STATUS_CHARGING */
 
 	percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
@@ -127,7 +128,8 @@ HakiosBattery::report(const struct hakios_battery_state * b)
 	flag("AppleRawExternalConnected", b->external != 0);
 	setCurrentCapacity((unsigned) percent);
 	setMaxCapacity(100);
-	setVoltage((unsigned) (b->voltage_uv / 1000));
+	/* (a negative voltage from the DSP would become about 4 million mV as an unsigned number: 0 instead) */
+	setVoltage(b->voltage_uv > 0 ? (unsigned) (b->voltage_uv / 1000) : 0);
 	setAmperage(b->current_ua / 1000);
 	number("InstantAmperage", b->current_ua / 1000);
 	number("Temperature", b->temperature_hundredths);
@@ -222,7 +224,8 @@ HakiosBatteryReport(const void * state, unsigned size)
 		}
 		made->registerService();
 		battery = made;
-		IOLog("HakiosBattery: the battery's power source is up: %d%%, %s\n", (b->percent_hundredths + 50) / 100,
+		/* (64-bit rounding, as in report(): no signed overflow on a large value from the DSP) */
+		IOLog("HakiosBattery: the battery's power source is up: %d%%, %s\n", (int) (((int64_t) b->percent_hundredths + 50) / 100),
 		    b->external ? (b->status == 1 ? "charging" : "on a charger, not charging") : "not on a charger");
 		return;
 	}

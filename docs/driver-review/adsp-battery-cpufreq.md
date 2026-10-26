@@ -292,3 +292,25 @@ Memory-safety items traced and fine:
 - Hardware facts, all NEEDS-HARDWARE: that EPSS has 40 rows, its register layout, and thermal limiting of the top row (I found no software thermal path for the CPUs in these files); RPMh command timing and what clearing a TCS while a request is in flight does; whether `ml_io_map` returns NULL on failure (none of `smem`, `cmd_db`, `dsp_memory`, `ipcc.base` is checked for NULL); cache and WC-mapping coherence of the reserved DSP memory against the kernel's own linear map; TrustZone behaviour on a failed AUTH_AND_RESET (whether a PAS shutdown is needed).
 - The loader side of the battery cache (`xnuloader`) and the QEMU build.
 - Not built or run; all findings are from reading the code.
+
+## Fix status
+
+- F1: FIXED. adsp.c `glink_pump()`: the message length is worked out in 64 bits (`wide`) and checked against the queue before it is narrowed, so it cannot wrap to 0 and the loop always makes progress; an oversize message sets `glink.broken` as before.
+- F2: FIXED. adsp.c `smem_items()` (both loops): stop at an entry with `padding_data > size` or whose item ends beyond its partition; `glink_find()` and `glink_reset()`: descriptor and both queues must lie inside the SMEM window (64-bit sums).
+- F3: FIXED. adsp.c `apr_input()`: a packet whose size is below its header length is dropped before `payload` is computed.
+- F4: FIXED. adsp.c `qrtr_input()`: the check is now `at > length || header.size > length - at`.
+- F5: SKIPPED. A freshness limit or a "stale means unknown" value needs a policy decision, and the guard (`torch.c`, not one of my files) treats -273 as safe, so only a fail-closed change there would help. The signed overflow in the temperature rounding is fixed under F16.
+- F6: FIXED. adsp.c `mailbox_open()`: `box >= aoss.size || size > aoss.size - box` instead of `box + size > aoss.size`.
+- F7: (a) FIXED: on a file size mismatch the real allocation size is stored before the cleanup (`step_firmware()`); (c) FIXED: `size < 5` is tested before the `memcmp` and the log line prints from a bounded copy; (b) SKIPPED: PLAUSIBLE only, needs a per-file "came from the root" flag and knowledge of what `hakios_image_file()` returns.
+- F8: FIXED. adsp.c `our_item_find()` requires the item to end inside the SMEM window; the F2 fix also bounds the offset.
+- F9: FIXED. adsp.c `rails()` takes and drops `hakios_rsc_lock` only when `!leaving`, as `mailbox_send()` does.
+- F10: SKIPPED. Needs hardware knowledge (whether and where a `dmb ld` is needed on this Normal-NC mapping); report says NEEDS-HARDWARE.
+- F11: PARTLY FIXED. The intent buffers are given back in `link_stop()` and a buffer of another size is freed before it is replaced in `glink_offer()`. SKIPPED: the `step_header` page (when TrustZone is done with it is unknown). `step_image` is not a leak: the image is freed at the next `step_firmware()`.
+- F12: FIXED. adsp.c `apr_input()` publishes `apr_answer.there` with `os_atomic_store(..., release)` and `hakios_adsp_apr()` reads it with `os_atomic_load(..., acquire)`.
+- F13: FIXED. cpufreq.c `hakios_cpufreq_init()`: `membench` has its own variable, so `cpufreq=2` no longer starts the all-core benchmark.
+- F14: SKIPPED. PLAUSIBLE only (the effect on other boards is not shown), and a platform gate would silently turn cpufreq off if the SoC base value differed; the owner should decide.
+- F15: FIXED. cpufreq.c `ddr_look()`: the data read check now counts the header (`sizeof(*db) + ... <= CMD_DB_SIZE`). The dead `header_offset` checks (`ddr_look()`, `cmd_db_address()`) are harmless and left as they are.
+- F16: FIXED in part. The `+50` roundings are done in 64 bits (battery.c `hakios_battery_report()`, battery.cpp `report()` and the log line), and a negative voltage becomes 0 before the unsigned `setVoltage()`. SKIPPED: clamping current, voltage and temperature to plausible ranges (hardware knowledge) and the negative temperature in the unsigned OSNumber (whether powerd reads it as signed is unverified).
+- F17: FIXED. battery.c `hakios_battery_init()` rejects a `battery_shared_pa` whose struct would cross the end of the mapped page.
+- F18: SKIPPED. NEEDS-HARDWARE (effect of a stale IPCC enable bit).
+- S-13: FIXED. Same fix as F3 (adsp.c `apr_input()`): the packet is dropped when `header.size` is below the header length, and the copies are bounded by `min(header.size, length) - header_length`.

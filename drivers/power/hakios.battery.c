@@ -131,12 +131,14 @@ extern void HakiosBatteryReport(const void *state, unsigned size);     /* driver
 void
 hakios_battery_report(const struct hakios_battery_state *b)
 {
-	int percent = (b->percent_hundredths + 50) / 100;
+	/* (rounded in 64 bits: the DSP's value near INT32_MAX plus 50 would overflow an int, and a full battery would read 0%) */
+	int percent = (int)(((int64_t)b->percent_hundredths + 50) / 100);
 
 	battery_soc_percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
 	battery_voltage_mv = b->voltage_uv / 1000;
 	battery_current_ma = b->current_ua / 1000;
-	battery_temperature_c = (b->temperature_hundredths + 50) / 100;
+	/* (in 64 bits for the same reason: an overflow here would make a hot battery read as cold) */
+	battery_temperature_c = (int)(((int64_t)b->temperature_hundredths + 50) / 100);
 	battery_present = b->present != 0;
 	battery_charger_present = b->external != 0;
 	battery_charging = b->status == 1;      /* POWER_SUPPLY_STATUS_CHARGING */
@@ -183,6 +185,11 @@ hakios_battery_init(void)
 	if (!PE_parse_boot_argn("battery", &enabled, sizeof(enabled)) || !enabled) return;
 	if (!PE_parse_boot_argn("battery_shared_pa", &shared_pa, sizeof(shared_pa)) || shared_pa == 0) {
 		printf("battery: xnuloader did not provide battery_shared_pa\n");
+		return;
+	}
+	/* The cache must lie inside the one page that is mapped: an address near its end would be read past the mapping. */
+	if ((shared_pa & (LOADER_PAGE_SIZE - 1)) + sizeof(struct loader_battery) > LOADER_PAGE_SIZE) {
+		printf("battery: battery_shared_pa %#llx: the cache would cross the end of its page\n", shared_pa);
 		return;
 	}
 	page = ml_io_map((vm_offset_t)(shared_pa & ~(LOADER_PAGE_SIZE - 1)), LOADER_PAGE_SIZE);
