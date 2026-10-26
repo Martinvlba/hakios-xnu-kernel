@@ -1,0 +1,16 @@
+#!/bin/sh
+# flock for Git Bash on Windows, where util-linux's flock does not exist. xl (the loader driver)
+# wraps every fastboot call in `flock -w SECS LOCKFILE timeout SECS fastboot ...` so that two xl
+# invocations (a run in one terminal, a screenshot in another) take turns on the one USB channel.
+# Here one xl runs at a time, so the lock buys nothing: the lock options and the lock file are
+# dropped and the command is run as it is. To use it: PATH=$PWD/tools/win-bin:$PATH ./xl ...
+# (next to C:\platform-tools for fastboot and adb). Not for Linux or macOS, which have the real one.
+while [ $# -gt 0 ]; do
+	case $1 in
+	-w|-E|--timeout|--conflict-exit-code) shift 2 ;;	# an option that takes a value
+	-*) shift ;;						# -n -s -x -u -o and the rest
+	*) break ;;						# the lock file
+	esac
+done
+shift								# the lock file itself
+exec "$@"
