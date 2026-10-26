@@ -2,12 +2,23 @@
 
 [English](README.md) · 中文 · [Українська](README.uk.md)
 
-HakiOS 在搭载高通 SoC 的 Android 手机上运行开源的 XNU 内核（xnu-8796.121.2），配上我自己写的引导
-程序和驱动，并在其上启动原版 iOS 16.5 用户空间：launchd、backboardd、SpringBoard 和各个应用。同样
-的东西也能在 Linux 电脑上的 QEMU（`virt`，aarch64）里运行。
+HakiOS 是把 Darwin 内核（Apple 开源的 XNU，xnu-8796.121.2）适配到搭载高通 SoC 的 Android 手机上，就像 Android 是
+Linux 在手机上的适配：我自己的引导程序、驱动、配置系统（`configs/`）和独立的内核版本号（`VERSION`）。同样的东西也能在
+Linux 电脑上的 QEMU（`virt`，aarch64）里运行，不需要任何 Apple 的东西，也不需要任何手机的东西（`make qemu-open`）。
 
-不刷写任何东西。引导程序通过 `fastboot boot` 进入内存，系统在内存里运行一个会话，重启后手机回到
-它自己的 Android。这是一个研究用的试验台，不是 ROM。
+它分三层，项目说明自己对哪一层负责（`LEGAL.md`）：
+
+1. **开放核心**：内核移植、引导程序、驱动、工具。全部是本仓库里的源码。
+2. **你自己放在上面的东西**：内核可以启动你自己提供的用户空间。项目的构建方式使它能够启动 iOS 16.5 用户空间，但那是你自己用
+   从 Apple 下载的文件在本机整理出来的；项目不提供其中任何内容，也不绕过任何限制去获取它。你是否可以这样做、是否愿意这样做，由你自己决定。
+3. **Apple 的服务**（激活、Apple ID、iCloud、App Store）：不支持，也不是目标。
+
+默认情况下，引导程序通过 `fastboot boot` 进入内存，系统在内存里运行一个会话，重启后手机回到它自己的 Android。它默认只写一样东西：
+自己的日志（几 KB），写入手机的 `logdump` 分区；开启 `ufs_write=1` 时，内核只会写入你自己创建的 `darwin` 分区。这是一个研究用的试验台，不是 ROM。
+
+更多：[`COMMUNITY.md`](COMMUNITY.md)、[`docs/configs.md`](docs/configs.md)、[`docs/versioning.md`](docs/versioning.md)、
+[`docs/boot-args.md`](docs/boot-args.md)、[`docs/uefi-boot.md`](docs/uefi-boot.md)、[`docs/install.md`](docs/install.md)、
+[`docs/comparison.md`](docs/comparison.md)、[`drivers/README.md`](drivers/README.md)。
 
 第一台手机是 **POCO X5 Pro 5G**（`redwood`，骁龙 778G）。内核事先对它一无所知：每个地址、中断、
 电源轨和固件都来自手机自己的设备树和它的 Android，所以移植到另一台高通手机意味着在 `devices/`
@@ -33,6 +44,8 @@ HakiOS 在搭载高通 SoC 的 Android 手机上运行开源的 XNU 内核（xnu
   这也不是目标。
 
 ## 现状
+
+关于锁屏、应用等的各行，描述的是你自己加上第 2 层之后的情况。
 
 | 可用 | 尚未 |
 |---|---|

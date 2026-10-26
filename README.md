@@ -2,14 +2,28 @@
 
 English · [中文](README.zh.md) · [Українська](README.uk.md)
 
-HakiOS runs the open-source XNU kernel (xnu-8796.121.2) with my own boot loader and my own drivers
-on an Android phone with a Qualcomm SoC, and boots the stock iOS 16.5 user space on top of it:
-launchd, backboardd, SpringBoard, the apps. The same thing runs in QEMU (`virt`, aarch64) on a
-Linux PC.
+HakiOS is an adaptation of the Darwin kernel (Apple's open-source XNU, xnu-8796.121.2) to Android phones with a
+Qualcomm SoC, in the way Android is an adaptation of Linux to phones: my own boot loader, my own drivers, a
+configuration system (`configs/`) and a kernel version of its own (`VERSION`). The same thing runs in QEMU
+(`virt`, aarch64) on a Linux PC, with nothing of Apple's and nothing of any phone's (`make qemu-open`).
 
-Nothing is flashed. The loader goes into RAM through `fastboot boot`, the system lives in RAM for
-the length of a session, and a reboot brings the phone back to its own Android. This is a research
-bench, not a ROM.
+It has three layers, and the project says which one it stands behind (`LEGAL.md`):
+
+1. **The open core**: the kernel port, the loader, the drivers, the tools. All source, in this repository.
+2. **What you put on top**: the kernel can start a user space that you supply. The project was built so that it can
+   start the iOS 16.5 user space, which you lay out yourself from files you download from Apple; it ships none of it
+   and circumvents nothing to get it. Whether you may do that, and whether you want to, is your decision.
+3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
+
+By default the loader goes into RAM through `fastboot boot`, the system lives in RAM for the length of a session,
+and a reboot brings the phone back to its own Android. The one thing it writes by default is its own log (a few KB)
+to the phone's `logdump` partition; with `ufs_write=1` the kernel writes only to a partition `darwin` that you
+create yourself. This is a research bench, not a ROM.
+
+More: [`COMMUNITY.md`](COMMUNITY.md) (the community and the token, and what they are not), [`docs/configs.md`](docs/configs.md)
+(defconfigs and fragments), [`docs/versioning.md`](docs/versioning.md) (`kernel.ver`), [`docs/boot-args.md`](docs/boot-args.md)
+(every boot argument), [`docs/uefi-boot.md`](docs/uefi-boot.md), [`docs/install.md`](docs/install.md) (the design of an install,
+not an installer), [`docs/comparison.md`](docs/comparison.md) (the other projects), [`drivers/README.md`](drivers/README.md).
 
 The first phone is the **POCO X5 Pro 5G** (`redwood`, Snapdragon 778G). The kernel knows nothing
 about it in advance: every address, interrupt, power rail and firmware comes from the phone's own
@@ -38,6 +52,8 @@ Not in the repository, never:
   Apple's services. Signing in to an Apple account is impossible here and not a goal.
 
 ## Status
+
+The rows about the lock screen, the apps and so on describe what happens when you add layer 2 yourself.
 
 | Works | Not yet |
 |---|---|
