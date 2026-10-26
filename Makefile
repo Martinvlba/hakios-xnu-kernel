@@ -46,7 +46,7 @@ images:
 kernel:
 	[ -d xnu-src/xnu-8796.121.2 ] || xnu/apply.sh
 	[ -e xnu-deps/host/bin/ld64 ] || xnu-deps/setup.sh
-	./xnu-build.sh -j$(JOBS) -k
+	tools/make-kernel.sh -j$(JOBS)
 
 loader:
 	xnuloader/build.sh

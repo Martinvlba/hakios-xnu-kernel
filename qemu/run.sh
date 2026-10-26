@@ -5,13 +5,20 @@
 #                           default of 1 GB mostly costs host memory)
 #      QEMU_SMP             processor cores of the machine (default 1); the kernel uses as many of them as
 #                           its boot-arg cpus=N says (CMDLINE="cpus=4" for run-ios.sh), one without it
-#      QEMU_EFI, QEMU_VARS  the UEFI firmware for aarch64 guests (default: where Arch's edk2-aarch64
-#                           puts it; Debian/Ubuntu: /usr/share/AAVMF/AAVMF_CODE.fd and AAVMF_VARS.fd)
+#      QEMU_EFI, QEMU_VARS  the UEFI firmware for aarch64 guests (found by itself where Arch's edk2-aarch64
+#                           puts it, or Debian/Ubuntu's /usr/share/AAVMF/AAVMF_CODE.fd and AAVMF_VARS.fd)
 cd "$(dirname "$0")"
 T=${1:-20}; shift
-EFI=${QEMU_EFI:-/usr/share/edk2/aarch64/QEMU_EFI.fd}
-[ -f "$EFI" ] || { echo "run.sh: no UEFI firmware at $EFI (set QEMU_EFI and QEMU_VARS)"; exit 1; }
-cp "${QEMU_VARS:-/usr/share/edk2/aarch64/QEMU_VARS.fd}" vars.fd 2>/dev/null
+# the UEFI firmware: where Arch's edk2-aarch64 puts it, or where Debian and Ubuntu's AAVMF does
+EFI=${QEMU_EFI-}; VARS_SRC=${QEMU_VARS-}
+if [ -z "$EFI" ]; then
+	for f in /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd; do [ -f "$f" ] && { EFI=$f; break; }; done
+fi
+if [ -z "$VARS_SRC" ]; then
+	for f in /usr/share/edk2/aarch64/QEMU_VARS.fd /usr/share/AAVMF/AAVMF_VARS.fd; do [ -f "$f" ] && { VARS_SRC=$f; break; }; done
+fi
+[ -f "$EFI" ] || { echo "run.sh: no UEFI firmware found (looked for edk2-aarch64's and AAVMF's); set QEMU_EFI and QEMU_VARS"; exit 1; }
+cp "$VARS_SRC" vars.fd 2>/dev/null
 # the loader is the boot application of the little FAT volume QEMU makes of esp/:
 # the one built here, or else the one that comes with the repository
 L=../xnuloader/loader.efi; [ -f $L ] || L=../prebuilt/loader.efi
