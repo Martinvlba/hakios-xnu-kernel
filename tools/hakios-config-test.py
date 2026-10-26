@@ -49,8 +49,9 @@ try:
     r = run("defconfig", "redwood", "-o", cfg)
     check("defconfig redwood: makes the .config", r.returncode == 0 and os.path.isfile(cfg), r.stdout + r.stderr)
     a = args_of(run("args", "--config", cfg))
-    check("redwood: the same arguments as the project's phone line before configurations", sorted(a) == sorted(OLD_PHONE_LINE),
-          "got %s\nwant %s" % (sorted(a), sorted(OLD_PHONE_LINE)))
+    # the phone line from before there were configurations, plus the two things the SC7280 fragment turns on: the chip's identity and the sensors
+    check("redwood: the project's phone line before configurations, plus socinfo and thermal", sorted(a) == sorted(OLD_PHONE_LINE + ["socinfo=1", "thermal=1"]),
+          "got %s\nwant %s" % (sorted(a), sorted(OLD_PHONE_LINE + ["socinfo=1", "thermal=1"])))
     check("redwood: kernel.ver carries the SoC", "-sc7280-" in r.stdout, r.stdout)
     check("redwood: the .config is in Linux's form",
           "CONFIG_GPU=y" in open(cfg).read() and "# CONFIG_CAM is not set" in open(cfg).read() and 'CONFIG_FIRMWARE="device"' in open(cfg).read())
@@ -65,7 +66,7 @@ try:
     r = run("defconfig", "redwood", "open", "-o", o)
     check("redwood + open: passes", r.returncode == 0, r.stdout + r.stderr)
     check("redwood + open: nothing of the phone's own is loaded",
-          sorted(args_of(run("args", "--config", o))) == sorted("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1".split()),
+          sorted(args_of(run("args", "--config", o))) == sorted("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1 socinfo=1 thermal=1".split()),
           run("args", "--config", o).stdout)
     r = run("needs", "--config", o)
     check("redwood + open: needs nothing", r.returncode == 0 and "nothing of the phone's own" in r.stdout, r.stdout)
@@ -90,7 +91,7 @@ try:
     # the arguments straight from a defconfig, with no .config made (what `make qemu-open` asks for)
     check("args --defconfig defconfig: cpus=1", args_of(run("args", "--defconfig", "defconfig")) == ["cpus=1"], run("args", "--defconfig", "defconfig").stdout)
     check("args --defconfig redwood --fragment open: the open phone",
-          sorted(args_of(run("args", "--defconfig", "redwood", "--fragment", "open"))) == sorted("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1".split()))
+          sorted(args_of(run("args", "--defconfig", "redwood", "--fragment", "open"))) == sorted("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1 socinfo=1 thermal=1".split()))
     check("args --defconfig redwood: the same as the .config's", sorted(args_of(run("args", "--defconfig", "redwood"))) == sorted(a))
 
     # the order of the arguments is the table's: cpus first, as in the README's lines
@@ -174,6 +175,49 @@ try:
     long = " ".join("modem_ipa_data_trace=%d" % i for i in range(30))
     problems, _ = hc.check(dict(base, BOOTARGS='"%s"' % long))
     check("BOOTARGS counts toward the length limit", any("the end of it would be lost" in p for p in problems), problems)
+
+    # the common kernel's configuration: not named after a phone, and a phone's defconfig is only what it includes
+    r = run("defconfig", "common", "-o", os.path.join(work, "common"))
+    check("common_defconfig passes its own checks", r.returncode == 0, r.stdout + r.stderr)
+    check("common names every symbol there is", run("complete", "common").returncode == 0, run("complete", "common").stdout)
+    listed = run("listing", "common").stdout
+    with open(os.path.join(ROOT, "configs", "common_defconfig"), encoding="utf-8", newline="") as f:
+        check("common_defconfig is what `listing common` makes of it (nothing edited by hand drifted)",
+              f.read().replace("\r\n", "\n") == listed, "run: tools/hakios-config.py listing common > configs/common_defconfig")
+    check("the listing has hundreds of symbols, each with a comment above it",
+          listed.count("\nCONFIG_") + listed.count("\n# CONFIG_") >= 300 and listed.count("\n# ") > 600, listed.count("\n"))
+    with open(os.path.join(ROOT, "configs", "redwood_defconfig"), encoding="utf-8") as f:
+        includes = [l.split()[1] for l in f if l.startswith("#include ")]
+    check("redwood_defconfig is the common one, the SoC's and the phone's, put together", includes == ["common_defconfig", "sc7280.config", "redwood.config"], includes)
+    check("the common configuration does not say which phone: no device, no SoC",
+          not any(l.startswith(("CONFIG_DEVICE=", "CONFIG_SOC=")) for l in listed.splitlines()))
+    # #include: a fragment can put others first; a loop is an error, not a hang
+    fake3 = os.path.join(work, "fake3")
+    os.makedirs(os.path.join(fake3, "configs"))
+    for name, text in (("defconfig", 'CONFIG_FIRMWARE="none"\n'), ("a.config", "#include b.config\nCONFIG_CPUS=2\n"), ("b.config", "CONFIG_CPUS=4\nCONFIG_BOOTCPU=1\n"),
+                       ("x.config", "#include y.config\n"), ("y.config", "#include x.config\n")):
+        with open(os.path.join(fake3, "configs", name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    out3 = os.path.join(work, "out3")
+    r = run("defconfig", "defconfig", "a", "-o", out3, root=fake3)
+    check("#include: the included file is laid first, the including one wins", args_of(run("args", "--config", out3, root=fake3)) == ["cpus=2", "bootcpu=1"],
+          run("args", "--config", out3, root=fake3).stdout + r.stderr)
+    r = run("defconfig", "defconfig", "x", "-o", out3, root=fake3)
+    check("#include: a loop is refused", r.returncode != 0 and "includes itself" in (r.stdout + r.stderr), r.stdout + r.stderr)
+    # the generated symbols: any argument the source reads, typed and checked
+    hc.SYMBOLS  # (loaded above)
+    problems, a = hc.check({"ADRENO_KEEP": "y", "FB_BEAT": "2", "APFS_SKIP": '"/a,/b"', "FIRMWARE": '"device"'})
+    check("a generated symbol: y is =1, a number is as it is, a quoted text is the text", not problems and a == ["adreno_keep=1", "apfs_skip=/a,/b", "fb_beat=2"], (problems, a))     # (the generated ones, by name)
+    problems, _ = hc.check({"FB_BEAT": "fast"})
+    check("a generated symbol: a word that is none of those is an error", any("CONFIG_FB_BEAT is y, a number" in p for p in problems), problems)
+    problems, _ = hc.check({"FB_BEAT": '"a b"'})
+    check("a generated symbol: a text with a space in it is an error", any("CONFIG_FB_BEAT" in p for p in problems), problems)
+    problems, _ = hc.check({"THERMAL_STOP": "105"})
+    check("THERMAL_STOP requires THERMAL", any("requires CONFIG_THERMAL" in p for p in problems), problems)
+    problems, _ = hc.check({"THERMAL": "y", "THERMAL_STOP": "500"})
+    check("THERMAL_STOP is at most 160 degrees", any("THERMAL_STOP" in p for p in problems), problems)
+    check("there are as many symbols as arguments the source reads, less the ones the tools set",
+          len(hc.SYMBOLS) >= 300 and len({s[0] for s in hc.SYMBOLS}) == len(hc.SYMBOLS), len(hc.SYMBOLS))
 
     # help, show, list
     r = run("help", "gpu")

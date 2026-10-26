@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """The catalogue of every boot-argument that the kernel, the loader and user space read.
 
-usage: tools/boot-args.py [--markdown | --lst | --check] [--root DIR]
+usage: tools/boot-args.py [--markdown | --lst | --symbols | --check] [--root DIR]
 
   (none)      the catalogue, as text, grouped by driver
   --markdown  the catalogue as docs/boot-args.md has it
   --lst       the names, as configs/boot-args.lst has them (what tools/hakios-config.py checks CONFIG_BOOTARGS against)
-  --check     exit 1 if docs/boot-args.md or configs/boot-args.lst is out of date with the source (CI runs this)
+  --symbols   a CONFIG_ symbol for each argument that has none in the table of tools/hakios-config.py, as configs/symbols.tsv has them
+              (name, kind, argument, group, layers, files, one-line meaning where the source has a documentation line for it)
+  --check     exit 1 if docs/boot-args.md, configs/boot-args.lst or configs/symbols.tsv is out of date with the source (CI runs this)
 
 Why it exists. The kernel of this port is configured on its command line, and every driver reads its own
 arguments: 194 in the kernel's files, 14 in the loader, 26 in user space. A handful of them are stable switches
@@ -37,6 +39,7 @@ KERNEL = re.compile(r'PE_parse_boot_arg(?:n|_str)?\(\s*"([A-Za-z0-9_.\-]+)"')
 # XNU's TUNABLE(type, variable, "boot-arg name", default) reads the argument at start-up, in the files of the display and GPU
 # drivers (C++) and in the sandbox stand-in: static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1). Also TUNABLE_WRITEABLE and
 # TUNABLE_STR. (TUNABLE_DT, whose third argument is a device-tree path with slashes, does not match.)
+STRING = re.compile(r'PE_parse_boot_arg_str\(\s*"([A-Za-z0-9_.\-]+)"')     # an argument read as text
 TUNABLE = re.compile(r'\bTUNABLE\w*\(\s*[^,()]+,\s*[^,()]+,\s*"([A-Za-z0-9_.\-]+)"')
 # Three drivers read their options through a small function that is given the name as a string, and the name is the
 # literal at the call: option("modem_again") in hakios.mpss.c and hakios.adsp.c (a static function in each), and for
@@ -99,9 +102,10 @@ def tracked(root):
     return [p.decode() for p in out.split(b"\0") if p]
 
 
-def scan(root):
-    """{name: {"kernel": {files}, "loader": {files}, "user": {files}}} found in the tracked source."""
-    found = collections.defaultdict(lambda: {"kernel": set(), "loader": set(), "user": set()})
+def scan(root, keep=None):
+    """{name: {"kernel": {files}, "loader": {files}, "user": {files}, "str": {files}}} found in the tracked source.
+    `keep`, if given, is filled with {file name: text} of every source file read (the descriptions are taken from it)."""
+    found = collections.defaultdict(lambda: {"kernel": set(), "loader": set(), "user": set(), "str": set()})
     for f in tracked(root):
         if not f.endswith((".c", ".cpp", ".m", ".h", ".patch")):
             continue
@@ -110,6 +114,8 @@ def scan(root):
         except OSError:
             continue
         base = os.path.basename(f)
+        if keep is not None and f != "xnu/hakios.patch":
+            keep[base] = text
         if f == "xnu/hakios.patch":
             text = "\n".join(l[1:] for l in text.splitlines() if l.startswith("+") and not l.startswith("+++"))
             base = "(patch)"
@@ -117,6 +123,8 @@ def scan(root):
         if f.startswith(("xnu/", "drivers/", "wifi/lx/src/")):
             for m in KERNEL.finditer(text):
                 found[m.group(1)]["kernel"].add(base)
+            for m in STRING.finditer(text):
+                found[m.group(1)]["str"].add(base)
             for m in WRAPPED.finditer(text):
                 found[m.group(1)]["kernel"].add(base)
             for m in TUNABLE.finditer(text):
@@ -153,6 +161,83 @@ def symbols(root):
             if m:
                 out[m.group(2)] = "CONFIG_" + m.group(1)
     return out
+
+
+# ---- symbols: one CONFIG_ symbol for each argument the table of tools/hakios-config.py does not already have -----------------
+
+# arguments that the loader or the runner sets, not the person (SET_BY, except the ones wifi=1 implies): no symbol
+def given_by_tools(name):
+    why = SET_BY.get(name, "")
+    return bool(why) and not why.startswith("implied")
+
+
+# arguments whose value is an address or a window: 0x... (a decimal one would be a mistake)
+HEX_NAME = re.compile(r"(_pa|_base|_buffer|_addr|_mem)$|^soc_(?!ipa_fw|pas_|ipa_stream)")
+
+COMMENT_LINE = re.compile(r"^\s*(?:/\*+|\*+/?|//+)\s?(.*)$")
+
+
+def _clean(text):
+    return re.sub(r"\s+", " ", text).strip(" */-:;,")
+
+
+def _sentence(text, limit=150):
+    text = _clean(text)
+    m = re.search(r"(?<=[a-z0-9\)])\.(?:\s|$)", text)
+    if m and m.start() > 30:
+        text = text[:m.start()]
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0]
+    return text
+
+
+# a description that ends like this was cut in the middle of a sentence: it is not used
+UNFINISHED = re.compile(r"(,|\band|\bor|\bwhich is what|\bthe|\bof|\bto|\bwith|\bin|\bfor|\bis|\bas|\ba|\bby|\bwhere|\bthat|\bnot|\bit|\(\w*)$")
+
+
+def describe(name, files, texts):
+    """The one-line meaning of an argument, when a file that reads it has a documentation line for it: a comment that starts
+    with `name=value` (or just the name) and then, after two spaces or a colon or a dash, says what it does. "" if not."""
+    pattern = re.compile(r"^(?:boot-?args?[:\s]+)?(?:the )?" + re.escape(name) + r"(?:=[^\s:]*)?(?:\s{2,}|\s*:\s+|\s+--?\s+)(?:[-:]\s*)?"
+                         r"([A-Za-z(].{9,})$", re.I)
+    for f in sorted(files):
+        lines = texts.get(f, "").splitlines()
+        for i, line in enumerate(lines):
+            m = COMMENT_LINE.match(line)
+            hit = pattern.match(m.group(1).strip()) if m else None
+            if not hit:
+                continue
+            text = hit.group(1)
+            if i + 1 < len(lines) and len(_clean(text)) < 90 and not _clean(text).endswith("."):
+                nxt = COMMENT_LINE.match(lines[i + 1])
+                if nxt and nxt.group(1).strip() and not re.match(r"^[a-z0-9_]+(=|\s{2,})", nxt.group(1).strip()):
+                    text += " " + nxt.group(1)
+            text = _sentence(text)
+            if len(text) >= 15 and not UNFINISHED.search(text) and text.count("(") == text.count(")") and not re.match(r"(and|or|then|but)", text):
+                return text
+    return ""
+
+
+def sym_name(arg):
+    return re.sub(r"[^A-Z0-9]", "_", arg.upper())
+
+
+def symbol_rows(found, texts, curated):
+    """[(NAME, kind, arg, group, layers, files, description)] for every argument without a symbol of its own in the table of
+    tools/hakios-config.py. kind is "arg": y (= 1), a number, or a quoted string; "hex" for an address."""
+    rows = []
+    for arg, d in sorted(found.items()):
+        if arg in curated or given_by_tools(arg):
+            continue
+        files = sorted(d["kernel"] | d["loader"] | d["user"])
+        kind = "hex" if HEX_NAME.search(arg) else "arg"
+        rows.append((sym_name(arg), kind, arg, group_of(d["kernel"] | d["loader"] | d["user"]), layers(d), ",".join(files),
+                     describe(arg, d["kernel"] | d["loader"] | d["user"], texts)))
+    return rows
+
+
+def tsv(rows):
+    return "".join("\t".join(r) + "\n" for r in rows)
 
 
 def layers(d):
@@ -203,26 +288,34 @@ def main():
     what = ap.add_mutually_exclusive_group()
     what.add_argument("--markdown", action="store_true")
     what.add_argument("--lst", action="store_true")
+    what.add_argument("--symbols", action="store_true")
     what.add_argument("--check", action="store_true")
     ap.add_argument("--root", default=ROOT)
     args = ap.parse_args()
     root = os.path.abspath(args.root)
-    found = scan(root)
+    texts = {}
+    found = scan(root, keep=texts)
     config = symbols(root)
+    rows = symbol_rows(found, texts, set(config))
+    for row in rows:
+        config[row[2]] = "CONFIG_" + row[0]
 
     if args.markdown:
         sys.stdout.write(markdown(found, config))
+    elif args.symbols:
+        sys.stdout.write(tsv(rows))
     elif args.lst:
         sys.stdout.write(lst(found))
     elif args.check:
         bad = 0
-        for rel, want in (("docs/boot-args.md", markdown(found, config)), ("configs/boot-args.lst", lst(found))):
+        for rel, want in (("docs/boot-args.md", markdown(found, config)), ("configs/boot-args.lst", lst(found)),
+                          ("configs/symbols.tsv", tsv(rows))):
             path = os.path.join(root, rel)
             have = open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n") if os.path.isfile(path) else None
             if have != want:
                 bad += 1
                 print("boot-args: %s is %s: run  tools/boot-args.py --%s > %s" % (
-                    rel, "missing" if have is None else "out of date with the source", "markdown" if rel.endswith(".md") else "lst", rel))
+                    rel, "missing" if have is None else "out of date with the source", "markdown" if rel.endswith(".md") else "symbols" if rel.endswith(".tsv") else "lst", rel))
         unknown = sorted(a for a in config if a not in found)
         for a in unknown:
             bad += 1

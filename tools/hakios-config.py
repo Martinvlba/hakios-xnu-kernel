@@ -25,6 +25,7 @@ Where this differs from Linux's, on purpose:
     refuses what cannot fit, because a command line that is too long loses its tail without an error.
 """
 import argparse
+import collections
 import difflib
 import os
 import re
@@ -66,13 +67,60 @@ SYMBOLS = [
     ("NET_NAMES", "bool", "net_names", "a log line for every name asked of a DNS server and every TCP connection begun "
                                         "(the names go to the log: for debugging only)", None, None),
     ("VIRTIO_NET", "bool", "virtio_net", "QEMU's virtio network device as en0 (QEMU only; its bus address means nothing on a phone)", None, None),
+    ("SOCINFO", "bool", "socinfo", "read the chip's identity from the firmware's shared memory: kern.hakios.soc_* (SoC number, revision, board)", None, None),
+    ("THERMAL", "bool", "thermal", "read the SoC's 27 temperature sensors: kern.hakios.thermal_* and a line in the log; read only", None, None),
+    ("THERMAL_POLL", "int", "thermal_poll", "how often the sensors are read, in milliseconds (200 to 60000; 2000)", None, "THERMAL"),
+    ("THERMAL_STOP", "int", "thermal_stop", "hand control back to the loader when the hottest sensor reads this many degrees three times in a row "
+                                           "(0: never; 105): the protection of a phone left running unattended", None, "THERMAL"),
+    ("PMIC", "bool", "pmic", "list every block of the power-management chips the SPMI arbiter shows, and read the PMIC's clock; read only", None, None),
     # Linux's CONFIG_CMDLINE: whatever the symbols above do not cover, as name=value words in quotes. It is not an escape
     # from the checks: every name must be one the source reads (configs/boot-args.lst), so a typo is an error, not a no-op.
     ("BOOTARGS", "args", None, "more kernel arguments, as `name=value` words in quotes; each name must be one docs/boot-args.md lists", None, None),
 ]
+
+# The group a symbol is listed under in the documented defconfig (the generated ones carry theirs in configs/symbols.tsv)
+GROUP_OF = {
+    "DEVICE": "Build facts", "SOC": "Build facts", "FIRMWARE": "Build facts",
+    "CPUS": "CPU, memory and boot", "BOOTCPU": "CPU, memory and boot", "CPUFREQ": "CPU, memory and boot",
+    "UFS": "Storage and APFS", "UFS_WRITE": "Storage and APFS", "VAR_STORE": "Storage and APFS",
+    "TOUCHSCREEN": "Touch and buttons", "GPU": "GPU and display",
+    "ADSP": "Audio and battery", "SOUND": "Audio and battery", "MIC": "Audio and battery",
+    "WIFI": "Wi-Fi", "HAPTIC": "Haptics and torch", "CAM": "Cameras",
+    "MODEM": "Cellular", "MODEM_AGAIN": "Cellular", "MODEM_BUFFER": "Cellular",
+    "NET_TRACE": "Network", "NET_NAMES": "Network", "VIRTIO_NET": "Network",
+    "SOCINFO": "Chip, thermal and PMIC", "THERMAL": "Chip, thermal and PMIC", "THERMAL_POLL": "Chip, thermal and PMIC",
+    "THERMAL_STOP": "Chip, thermal and PMIC", "PMIC": "Chip, thermal and PMIC", "BOOTARGS": "Extra arguments",
+}
+LAYER_OF = {}
+RELAXED = re.compile(r"[A-Za-z0-9_.,:/+@=\-]+")       # what a text value may hold: no space, no quote, no backslash
+
+
+def load_generated():
+    """The symbols tools/boot-args.py made for the arguments the table above does not name (configs/symbols.tsv): one
+    CONFIG_ symbol for each argument that is read anywhere in the source. Nothing if the file is not there."""
+    path = os.path.join(ROOT, "configs", "symbols.tsv")
+    rows = []
+    if os.path.isfile(path):
+        for line in open(path, encoding="utf-8"):
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 7:
+                continue
+            name, kind, arg, group, layers, files, text = f[:7]
+            if name in {s[0] for s in SYMBOLS}:
+                continue
+            GROUP_OF[name] = group
+            LAYER_OF[name] = (layers, files)
+            rows.append((name, kind, arg, text or "read by %s (%s)" % (files.replace("(patch)", "the patch to Apple's files").replace(",", ", "),
+                         "".join({"k": "kernel", "l": "loader", "u": "user space"}[c] + "/" for c in layers).rstrip("/").replace("/", " and ")),
+                         None, None))
+    return rows
+
+
+GENERATED = load_generated()
+SYMBOLS += GENERATED
 BY_NAME = {s[0]: s for s in SYMBOLS}
 FIRMWARE_VALUES = ("device", "none")
-RANGES = {"CPUS": (1, 8), "BOOTCPU": (0, 7), "UFS": (1, 2)}
+RANGES = {"CPUS": (1, 8), "BOOTCPU": (0, 7), "UFS": (1, 2), "THERMAL_POLL": (200, 60000), "THERMAL_STOP": (0, 160)}
 
 
 class ConfigError(Exception):
@@ -103,7 +151,7 @@ def parse(path):
         if name not in BY_NAME:
             close = difflib.get_close_matches(name, BY_NAME, n=1)
             raise ConfigError("%s:%d: no symbol CONFIG_%s%s" % (path, n, name, " (did you mean CONFIG_%s?)" % close[0] if close else ""))
-        if value == "n" and BY_NAME[name][1] == "bool":
+        if value == "n" and BY_NAME[name][1] in ("bool", "arg"):
             unset.add(name)
             values.pop(name, None)
             continue
@@ -119,6 +167,15 @@ def typed(name, value):
         if value != "y":
             raise ConfigError("CONFIG_%s is a bool: y, or not set (got %s)" % (name, value))
         return True
+    if kind == "arg":
+        # a switch (y: the argument is 1), a number as it is written, or a quoted text (a list, a name, a path)
+        if value == "y":
+            return "1"
+        if re.fullmatch(r"-?(0[xX][0-9a-fA-F]+|[0-9]+)", value):
+            return value
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"' and RELAXED.fullmatch(value[1:-1]):
+            return value[1:-1]
+        raise ConfigError('CONFIG_%s is y, a number, or a text in quotes of letters, digits and . , : / + @ = - (got %s)' % (name, value))
     if kind in ("int", "hex"):
         if kind == "hex" and not value.lower().startswith("0x"):
             raise ConfigError("CONFIG_%s is a hex number and starts with 0x (got %s)" % (name, value))
@@ -188,13 +245,29 @@ def overlay(config, files):
     return result
 
 
+def expand(root, path, seen=()):
+    """`path` preceded by the files it includes: a line `#include NAME` in a defconfig or fragment (a comment to every other
+    reader) stands for configs/NAME, NAME_defconfig or NAME.config, laid first. This is how a device's defconfig is the common one
+    plus its SoC's and its own (the way Android's build.config puts a kernel's configuration together), and it is why redwood_defconfig
+    is three lines."""
+    if path in seen:
+        raise ConfigError("%s includes itself (%s)" % (rel(root, path), " -> ".join(os.path.basename(p) for p in seen + (path,))))
+    files = []
+    for line in open(path, encoding="utf-8"):
+        m = re.match(r"#include\s+(\S+)\s*$", line)
+        if m:
+            files += expand(root, find_config(root, m.group(1)), seen + (path,))
+    return files + [path]
+
+
 def resolve(root, names):
-    """The files for `defconfig NAME FRAGMENT...`: the base, the device's defconfig, then the fragments."""
+    """The files for `defconfig NAME FRAGMENT...`: the base, the device's defconfig, then the fragments (each with what it includes)."""
     files = [find_config(root, "defconfig")]
     device = names[0] if names else "defconfig"
     if device not in ("defconfig", ""):
-        files.append(find_config(root, device if device.endswith("_defconfig") else device + "_defconfig"))
-    files += [find_config(root, f) for f in names[1:]]
+        files += expand(root, find_config(root, device if device.endswith("_defconfig") else device + "_defconfig"))
+    for f in names[1:]:
+        files += expand(root, find_config(root, f))
     return files
 
 
@@ -315,7 +388,9 @@ def cmd_defconfig(a):
 
 
 def cmd_merge(a):
-    files = [find_config(a.root, f) for f in a.fragments]
+    files = []
+    for f in a.fragments:
+        files += expand(a.root, find_config(a.root, f))
     config = overlay(load(a.config), files)
     problems, args = check(config)
     write_config(config, a.config, [".config"] + [rel(a.root, f) for f in files])
@@ -419,6 +494,67 @@ def cmd_list(a):
     return 0
 
 
+GROUP_ORDER = ["Build facts", "CPU, memory and boot", "Storage and APFS", "Touch and buttons", "GPU and display", "Audio and battery",
+               "Wi-Fi", "Cellular", "Cameras", "Haptics and torch", "Chip, thermal and PMIC", "Network", "Security stand-ins",
+               "Debugging", "Loader", "User space", "Version", "Extra arguments"]
+
+
+def listing(config, title_lines):
+    """The documented defconfig of `config`: every symbol there is, by group, each with its meaning in a comment above it and its value
+    (or `# CONFIG_X is not set`) under it. Linux's defconfigs list only what differs from the defaults; this one lists everything,
+    because here a symbol's default is "the kernel decides" and a reader should see every setting there is."""
+    by_group = collections.defaultdict(list)
+    for sym in SYMBOLS:
+        by_group[GROUP_OF.get(sym[0], "User space")].append(sym)
+    out = list(title_lines)
+    out += ["# %d symbols in %d groups; %d are set." % (len(SYMBOLS), len([g for g in by_group if by_group[g]]), len(config)), "#", ""]
+    for group in GROUP_ORDER + sorted(g for g in by_group if g not in GROUP_ORDER):
+        syms = by_group.get(group)
+        if not syms:
+            continue
+        out += ["#", "# %s (%d)" % (group, len(syms)), "#", ""]
+        for name, kind, arg, help_, needs, requires in syms:
+            text = help_ if len(help_) <= 118 else help_[:117].rsplit(" ", 1)[0] + " ..."
+            note = ""
+            if needs:
+                note += " [needs %s/ from the phone]" % needs
+            if requires:
+                note += " [requires CONFIG_%s]" % requires
+            out.append("# %s%s" % (text, note))
+            out.append("CONFIG_%s=%s" % (name, config[name]) if name in config else "# CONFIG_%s is not set" % name)
+            out.append("")
+    return "\n".join(out) + "\n"
+
+
+def cmd_listing(a):
+    """listing NAME: the documented defconfig of NAME (a defconfig or fragment, with what it includes) on stdout."""
+    files = resolve(a.root, [a.name] + a.fragments)
+    config = overlay({}, files)
+    title = ["#", "# HakiOS %s defconfig: every setting there is, with what it does." % a.name,
+             "# Made by tools/hakios-config.py listing %s; the values are the ones that file sets, and tests/CI check that it names every symbol." % a.name,
+             "#"]
+    sys.stdout.write(listing(config, title))
+    return 0
+
+
+def cmd_complete(a):
+    """complete NAME: a defconfig (NAME) must name every symbol, set or `is not set`; the ones it leaves out are said."""
+    path = find_config(a.root, a.name if a.name.endswith("_defconfig") else a.name + "_defconfig")
+    named = set()
+    for line in open(path, encoding="utf-8"):
+        m = re.match(r"(?:# )?CONFIG_([A-Z0-9_]+)(?:=| is not set)", line.strip())
+        if m:
+            named.add(m.group(1))
+    missing = [s[0] for s in SYMBOLS if s[0] not in named]
+    for name in missing[:30]:
+        print("hakios-config: %s does not name CONFIG_%s" % (rel(a.root, path), name))
+    if len(missing) > 30:
+        print("hakios-config: ... and %d more" % (len(missing) - 30))
+    if not missing:
+        print("hakios-config: %s names all %d symbols" % (rel(a.root, path), len(SYMBOLS)))
+    return 1 if missing else 0
+
+
 def cmd_help(a):
     name = a.symbol.upper()
     name = name[len("CONFIG_"):] if name.startswith("CONFIG_") else name
@@ -430,7 +566,7 @@ def cmd_help(a):
     print("CONFIG_%s  (%s)" % (name, kind))
     print("  " + help_)
     if arg:
-        print("  boot-argument: %s=%s" % (arg, {"bool": "1", "hex": "0x...", "int": "N", "str": "..."}[kind]))
+        print("  boot-argument: %s=%s" % (arg, {"bool": "1", "hex": "0x...", "int": "N", "str": "...", "arg": "1, N or text", "args": "..."}[kind]))
     if needs:
         print("  needs firmware pulled from your phone: %s/" % needs)
     if requires:
@@ -463,6 +599,13 @@ def main():
                            ("savedefconfig", cmd_savedefconfig, "the .config as a minimal defconfig"),
                            ("list", cmd_list, "the defconfigs and fragments in configs/")):
         sub.add_parser(name, parents=[common], help=text).set_defaults(fn=fn)
+    p = sub.add_parser("listing", parents=[common], help="the documented defconfig of NAME, every symbol, on stdout")
+    p.add_argument("name")
+    p.add_argument("fragments", nargs="*")
+    p.set_defaults(fn=cmd_listing)
+    p = sub.add_parser("complete", parents=[common], help="a defconfig must name every symbol")
+    p.add_argument("name")
+    p.set_defaults(fn=cmd_complete)
     p = sub.add_parser("help", parents=[common], help="what a symbol means")
     p.add_argument("symbol")
     p.set_defaults(fn=cmd_help)

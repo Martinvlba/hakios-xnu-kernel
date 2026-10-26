@@ -193,6 +193,19 @@ says where its numbers came from; that is the map of what to rewrite.
 
 {checklist}
 
+## Configuration
+
+The kernel's settings are layered the way an Android kernel's are: the common kernel, the SoC's, this phone's
+(`docs/configs.md`). Two short files make this phone a configuration:
+
+    configs/{name}.config          CONFIG_DEVICE="{name}"   and whatever is true of this phone only
+    configs/{name}_defconfig       #include common_defconfig
+                                   #include <the SoC's fragment: sc7280.config for the SC7280 family>
+                                   #include {name}.config
+
+Then `make {name}_defconfig`. Turn on only what this phone has been shown to do; `tools/hakios-config.py check` says what the
+choice needs.
+
 ## Firmware
 
 Pulled from your own phone, never committed: `devices/{reference}/pull-firmware.sh`, or

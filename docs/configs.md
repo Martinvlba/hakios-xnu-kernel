@@ -1,33 +1,40 @@
-# Configurations: defconfigs, fragments and a `.config`
+# Configurations: the common kernel, a SoC, a phone
 
-A Linux kernel is configured with a `.config` made from a `<device>_defconfig` (`make redwood_defconfig`), and an
-Android kernel adds fragments on top (`merge_config.sh`). This kernel does the same, with one difference that is the
-whole design: **its options are not compiled in.** XNU takes them from the boot-arguments, so a configuration here is
+A Linux kernel is configured with a `.config` made from a defconfig, and an Android kernel is put together from layers: the
+common kernel's `gki_defconfig`, the SoC vendor's fragment, the device's. This kernel does the same, with one difference that
+is the whole design: **its options are not compiled in.** XNU takes them from the boot-arguments, so a configuration here is
 a file of `CONFIG_*` symbols that `tools/hakios-config.py` turns into the kernel's command line.
 
 ```
 configs/defconfig             what every configuration starts from: the OPEN one (nothing of a phone's own, one core)
-configs/redwood_defconfig     the POCO X5 Pro 5G (redwood, SM7325): what the project's own phone line uses
+configs/common_defconfig      THE COMMON KERNEL: every setting there is, each with what it does (about 1000 lines)
+configs/sc7280.config         the Qualcomm SC7280 family (SM7325, QCM6490): eight cores, the sensors, the chip's identity
+configs/redwood.config        the POCO X5 Pro 5G: its vibration motor, where its modem's buffer is
+configs/redwood_defconfig     a phone: #include common_defconfig, sc7280.config, redwood.config (three lines)
 configs/open.config           fragment: the open profile (CONFIG_FIRMWARE="none")
 configs/virt.config           fragment: QEMU's virt machine (virtio network)
 configs/trace.config          fragment: log a line for each of the first frames on the network interfaces
 configs/persist.config        fragment: keep /private/var across reboots (THIS WRITES TO THE PHONE, partition `darwin`)
+configs/symbols.tsv           the symbols that are made from the source (see below); do not edit
 ```
+
+The common kernel does not say which phone it is for. A phone is the common kernel plus the facts of its SoC plus its own, which
+is how Android builds a device's kernel; a new device adds a fragment and a three-line defconfig, not a new copy of everything.
 
 ## Use
 
 ```bash
-make redwood_defconfig                  # .config = configs/defconfig + configs/redwood_defconfig
+make redwood_defconfig                  # .config = defconfig + common_defconfig + sc7280.config + redwood.config
 make redwood_defconfig FRAGMENTS=trace  # ... and a fragment on top
+make common_defconfig                   # the common kernel alone, for a phone that has no fragments yet
 make virt.config                        # lay a fragment over the .config there is
 make config                             # show it: symbols, the kernel's arguments, the firmware it wants
 make savedefconfig                      # the .config as a minimal defconfig (what differs from configs/defconfig)
 make phone                              # with a .config, ITS arguments are the kernel's
 ```
 
-The same without make: `tools/hakios-config.py defconfig|merge|args|check|show|needs|savedefconfig|list|help`.
-`tools/hakios-config.py help GPU` says what a symbol means, what it needs and what it requires. `make doctor`
-checks the host.
+The same without make: `tools/hakios-config.py defconfig|merge|args|check|show|needs|savedefconfig|list|listing|complete|help`.
+`tools/hakios-config.py help GPU` says what a symbol means, what it needs and what it requires. `make doctor` checks the host.
 
 ## What a symbol is
 
@@ -36,15 +43,45 @@ checks the host.
 Three symbols are facts about the build, not arguments: `CONFIG_DEVICE`, `CONFIG_SOC` (it goes into the kernel's version
 string, see [versioning.md](versioning.md)) and `CONFIG_FIRMWARE`.
 
-The table of symbols is the `SYMBOLS` list at the top of `tools/hakios-config.py`; it is the one place that says
-which symbol is which argument.
+There are two kinds of symbol, and the difference is honest:
+
+- **The stable switches** are written by hand in the `SYMBOLS` table at the top of `tools/hakios-config.py`: they have a
+  meaning, a type, a range, a firmware they need, a symbol they require (`CONFIG_SOUND` requires `CONFIG_ADSP`). About thirty.
+- **The rest** are made from the source. Every argument that the kernel, the loader or user space reads
+  ([boot-args.md](boot-args.md)) gets a symbol, except the few that the loader and the runner set themselves (`epoch`, the time
+  of the run ...). They are typed as "a switch (`y` is 1), a number as written, or a quoted text", and the one-line meaning is
+  taken from the source where the file that reads the argument has a documentation line for it; where it has none, the line
+  says which file reads it and nothing more. They are `configs/symbols.tsv`, made by `tools/boot-args.py --symbols`, and CI fails
+  when a driver adds an argument and the file is not made again. Most of these are the knobs of bring-up (a driver's steps and
+  pauses, traces, test modes); they are here so that a run is written down in one file with typos refused, not because each one
+  is a feature.
+
+## `common_defconfig`: every setting, documented
+
+Linux's defconfigs list only what differs from the defaults. This one lists **every** symbol, set or `# CONFIG_X is not set`,
+each under a comment that says what it does, in groups (GPU and display, Wi-Fi, Cellular, Storage ...). That is why it is a
+thousand lines long, and why a reader of one file can see every setting the kernel has. It is made, not written:
+
+```bash
+tools/hakios-config.py listing common > configs/common_defconfig     # after changing a value or adding a driver
+tools/hakios-config.py complete common                               # it must name every symbol (CI runs this, in the tests)
+```
+
+Change a value by editing the line and running `listing common` again: the file reads back the same.
+
+## `#include`: putting a device together
+
+A line `#include NAME` in a defconfig or fragment (a comment to any other reader) stands for `configs/NAME`, `NAME_defconfig` or
+`NAME.config`, laid first; the including file wins over what it includes; a loop is an error. This is the whole of
+`redwood_defconfig`. The order for `make redwood_defconfig` is `defconfig` (open, one core), then the common kernel, then the
+SoC, then the phone, then the fragments you named.
 
 ## What is checked, and why
 
-- **Types and ranges.** A bool is `y` or not set, a hex number starts with `0x`, `CONFIG_CPUS` is 1 to 8. A typo in
-  a name gets a suggestion (`no symbol CONFIG_GPUU (did you mean CONFIG_GPU?)`).
-- **Dependencies.** `CONFIG_VAR_STORE` requires `CONFIG_UFS_WRITE`, which requires `CONFIG_UFS=2`; `CONFIG_SOUND`
-  requires `CONFIG_ADSP`; the modem requires the storage service.
+- **Types and ranges.** A bool is `y` or not set, a hex number starts with `0x`, `CONFIG_CPUS` is 1 to 8, `CONFIG_THERMAL_STOP`
+  is 0 to 160. A typo in a name gets a suggestion (`no symbol CONFIG_GPUU (did you mean CONFIG_GPU?)`).
+- **Dependencies.** `CONFIG_VAR_STORE` requires `CONFIG_UFS_WRITE`, which requires `CONFIG_UFS=2`; `CONFIG_SOUND` requires
+  `CONFIG_ADSP`; `CONFIG_THERMAL_STOP` requires `CONFIG_THERMAL`; the modem requires the storage service.
 - **Firmware.** `CONFIG_FIRMWARE="none"` is the open profile: *nothing of the phone's own is loaded.* The check refuses
   a configuration that says `none` and still asks for the GPU, Wi-Fi, audio, haptics, cameras or the modem, because each
   of those uses firmware pulled from the owner's own phone (`fw-*/`, never in this repository).
@@ -53,29 +90,33 @@ which symbol is which argument.
 
 ## `CONFIG_BOOTARGS`: Linux's `CONFIG_CMDLINE`
 
-For an argument that has no symbol of its own: `CONFIG_BOOTARGS="fb_beat=2 loader_return_after=5"`. It is not an
-escape from the checks. Every name must be one the source reads ([boot-args.md](boot-args.md), made by
-`tools/boot-args.py` from the code, and checked in CI), so `fb_beet=2` is an error with a suggestion rather than a
-silent no-op; an argument that a symbol already sets (`cpus=8`) is refused with the name of the symbol; a word is
-`name=value` with no space, quote or backslash in it; and the words count towards the 607 characters.
+For an argument that has no symbol of its own, or a value the symbols cannot say: `CONFIG_BOOTARGS="fb_beat=2 loader_return_after=5"`. It is not an
+escape from the checks. Every name must be one the source reads ([boot-args.md](boot-args.md)), so `fb_beet=2` is an error with a
+suggestion rather than a silent no-op; an argument that a symbol already sets (`cpus=8`) is refused with the name of the symbol; a
+word is `name=value` with no space, quote or backslash in it; and the words count towards the 607 characters.
 
 ## What is the same as Linux, and what is not
 
 | | Linux / Android | here |
 |---|---|---|
-| a device | `arch/arm64/configs/<device>_defconfig` | `configs/<device>_defconfig` |
+| the common kernel | `gki_defconfig` | `common_defconfig` |
+| a SoC, a device | vendor and device fragments, `build.config` | `sc7280.config`, `redwood.config`, `#include` |
 | a fragment | `kernel/configs/*.config`, `merge_config.sh` | `configs/*.config`, `make NAME.config` |
 | the result | `.config`, compiled in | `.config`, becomes the boot-arguments |
 | a minimal config | `make savedefconfig` | `make savedefconfig` |
 | a command line baked in | `CONFIG_CMDLINE` | `CONFIG_BOOTARGS` (names checked) |
 | an option that needs a blob | `CONFIG_EXTRA_FIRMWARE` | `CONFIG_FIRMWARE="device"` / `"none"`, and `needs` |
 | the version | `uname -r` | `kern.hakios.version`, `kernel.ver=` |
+| how many options | thousands, in Kconfig | about 310, one for each argument the source reads |
+
+The last row is the honest one. This is not Kconfig and has no thousand options: the kernel is not built from its options. The number
+of symbols is the number of arguments the code reads, and it grows when a driver adds one.
 
 ## A new device
 
-`tools/new-device.py` makes `devices/<name>/` from a phone's own device tree; its defconfig is a file of a few
-lines, `configs/<name>_defconfig`, that starts from the open one and turns on only what that phone has been shown
-to do.
+`tools/new-device.py` makes `devices/<name>/` from a phone's own device tree. Its configuration is a fragment and a defconfig of a few
+lines: `configs/<name>.config` with what is true of that phone only, and `configs/<name>_defconfig` that includes the common kernel, the
+SoC's fragment and that one, and nothing more until the phone has been shown to do it.
 
 ## What a configuration does not do
 

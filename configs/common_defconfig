@@ -1,0 +1,1008 @@
+#
+# HakiOS common defconfig: every setting there is, with what it does.
+# Made by tools/hakios-config.py listing common; the values are the ones that file sets, and tests/CI check that it names every symbol.
+#
+# 311 symbols in 17 groups; 9 are set.
+#
+
+#
+# Build facts (3)
+#
+
+# the directory of the phone under devices/ this configuration is for
+# CONFIG_DEVICE is not set
+
+# the SoC family (sc7280: SM7325, QCM6490); it is part of the kernel's version string
+# CONFIG_SOC is not set
+
+# "device": options may use firmware pulled from your own phone (fw-*/); "none": the open configuration, nothing of ...
+CONFIG_FIRMWARE="device"
+
+#
+# CPU, memory and boot (21)
+#
+
+# CPU cores the kernel uses, 1 to 8; one if not set
+# CONFIG_CPUS is not set
+
+# the core the kernel runs on, 0 to 7; 7 is the biggest core (the loader keeps core 0)
+# CONFIG_BOOTCPU is not set
+
+# set the boot core to its top speed
+# CONFIG_CPUFREQ is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_APPLOG is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_APPLOG_NAME is not set
+
+# every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py ...
+# CONFIG_CPULOAD is not set
+
+# the memory's bus clock managers ("BCM") in the command database the boot loader left, with what is needed to vote ...
+# CONFIG_DDR is not set
+
+# read by hakios.cpufreq.c (kernel)
+# CONFIG_DDR_REST is not set
+
+# read by hakios.cpufreq.c (kernel)
+# CONFIG_DDR_VOTE is not set
+
+# read by GenericARMPE.cpp (kernel)
+# CONFIG_MACHINE_NAME is not set
+
+# read by hakios.cpufreq.c (kernel)
+# CONFIG_MEMBENCH is not set
+
+# read by the patch to Apple's files, loader.c (kernel and loader)
+# CONFIG_RD is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_REGTRACE is not set
+
+# read by loader_return.c (kernel)
+# CONFIG_RETURN_CPU is not set
+
+# read by loader_return.c (kernel)
+# CONFIG_RETURN_PANIC is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_SMALL_CORES is not set
+
+# read by GenericARMPE.cpp (kernel)
+# CONFIG_SMALL_CORES_AFTER is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_SYSSLEEP is not set
+
+# read by the patch to Apple's files, user_exception_trace.c (kernel)
+# CONFIG_SYSTRACE is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_SYSTRACE_NAME is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_XPCPROXY_IDVERSION is not set
+
+#
+# Storage and APFS (44)
+#
+
+# the phone's storage: 1 a survey, read only; 2 the loader's block service, through which the kernel reads it (the ...
+CONFIG_UFS=2
+
+# let the kernel write, to the partition `darwin` and nowhere else (writes to the phone's storage: it is the one ... [requires CONFIG_UFS=2]
+# CONFIG_UFS_WRITE is not set
+
+# keep /private/var across reboots, in the partition `darwin` [requires CONFIG_UFS_WRITE]
+# CONFIG_VAR_STORE is not set
+
+# read by apfs_vfsops.c (kernel)
+# CONFIG_APFS_CHEAP is not set
+
+# walk the whole volume and print only the totals
+# CONFIG_APFS_CHECK is not set
+
+# read by hakios.apfs_check.c (kernel)
+# CONFIG_APFS_CHUNK is not set
+
+# no file is read at all, only looked up and stat'ed -- how long the walk itself takes, the directories and the inodes
+# CONFIG_APFS_CONTENTS is not set
+
+# go no deeper than N levels below where the walk starts (1 = only the entries of that directory; 0 = no limit)
+# CONFIG_APFS_DEPTH is not set
+
+# the device to mount for modes 1 to 3 and 6 (default rvblk0)
+# CONFIG_APFS_DEV is not set
+
+# read by hakios.apfs_check.c (kernel)
+# CONFIG_APFS_HASH is not set
+
+# stop after N entries (and say how memory stood on the way): for finding out what a walk that never comes back runs ...
+# CONFIG_APFS_MAX is not set
+
+# read by apfs_vfsops.c (kernel)
+# CONFIG_APFS_META_CLUSTER is not set
+
+# where to mount it for mode 6 (default /private/var/apfs-check)
+# CONFIG_APFS_MNT is not set
+
+# at most N threads on one request, the caller's included (default: four, or the processors if fewer -- see ...
+# CONFIG_APFS_PAR is not set
+
+# read by apfs_vfsops.c (kernel)
+# CONFIG_APFS_ROOT_C is not set
+
+# read by apfs_vfsops.c (kernel)
+# CONFIG_APFS_ROOT_V is not set
+
+# read by apfs_vfsops.c (kernel)
+# CONFIG_APFS_ROUND is not set
+
+# directories not to go into, as paths inside the volume, comma separated
+# CONFIG_APFS_SKIP is not set
+
+# read by hakios.sparse.c (kernel)
+# CONFIG_APFS_SPARSE is not set
+
+# how many bytes of payload (default 40000)
+# CONFIG_APFS_STORE_LEN is not set
+
+# the writer's own number, kept in the header (default 0)
+# CONFIG_APFS_STORE_NOTE is not set
+
+# which pattern (default 1); a different seed is a different payload
+# CONFIG_APFS_STORE_SEED is not set
+
+# walk only that part of the volume
+# CONFIG_APFS_SUBTREE is not set
+
+# how many, for mode 5 (default 4)
+# CONFIG_APFS_THREADS is not set
+
+# read by apfs_vfsops.c (kernel)
+# CONFIG_APFS_UBC_READ is not set
+
+# a volume for user space in an ordinary boot
+# CONFIG_APFS_VOLUME is not set
+
+# read by hakios.apfs_check.c (kernel)
+# CONFIG_APFS_VOLUME_AT is not set
+
+# one of N walkers; a subdirectory is left on the shared stack (par_push)
+# CONFIG_APFS_WALKERS is not set
+
+# where in the file (default 0)
+# CONFIG_APFS_WRITE_AT is not set
+
+# what to fill them with (default 0xa5)
+# CONFIG_APFS_WRITE_BYTE is not set
+
+# how many bytes (default 4096, at most APFS_WRITE_MAX)
+# CONFIG_APFS_WRITE_LEN is not set
+
+# the file in it, by path from the volume's root
+# CONFIG_APFS_WRITE_PATH is not set
+
+# what one request through the loader costs, by size
+# CONFIG_UFS_BENCH is not set
+
+# read by hakios.ufs.c (kernel)
+# CONFIG_UFS_CHECK is not set
+
+# through this kernel's own driver instead, its own transfer list in the controller for the run, if all is as ...
+# CONFIG_UFS_NATIVE is not set
+
+# read by hakios.ufs.c (kernel)
+# CONFIG_UFS_NATIVE_BENCH is not set
+
+# read by hakios.ufshc.c (kernel)
+# CONFIG_UFS_NATIVE_BUFFER is not set
+
+# what this kernel's own driver reads is what the loader reads, byte for byte
+# CONFIG_UFS_NATIVE_CHECK is not set
+
+# read by hakios.ufshc.c (kernel)
+# CONFIG_UFS_NATIVE_HANG is not set
+
+# read by hakios.ufshc.c (kernel)
+# CONFIG_UFS_NATIVE_LEAVE is not set
+
+# read by hakios.ufshc.c (kernel)
+# CONFIG_UFS_NATIVE_SLOTS is not set
+
+# read by hakios.ufshc.c (kernel)
+# CONFIG_UFS_NATIVE_SPIN is not set
+
+# read by hakios.ufs.c (kernel)
+# CONFIG_VAR_SAVE_MS is not set
+
+# read by hakios.virtio_blk.c (kernel)
+# CONFIG_VIRTIO_BLK is not set
+
+#
+# Touch and buttons (8)
+#
+
+# the touch screen, and the power and volume buttons
+CONFIG_TOUCHSCREEN=y
+
+# read by hakios.buttons.c (kernel)
+# CONFIG_BUTTONS is not set
+
+# read by hakios.buttons.c (kernel)
+# CONFIG_BUTTONS_STEPS is not set
+
+# read by hakios.goodix.c (kernel)
+# CONFIG_TOUCH_FLIP is not set
+
+# read by hakios.goodix.c (kernel)
+# CONFIG_TOUCH_POLL_US is not set
+
+# the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
+# CONFIG_TOUCH_RATE is not set
+
+# the bus at N Hz (Android's device tree gives the chip 5 MHz)
+# CONFIG_TOUCH_SPI_HZ is not set
+
+# read by hakios.virtio_input.c (kernel)
+# CONFIG_VIRTIO_INPUT is not set
+
+#
+# GPU and display (67)
+#
+
+# rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
+CONFIG_GPU=y
+
+# read by hakios.adreno.c (kernel)
+# CONFIG_ADRENO is not set
+
+# read by hakios.adreno.c (kernel)
+# CONFIG_ADRENO_BLIND is not set
+
+# read by hakios.adreno.c (kernel)
+# CONFIG_ADRENO_DIRTY is not set
+
+# the newest step waits like that before every single access
+# CONFIG_ADRENO_FINE is not set
+
+# read by hakios.adreno.c (kernel)
+# CONFIG_ADRENO_KEEP is not set
+
+# step K alone (what steps 6 to 10 need, they check for themselves: within one session of the loader, power and clocks ...
+# CONFIG_ADRENO_ONLY is not set
+
+# how long the newest step waits after announcing a group of accesses (default 2200)
+# CONFIG_ADRENO_PAUSE is not set
+
+# when all is over, go back to the loader instead of starting the system
+# CONFIG_ADRENO_RETURN is not set
+
+# leave out the steps whose bits are set (bit 2 = step 2)
+# CONFIG_ADRENO_SKIP is not set
+
+# step 17 asks the GMU for the 3D core's Nth speed: 1 315 MHz, 2 450 MHz, 3 550 MHz (the default: the most this ...
+# CONFIG_ADRENO_SPEED is not set
+
+# step 18 leaves the core's second stream out (0) or gives it an empty context of its own (2): what the SMMU then ...
+# CONFIG_ADRENO_STREAM1 is not set
+
+# after the last step, say once a second for S seconds (default 20) that the machine is still alive, and what was ...
+# CONFIG_ADRENO_WATCH is not set
+
+# before any step: read what the firmware left the display controller doing (display_probe() below; two clocks are ...
+# CONFIG_DISPLAY_PROBE is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_FB_BEAT is not set
+
+# which pixels of the panel each frame changed (it costs: the panel's memory is slow to read)
+# CONFIG_FB_DIFF is not set
+
+# the picture is scaled to the panel nearest neighbour, as it once was
+# CONFIG_FB_FILTER is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_FB_HZ is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_FB_QUEUE is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_FB_THREADS is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_FBHEIGHT is not set
+
+# the same 375 x 812 points drawn at two pixels a point instead of three
+# CONFIG_FBSCALE is not set
+
+# log the first N calls of every selector (default 3)
+# CONFIG_FBTRACE is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_FBWIDTH is not set
+
+# the surface's memory, as before
+# CONFIG_GLBLIT is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLCENSUS is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLCOPY is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLENV is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLFETCH is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLFRAMES is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLGROUP is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLNUMBERS is not set
+
+# leave such draws as they are; 2: also those without a texture; 3: the two with a colour matrix drawn plainly too
+# CONFIG_GLPLAIN is not set
+
+# as the shaders say.
+# CONFIG_GLPRECISION is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLSHADERS is not set
+
+# the first texture of that size there is (names are handed out afresh every run)
+# CONFIG_GLSHOW is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLSHOW_PART is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLSHOW_ZOOM is not set
+
+# the draws of those programs are left out of the picture, which says what in it is their work
+# CONFIG_GLSKIP is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLSLOW is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLSYNC is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLTRACE is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLTRACE_AT is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLTRACE_CORNERS is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLTRACE_DRAWS is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLTRACE_FRAMES is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLTRACE_FUNCTION is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLTRACE_LIT is not set
+
+# the pixel a listed draw has left in the middle of itself (the matrix is CoreAnimation's, the last it gave)
+# CONFIG_GLTRACE_LOOK is not set
+
+# a line about a draw, if any of its first corners is inside the rectangle (or the rectangle inside them)
+# CONFIG_GLTRACE_PLACE is not set
+
+# the text of the shaders the program of a traced draw is made of, the first time that program draws
+# CONFIG_GLTRACE_SHADERS is not set
+
+# what the program of a traced draw was given, by the names its shaders use (coord_arg, texmat0, ...)
+# CONFIG_GLTRACE_UNIFORMS is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLWAIT is not set
+
+# read by hakios.gpu.cpp (kernel)
+# CONFIG_GPU_CACHED is not set
+
+# read by hakios.adreno.c (kernel)
+# CONFIG_GPU_EXACT is not set
+
+# read by hakios.gpu.cpp (kernel)
+# CONFIG_GPU_KEEP is not set
+
+# read by hakios.adreno.c (kernel)
+# CONFIG_GPU_LOG is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_REC_MB is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_REC_RING is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_REC_SECS is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_REC_START is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_REC_STEP is not set
+
+# kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
+# CONFIG_SURF_CLEAR is not set
+
+# log the first N surfaces created (default 24)
+# CONFIG_SURFTRACE is not set
+
+# read by MiniIOSurface.cpp (kernel)
+# CONFIG_SURFTRACE_OF is not set
+
+# a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for ...
+# CONFIG_TOUCH_LAT is not set
+
+# read by eagl.c (user space)
+# CONFIG_VBLUR is not set
+
+#
+# Audio and battery (30)
+#
+
+# the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
+CONFIG_ADSP=y
+
+# the speakers (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
+CONFIG_SOUND=4
+
+# the microphone (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
+# CONFIG_MIC is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_AGAIN is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_APR_WAIT is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_KEEP is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_LISTEN is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_NEW is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_PAUSE is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_RETURN is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_STEP is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_WAIT is not set
+
+# read by hakios.adsp.c, hakios.battery.c, loader.c (kernel and loader)
+# CONFIG_BATTERY is not set
+
+# every property once, for the log (which number is which on this phone's firmware)
+# CONFIG_BATTMGR is not set
+
+# read by hakios.mic.c (kernel)
+# CONFIG_MIC_ADC is not set
+
+# read by hakios.mic.c (kernel)
+# CONFIG_MIC_INPUT is not set
+
+# read by hakios.mic.c (kernel)
+# CONFIG_MIC_MAIN is not set
+
+# read by hakios.mic.c (kernel)
+# CONFIG_MIC_SECS is not set
+
+# read by hakios.mic.c (kernel)
+# CONFIG_MIC_TAP is not set
+
+# read by hakios.mic.c (kernel)
+# CONFIG_MIC_TEST is not set
+
+# read by hakios.audio.c (kernel)
+# CONFIG_REC_SOUND is not set
+
+# read by hakios.audio.c (kernel)
+# CONFIG_REC_SOUND_FED is not set
+
+# read by hakios.audio.c (kernel)
+# CONFIG_REC_SOUND_MIC is not set
+
+# read by hakios.sound.c (kernel)
+# CONFIG_SOUND_BELOW is not set
+
+# read by hakios.sound.c (kernel)
+# CONFIG_SOUND_GAIN is not set
+
+# read by hakios.sound.c (kernel)
+# CONFIG_SOUND_GUARD_AS is not set
+
+# read by hakios.sound.c (kernel)
+# CONFIG_SOUND_PAUSE is not set
+
+# read by hakios.sound.c (kernel)
+# CONFIG_SOUND_SECS is not set
+
+# reads registers and nothing else: the pins, the power names (below)
+# CONFIG_SPEAKER_PROBE is not set
+
+# read by hakios.virtio_sound.c (kernel)
+# CONFIG_VIRTIO_SOUND is not set
+
+#
+# Wi-Fi (31)
+#
+
+# Wi-Fi: the radio, its driver, a connection (also fw-wifi/mac and fw-wifi/network) [needs fw-wifi/ from the phone]
+CONFIG_WIFI=y
+
+# start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, ...
+# CONFIG_WIFI_AGAIN is not set
+
+# step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
+# CONFIG_WIFI_ASK is not set
+
+# read by lx_80211.c (kernel)
+# CONFIG_WIFI_BA is not set
+
+# read by hakios.wlfw.c (kernel)
+# CONFIG_WIFI_CAL is not set
+
+# read by hakios.wifi.c (kernel)
+# CONFIG_WIFI_DIRTY is not set
+
+# with wifi=1: the network of fw/network is not joined at the start
+# CONFIG_WIFI_FILE is not set
+
+# such a step waits like that before every single write and call
+# CONFIG_WIFI_FINE is not set
+
+# read by lx_bus.c (kernel)
+# CONFIG_WIFI_HOLD is not set
+
+# read by lx_bus.c (kernel)
+# CONFIG_WIFI_IRQ is not set
+
+# read by lx_bus.c (kernel)
+# CONFIG_WIFI_JOIN is not set
+
+# when the steps are over the DSP and the link stay up while the system runs, for whoever uses sys/hakios.qrtr.h; ...
+# CONFIG_WIFI_KEEP is not set
+
+# how long step 14 waits for the Wi-Fi firmware's service (default 3)
+# CONFIG_WIFI_LISTEN is not set
+
+# read by hakios.wifi.c (kernel)
+# CONFIG_WIFI_LOUD is not set
+
+# read by hakios.wifi.c, lx_bus.c (kernel)
+# CONFIG_WIFI_LX is not set
+
+# read by lx_base.c (kernel)
+# CONFIG_WIFI_LX_STEP is not set
+
+# the radio's own address for the driver (hakios_wifi_radio_address() below; xl takes it from a file that is not in ...
+# CONFIG_WIFI_MAC is not set
+
+# read by hakios.wlfw.c (kernel)
+# CONFIG_WIFI_MISSION is not set
+
+# steps K and later have not been seen to work (default: the last one)
+# CONFIG_WIFI_NEW is not set
+
+# read by hakios.wifi.c (kernel)
+# CONFIG_WIFI_PAUSE is not set
+
+# read by lx_bus.c (kernel)
+# CONFIG_WIFI_QUIET is not set
+
+# step 16 does read (2: whatever mode the firmware is in)
+# CONFIG_WIFI_RADIO_READ is not set
+
+# read by hakios.wlfw.c (kernel)
+# CONFIG_WIFI_READY is not set
+
+# when all is over, go back to the loader instead of starting the system
+# CONFIG_WIFI_RETURN is not set
+
+# read by lx_bus.c (kernel)
+# CONFIG_WIFI_SCAN is not set
+
+# before any step: read what the boot chain has set up in the SMMU for the radio's stream (smmu_look() below; nothing ...
+# CONFIG_WIFI_SMMU is not set
+
+# read by lx_bus.c (kernel)
+# CONFIG_WIFI_STATION is not set
+
+# read by hakios.wifi.c (kernel)
+# CONFIG_WIFI_STEP is not set
+
+# how long step 11 watches for the DSP to say that it is up (default 10)
+# CONFIG_WIFI_WAIT is not set
+
+# read by hakios.wifi.c (kernel)
+# CONFIG_WIFI_WATCH is not set
+
+# read by lx_80211.c (kernel)
+# CONFIG_WIFI_WIDE is not set
+
+#
+# Cellular (53)
+#
+
+# the modem beside the system: its firmware, file systems, IPA, SIM, NAS [needs fw-modem/ from the phone] [requires CONFIG_UFS=2]
+CONFIG_MODEM=y
+
+# start the modem although a kernel before this one left it shut down [requires CONFIG_MODEM]
+CONFIG_MODEM_AGAIN=y
+
+# the modem's RMTFS buffer, an address below 4 GB (0xa8000000 on the reference phone) [requires CONFIG_MODEM]
+# CONFIG_MODEM_BUFFER is not set
+
+# a session to that APN instead of the default profile
+# CONFIG_MODEM_APN is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_DATA_NOBIND is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_DATA_OFF is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_DATA_WAIT is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_DPM_OFF is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_BUS_OFF is not set
+
+# none of this. modem_ipa_data_trace=1: a line per packet.
+# CONFIG_MODEM_IPA_DATA_OFF is not set
+
+# read by hakios.cell.c, hakios.ipa.c (kernel)
+# CONFIG_MODEM_IPA_DATA_TRACE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_FW is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_FW_AT is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_GSI_ENABLE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_ITEM is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_NO_PROBE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_QUIET is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_RAW is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_ROUTES is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_SKIP_UC is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_IPA_SMMU_OFF is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_KEEP is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_LISTEN is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_NAS_WAIT is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_NEW is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_NO_IPA_QMI is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_NO_NAV is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_NO_TFTP is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_ONLINE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_PAUSE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_RETURN is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_RMTFS_DELAY is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_RMTFS_RW_FAKE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_RMTFS_RW_OFF is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_SHARE_OFF is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_SHARE_TEST is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_SIM_PROBE_OFF is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_SIM_SWITCH_OFF is not set
+
+# the steps once the root is there, then back to the loader if modem_return=1 says so
+# CONFIG_MODEM_STEP is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_WAIT is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_MODEM_WDA_OFF is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_CMD_DB is not set
+
+# read by hakios.ipa.c (kernel)
+# CONFIG_SOC_GSI_BASE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_IMEM is not set
+
+# read by hakios.ipa.c (kernel)
+# CONFIG_SOC_IPA_BASE is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_IPA_FW is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_IPA_STREAM is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_IPA_STREAM_UC is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_MPSS_MEM is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_PAS_IPA is not set
+
+# read by hakios.mpss.c (kernel)
+# CONFIG_SOC_PAS_MPSS is not set
+
+# where SMEM is (also the modem driver's argument; 0x80900000 on the reference phone)
+# CONFIG_SOC_SMEM is not set
+
+#
+# Cameras (13)
+#
+
+# the cameras (5 is what the README uses) [needs fw-camera/ from the phone]
+# CONFIG_CAM is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_AFTER is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_FAKE is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_FAKE_FPS is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_FRAMES is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_GAIN is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_KEEP_MB is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_MODE is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_PATTERN is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_SENSOR is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_SETTLE is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_SHUTTER is not set
+
+# read by hakios.camera.c (kernel)
+# CONFIG_CAM_VBLANK is not set
+
+#
+# Haptics and torch (5)
+#
+
+# the vibration motor (5 is what the README's phone line uses) [needs fw-haptic/ from the phone]
+# CONFIG_HAPTIC is not set
+
+# read by hakios.haptic.c (kernel)
+# CONFIG_HAPTIC_EFFECT is not set
+
+# a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its ...
+# CONFIG_TORCH is not set
+
+# read by hakios.torch.c (kernel)
+# CONFIG_TORCH_MAX_S is not set
+
+# read by hakios.torch.c (kernel)
+# CONFIG_TORCH_SECS is not set
+
+#
+# Chip, thermal and PMIC (10)
+#
+
+# read the chip's identity from the firmware's shared memory: kern.hakios.soc_* (SoC number, revision, board)
+# CONFIG_SOCINFO is not set
+
+# read the SoC's 27 temperature sensors: kern.hakios.thermal_* and a line in the log; read only
+# CONFIG_THERMAL is not set
+
+# how often the sensors are read, in milliseconds (200 to 60000; 2000) [requires CONFIG_THERMAL]
+# CONFIG_THERMAL_POLL is not set
+
+# hand control back to the loader when the hottest sensor reads this many degrees three times in a row (0: never; ... [requires CONFIG_THERMAL]
+# CONFIG_THERMAL_STOP is not set
+
+# list every block of the power-management chips the SPMI arbiter shows, and read the PMIC's clock; read only
+# CONFIG_PMIC is not set
+
+# only the clock, not the inventory of every block
+# CONFIG_PMIC_LIST is not set
+
+# read by hakios.socinfo.c (kernel)
+# CONFIG_SOC_SMEM_SIZE is not set
+
+# a summary line this often (0: only on a rise; 60)
+# CONFIG_THERMAL_LOG is not set
+
+# read by hakios.thermal.c (kernel)
+# CONFIG_THERMAL_TM0 is not set
+
+# read by hakios.thermal.c (kernel)
+# CONFIG_THERMAL_TM1 is not set
+
+#
+# Network (3)
+#
+
+# a log line for each of the first N frames on the network interfaces
+# CONFIG_NET_TRACE is not set
+
+# a log line for every name asked of a DNS server and every TCP connection begun (the names go to the log: for ...
+# CONFIG_NET_NAMES is not set
+
+# QEMU's virtio network device as en0 (QEMU only; its bus address means nothing on a phone)
+# CONFIG_VIRTIO_NET is not set
+
+#
+# Security stand-ins (1)
+#
+
+# read by kern_minimac.c (kernel)
+# CONFIG_PRIVS is not set
+
+#
+# Debugging (6)
+#
+
+# read by user_exception_trace.c (kernel)
+# CONFIG_USTACKS is not set
+
+# read by user_exception_trace.c (kernel)
+# CONFIG_USTACKS_AT is not set
+
+# read by user_exception_trace.c (kernel)
+# CONFIG_USTACKS_COUNT is not set
+
+# read by user_exception_trace.c (kernel)
+# CONFIG_USTACKS_MS is not set
+
+# read by user_exception_trace.c (kernel)
+# CONFIG_USTACKS_THREADS is not set
+
+# read by user_exception_trace.c (kernel)
+# CONFIG_USTACKS_TNAME is not set
+
+#
+# Loader (4)
+#
+
+# read by loader.c (loader)
+# CONFIG_CPUMASK is not set
+
+# read by loader.c (loader)
+# CONFIG_GAMUT is not set
+
+# read by loader.c (loader)
+# CONFIG_SERIAL is not set
+
+# read by loader.c (loader)
+# CONFIG_UFS_PROBE is not set
+
+#
+# User space (11)
+#
+
+# read by inject_sb.c (user space)
+# CONFIG_AUTOUNLOCK is not set
+
+# CoreAnimation's frame clock from the display driver's refresh notifications
+# CONFIG_CA_VBL is not set
+
+# read by inject.c (user space)
+# CONFIG_CAENV is not set
+
+# read by inject_sb.c (user space)
+# CONFIG_CC_FADE is not set
+
+# not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
+# CONFIG_GL is not set
+
+# read by inject.c (user space)
+# CONFIG_GLCOMPILE is not set
+
+# read by inject.c (user space)
+# CONFIG_GLNO is not set
+
+# read by inject.c (user space)
+# CONFIG_GLSB3 is not set
+
+# the renderer is made to answer that it has those functions after all
+# CONFIG_GLYES is not set
+
+# the root is to be the iOS root volume on /dev/DEV -- the phone's flash, read only
+# CONFIG_ROOT_APFS is not set
+
+# read by inject_sb.c (user space)
+# CONFIG_SWITCHER_WALLPAPER is not set
+
+#
+# Extra arguments (1)
+#
+
+# more kernel arguments, as `name=value` words in quotes; each name must be one docs/boot-args.md lists
+# CONFIG_BOOTARGS is not set
+

@@ -18,7 +18,8 @@
 #                        to copy to a FAT32 volume (UEFI-native boot, no fastboot; docs/uefi-boot.md)
 #
 # Configuration, the way Linux's make does it (configs/, tools/hakios-config.py; docs/configs.md):
-#   make redwood_defconfig   .config from configs/defconfig + configs/redwood_defconfig (any NAME_defconfig)
+#   make redwood_defconfig   .config from configs/defconfig + redwood_defconfig, which is common_defconfig + sc7280.config + redwood.config
+#                            (any NAME_defconfig; make common_defconfig is the common kernel alone; docs/configs.md)
 #   make virt.config         lay a fragment (configs/virt.config) over the .config there is
 #   make config              show the .config: its symbols, the kernel's arguments, the firmware it wants
 #   make savedefconfig       the .config as a minimal defconfig

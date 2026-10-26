@@ -86,6 +86,12 @@ try:
     check("the groups: the GPU file's argument is under GPU and display", "## GPU and display" in run(d, "--markdown").stdout)
     check("the page says which layers read ku_both", "| `ku_both` | KLU |" in run(d, "--markdown").stdout, run(d, "--markdown").stdout[-400:])
 
+    # the symbols: one for each argument, its meaning where the source documents it, none for what the tools set
+    symbols = {l.split("\t")[2]: l.split("\t") for l in run(d, "--symbols").stdout.splitlines()}
+    check("a symbol for each argument (and none for loader_return_after-style ones set by the tools)", "k_direct" in symbols and "u_helper" in symbols, sorted(symbols))
+    check("the symbol's name is the argument's, upper case", symbols["k_tunable"][0] == "K_TUNABLE", symbols.get("k_tunable"))
+    check("an argument read as text still gets a symbol", "k_string" in symbols, sorted(symbols))
+    check("without a documentation line the meaning is who reads it", "read by hakios.adreno.c" in symbols["k_direct"][6] or symbols["k_direct"][6] == "", symbols["k_direct"])
     # the check: missing files; current files; a driver that adds an argument; a table symbol nobody reads
     r = run(d, "--check")
     check("--check: files missing -> fails and says what to run", r.returncode != 0 and "boot-args.py --markdown" in r.stdout, r.stdout)
@@ -93,6 +99,7 @@ try:
     os.makedirs(os.path.join(d, "configs"), exist_ok=True)
     open(os.path.join(d, "docs", "boot-args.md"), "w", newline="\n").write(run(d, "--markdown").stdout)
     open(os.path.join(d, "configs", "boot-args.lst"), "w", newline="\n").write(run(d, "--lst").stdout)
+    open(os.path.join(d, "configs", "symbols.tsv"), "w", newline="\n").write(run(d, "--symbols").stdout)
     check("--check: current files -> passes", run(d, "--check").returncode == 0, run(d, "--check").stdout)
     open(os.path.join(d, "xnu", "files", "bsd", "dev", "hakios.adreno.c"), "a").write('void more(void) { PE_parse_boot_argn("a_new_one", &v, 4); }\n')
     subprocess.run(["git", "-C", d, "add", "-A"], check=True, capture_output=True)
@@ -103,6 +110,7 @@ try:
     subprocess.run(["git", "-C", d, "add", "-A"], check=True, capture_output=True)
     open(os.path.join(d, "docs", "boot-args.md"), "w", newline="\n").write(run(d, "--markdown").stdout)
     open(os.path.join(d, "configs", "boot-args.lst"), "w", newline="\n").write(run(d, "--lst").stdout)
+    open(os.path.join(d, "configs", "symbols.tsv"), "w", newline="\n").write(run(d, "--symbols").stdout)
     r = run(d, "--check")
     check("--check: a configuration symbol whose argument nobody reads -> fails", r.returncode != 0 and "nobody_reads_this" in r.stdout, r.stdout)
 finally:
