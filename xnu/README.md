@@ -34,6 +34,9 @@ Things to know:
 - After changing kernel headers that the two external libraries see: `xnu-deps/setup.sh --rebuild-libs`.
 - Apple's DriverKit generator (`iig`) is closed; `xnu-deps/iig-impl/` holds stubs generated from
   the linker's undefined symbols (`xnu-deps/gen-iig-stubs.py`).
+- A driver can be edited in `drivers/<subsystem>/`: `make kernel` runs `xnu/sync-drivers.sh`, which copies it into
+  the tree when it is newer than the tree's copy (never the other way round). Everything else, and drivers edited
+  in the tree, go back with `xnu/export.sh`.
 - Edit `xnu-src/xnu-8796.121.2` directly (a git tree on branch `redwood`); `xnu/export.sh`
   regenerates the patch and `files/` from the whole tree, so bring the tree up to the current patch
   first if somebody else changed the kernel meanwhile.

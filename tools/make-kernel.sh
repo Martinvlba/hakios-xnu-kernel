@@ -39,6 +39,8 @@ if [ "$1" = --judge ]; then
 	exit
 fi
 
+# what was edited in drivers/ goes into the kernel tree first (only what is newer than the tree's copy)
+[ ! -d xnu-src/xnu-8796.121.2 ] || xnu/sync-drivers.sh xnu-src/xnu-8796.121.2 || exit 1
 log=${KERNEL_LOG:-xnu-build.log}
 ./xnu-build.sh -k "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
