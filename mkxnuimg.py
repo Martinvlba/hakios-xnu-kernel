@@ -42,6 +42,13 @@ else:
     parts = {'shim': os.path.join(PREBUILT, 'BootShim.bin'), 'fd': os.path.join(PREBUILT, 'SILICIUM_UEFI.fd'),
              'dtb': os.path.join(PREBUILT, 'device-tree.dtb'), 'ramdisk': os.path.join(PREBUILT, 'ramdisk'),
              'mkbootimg': os.path.join(PREBUILT, 'mkbootimg.py')}
+for name, path in parts.items():
+    if not os.path.isfile(path):
+        hint = ''
+        if name == 'fd':
+            hint = ("\n  The UEFI image is not in the repository: it carries the phone vendor's own drivers, which are not\n"
+                    "  redistributed here. Build it from your own phone's firmware: devices/poco-x5-pro/uefi/README.md")
+        sys.exit(f'mkxnuimg.py: {path} not found{hint}')
 shim = open(parts['shim'], 'rb').read()
 fd = open(parts['fd'], 'rb').read()
 assert len(fd) == FD_SIZE, hex(len(fd))
