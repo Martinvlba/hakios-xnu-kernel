@@ -180,3 +180,13 @@ The detail is in separate files: `LEGAL.md` (what is and is not distributed, and
 these statements), `COMPLIANCE.md` (how the APSL 2.0 and other terms are met, and the items still
 to verify), `THIRD_PARTY_LICENSES.md` (every third-party component with origin and license), and
 `NOTICE` (the short canonical list). None of this is legal advice.
+
+hakios is an experimental project focused on bringing ios to android hardware. our goal is to make hackios free and accessible to everyone.
+
+owners:
+@oodze - founder
+@netusd - adversting / ceo-dev
+@wannqn - dev 
+@hxfuxyyXD - dev
+Rhaenja Hun（杭润嘉） — Developer / Sponsor
+
