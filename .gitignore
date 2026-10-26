@@ -4,6 +4,7 @@
 /*
 !/.gitignore
 !/.gitattributes
+!/VERSION
 !/README.md
 !/CONTRIBUTING.md
 !/ci/

@@ -2491,6 +2491,7 @@ struct payload_info {
 	uint64_t checkpoint;
 	uint64_t forced_base;
 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
+	const char *kernel_version;     /* kernel.ver: the version of the kernel in this payload (tools/kernel-version.py) */
 	int usb_mode;
 };
 
@@ -2540,6 +2541,8 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->forced_base = parse_number(text, 16); /* testing aid; must be free RAM */
 		} else if (str_eq(e->name, "rdres")) {
 			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
+		} else if (str_eq(e->name, "kernel.ver")) {
+			pi->kernel_version = text;                /* printed under the banner; the kernel gets it as hakios_kver */
 		} else if (str_eq(e->name, "checkpoint")) {
 			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
 		} else if (str_eq(e->name, "usb")) {
@@ -3008,9 +3011,38 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
-	for (const char *c = pi.cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
-		ba->commandLine[n++] = *c;
+	/* the version of this kernel, for sysctl kern.hakios.version and the kernel's log (no spaces in it) */
+	if (pi.kernel_version != NULL && pi.kernel_version[0] != 0) {
+		static const char prefix[] = "hakios_kver=";
+		uint32_t before = n, need = (uint32_t)(sizeof(prefix) - 1 + str_len(pi.kernel_version) + 1);
+
+		if (n + need < BOOT_LINE_LENGTH - 1) {
+			for (const char *c = prefix; *c; c++) {
+				ba->commandLine[n++] = *c;
+			}
+			for (const char *c = pi.kernel_version; *c && *c != ' '; c++) {
+				ba->commandLine[n++] = *c;
+			}
+			ba->commandLine[n++] = ' ';
+		} else {
+			print("WARNING: hakios_kver= does not fit in the kernel command line (%d of %d used)\n", (uint64_t)before,
+			    (uint64_t)(BOOT_LINE_LENGTH - 1));
+		}
 	}
+	/*
+	 * The payload's own command line, last. The kernel's boot_args holds BOOT_LINE_LENGTH characters and the
+	 * copy used to stop at the end without a word: a long line lost its tail (the last argument arrived
+	 * shortened and the kernel took it as that). Now it is said, with how much was lost.
+	 */
+	const char *rest = pi.cmdline;
+	for (; *rest && n < BOOT_LINE_LENGTH - 1; rest++) {
+		ba->commandLine[n++] = *rest;
+	}
+	if (*rest != 0) {
+		print("WARNING: the kernel command line is TRUNCATED: %d characters of the payload's cmdline did not fit in the "
+		    "%d the kernel has; the last argument is cut\n", (uint64_t)str_len(rest), (uint64_t)(BOOT_LINE_LENGTH - 1));
+	}
+	print("cmdline: %d of %d characters\n", (uint64_t)n, (uint64_t)(BOOT_LINE_LENGTH - 1));
 
 	/* --- device tree ---------------------------------------------------- */
 	const struct platform *plat = PLAT;
@@ -3907,13 +3939,45 @@ ramfb_phone_screen(void)
 }
 
 /*
- * The greeting. Printed from efi_main, while the UEFI text console is still ours: the USB command
- * loop that follows sets screen_quiet and leaves the screen alone, so what is on it now stays
- * there. It also goes into the log, which "xl log" fetches.
+ * The version of the kernel in the payload (the entry kernel.ver, made by xnuloader/mkpayload.py from
+ * tools/kernel-version.py), or NULL if the payload has none. A look at the payload that changes
+ * nothing and prints nothing, so that the banner can use it before the rest of the loader runs.
+ */
+static const char *
+payload_kernel_version(void)
+{
+	const struct payload_header *ph = (const struct payload_header *)PAYLOAD_BASE;
+
+	if (ph->magic != PAYLOAD_MAGIC) {
+		return NULL;
+	}
+	const uint8_t *p = (const uint8_t *)(ph + 1), *pend = p + ph->size;
+	while (p + sizeof(struct payload_entry) <= pend) {
+		const struct payload_entry *e = (const struct payload_entry *)p;
+
+		if (e->name[0] == 0) {
+			break;
+		}
+		if (str_eq(e->name, "kernel.ver")) {
+			return (const char *)(p + sizeof(*e));
+		}
+		p += sizeof(*e) + ((e->size + 15) & ~15u);
+	}
+	return NULL;
+}
+
+/*
+ * The greeting. Printed from efi_main, while the UEFI text console is still ours (on the phone that is
+ * Project Silicium's UEFI): the USB command loop that follows sets screen_quiet and leaves the screen
+ * alone, so what is on it now stays there. It also goes into the log, which "xl log" fetches.
+ * The two lines under the letters are the ones the project's banner has: a greeting from the kernel,
+ * and its version, kernel.ver=, as tools/kernel-version.py makes it.
  */
 static void
 print_banner(void)
 {
+	const char *version = payload_kernel_version();
+
 	print("\n");
 	print("   #   #   ###   #   #  #####   ###    ####\n");
 	print("   #   #  #   #  #  #     #    #   #  #\n");
@@ -3921,8 +3985,8 @@ print_banner(void)
 	print("   #   #  #   #  #  #     #    #   #      #\n");
 	print("   #   #  #   #  #   #  #####   ###   ####\n");
 	print("\n");
-	print("   hello hakios!\n");
-	print("   XNU loader: iOS on Android hardware\n");
+	print("   hello hackios-kernel!\n");
+	print("   kernel.ver=%s\n", version ? version : "unknown");
 	print("\n");
 }
 
