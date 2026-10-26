@@ -13,6 +13,7 @@
 #   make phone           a session on the phone, then back to Android (tools/modem-cycle.sh)
 #   make prebuilt        refresh prebuilt/ from what was built (tools/update-prebuilt.sh)
 #   make clean           build output of the kernel, loader and images
+#   make doctor          check this machine and a phone on adb for what HakiOS needs (tools/doctor.sh)
 #
 #   DEVICE=poco-x5-pro   the device directory under devices/ (default poco-x5-pro)
 #   ARGS="..."           kernel arguments for make phone (default: everything the phone has)
@@ -26,10 +27,13 @@ ARGS_OPEN ?= cpus=1
 ARGS ?= touchscreen=1 gpu=1 adsp=1 sound=4 wifi=1 haptic=5 modem=1 modem_again=1 modem_buffer=0xa8000000
 IMAGE_OPTS ?= REST=1
 
-.PHONY: help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all
+.PHONY: help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor
 
 help:
-	@sed -n '2,23p' Makefile | sed 's/^# \{0,1\}//'
+	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
+
+doctor:
+	tools/doctor.sh
 
 all: kernel loader images
 
