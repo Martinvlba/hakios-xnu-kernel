@@ -24,17 +24,19 @@ has to be in `docs/boot-args.md` (`python3 tools/boot-args.py --check`).
 | `camera/` | `hakios.camera.c`, `hakios.torch.c` | `cam=`, `torch=` | the camera sensors and ISP interface, the flashlight LED |
 | `haptic/` | `hakios.haptic.c` | `haptic=` | the vibration motor |
 | `audio/` | `hakios.adsp.c`, `hakios.audio.c`, `hakios.sound.c`, `hakios.speaker.c`, `hakios.mic.c`, `hakios.virtio_sound.c` | `adsp=`, `sound=`, `mic=` | the audio DSP loader, `/dev/hakios-audio`, the speaker amplifiers and their guard, the microphone, QEMU's virtio sound |
-| `power/` | `hakios.battery.c/.cpp`, `hakios.cpufreq.c` | `cpufreq=`, `battmgr=` | battery readings (through the DSP), CPU frequency |
+| `power/` | `hakios.battery.c/.cpp`, `hakios.cpufreq.c`, `hakios.thermal.c`, `hakios.pmic.c`, `hakios.battguard.c` | `cpufreq=`, `battmgr=`, `thermal=`, `pmic=`, `battery_stop=` | battery readings (through the DSP), CPU frequency, temperature limits that hand control back to the loader, the PMIC, and an end to an unwatched run before the battery is flat (compiled only: see its head for what it was checked against) |
 | `wifi/` | `hakios.wifi.c`, `hakios.wlfw.c`, `hakios.lx.c`, `hakios.sta.c`, `hakios.apple80211.c`, `hakios.wlan.cpp` | `wifi=`, `wifi_step=` | the Wi-Fi subsystem's bring-up, the WLAN firmware service, the Linux-driver layer (`wifi/lx/`) and the surface the iOS Wi-Fi service expects |
 | `modem/` | `hakios.mpss.c`, `hakios.cell.c`, `hakios.qmi.c`, `hakios.nas.c`, `hakios.ipa.c` | `modem=` | the cellular modem path (research; not reviewed in `docs/driver-review/`) |
 | `net/` | `hakios.net.c`, `hakios.virtio_net.c` | | the `enN` network interface and QEMU's virtio-net |
-| `core/` | `hakios.version.c` | `hakios_kver=` | `kern.hakios.version` |
+| `core/` | `hakios.version.c`, `hakios.socinfo.c` | `hakios_kver=`, `socinfo=` | `kern.hakios.version`; the SoC's identity as the hardware reports it |
 
 ## Reviews
 
 `docs/driver-review/` has one read-only audit per group (what was checked, what was found, how sure). They are
 findings to verify, not a certificate: read the report before relying on a driver, and fix findings in the driver,
 not in the report.
+
+The head of each driver says what was checked about it (compiled, run in QEMU, run on the phone) and what is a guess.
 
 The kernel is built from the C and C++ files only; the drivers need no files that are not in this repository,
 except the touch firmware header (`input/hakios.focaltech_fw.h`), which `tools/provenance.allow` marks as pending.
