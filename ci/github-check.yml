@@ -15,11 +15,19 @@ jobs:
           git ls-files '*.sh' xl | xargs -r -n1 bash -n
       - name: Makefile help
         run: make help
-      - name: No Apple files, no screenshots
+      - name: Provenance - every binary and blob explained, nothing proprietary, nothing writes to the phone
         run: |
-          # the rule of the repository: nothing of iOS, no pictures of it
-          ! git ls-files | grep -E -i '\.(png|jpe?g|gif|dylib|dmg|ipsw|car|nib|strings)$' | grep -v '^prebuilt/userland/' 
-          ! git ls-files | grep -E -i 'cryptex|dyld_shared_cache|SpringBoard\.app|/System/Library/'
+          # The rule of the repository: nothing of iOS, no pictures of it, no vendor firmware, and a
+          # promise that the project boots from RAM and does not write to the phone's storage. Every
+          # binary must have a line in tools/provenance.allow saying where it came from.
+          # (This replaces two lines of the form `! git ls-files | grep ...`: bash -e does not stop on
+          # a negated pipeline, so the first of them could never fail, and a committed screenshot passed.)
+          python3 tools/provenance-check.py
+      - name: The provenance check itself catches what it should
+        run: |
+          d=$(mktemp -d); git init -q "$d"; cp tools/provenance-check.py "$d/"; mkdir "$d/tools"; mv "$d/provenance-check.py" "$d/tools/"; : > "$d/tools/provenance.allow"
+          printf '\x89PNG\r\n\x1a\nx' > "$d/shot.png"; git -C "$d" add -A
+          if python3 "$d/tools/provenance-check.py" >/dev/null; then echo "a screenshot got through the provenance check"; exit 1; fi
       - name: The kernel patch applies to Apple's tree
         run: |
           git clone -q --depth 1 --branch xnu-8796.121.2 https://github.com/apple-oss-distributions/xnu.git /tmp/xnu
@@ -28,4 +36,7 @@ jobs:
         run: |
           [ -x tools/apfs/run-tests.sh ] && tools/apfs/run-tests.sh || echo "no self-test on this runner"
       - name: SoC args generator reproduces the POCO X5 Pro values
-        run: sh tools/soc-args-test.sh
+        run: |
+          sh tools/soc-args-test.sh
+          # ... and finds the AOSS mailbox however a phone's own device tree describes it
+          python3 tools/soc-args-test-aoss.py

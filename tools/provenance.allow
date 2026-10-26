@@ -1,0 +1,27 @@
+# What may be a binary, or a blob in a source file, in this repository, and why.
+# Read by tools/provenance-check.py, which CI runs on every push. Format:  STATUS  GLOB  reason
+#   open     redistributable
+#   pending  known, not settled: the check passes with a warning
+#   vendor   proprietary: the check fails until the file leaves the tree
+#   flash    a script allowed to write to the phone's storage, by a person's hand
+# The first line that matches a path decides. A file that no line explains fails the check.
+
+# --- built from this repository -----------------------------------------------------------------------
+open     prebuilt/mach.development.bcm2837        the kernel, built from Apple's open xnu-8796.121.2 plus xnu/hakios.patch and xnu/files: APSL-2.0, corresponding source here and at Apple
+open     prebuilt/loader.efi                      the boot loader, built from xnuloader/loader.c: MIT
+open     prebuilt/userland/*                      our programs and libraries, built from userland/src: MIT
+open     devices/poco-x5-pro/prebuilt/BootShim.bin   built from the shim of Mu-Silicium with our change (devices/poco-x5-pro/uefi/mu-silicium.patch): BSD-2-Clause-Patent
+
+# --- a description of the hardware ------------------------------------------------------------------------
+pending  devices/poco-x5-pro/prebuilt/device-tree.dtb          the phone's device tree, compiled from Linux sources that are GPL-2.0; confirm the headers, or have each user pull it from their own phone as tools/soc-args.py already does
+pending  devices/poco-x5-pro/uefi/files/Resources/DTBs/redwood.dtb   the same device tree, for the UEFI build
+
+# --- the touch controller's firmware, compiled into a driver ---------------------------------------------
+pending  xnu/files/bsd/dev/hakios.focaltech_fw.h   FocalTech's firmware as a C array, from a blob on the phone: the kernel (hakios.goodix.c) includes it, so it cannot simply be removed; owner to decide between a licence from the vendor and loading the blob from the phone at run time like the rest of the firmware
+
+# --- proprietary: Qualcomm's and Xiaomi's, taken out of the phone's own UEFI; not for a public tree ---------
+vendor   devices/poco-x5-pro/uefi/files/Binaries/redwood/*       UEFI drivers extracted from the vendor's xbl firmware (QcomPkg, MiPkg, RawFiles and the EDK2 modules as the vendor built them)
+vendor   devices/poco-x5-pro/prebuilt/SILICIUM_UEFI.fd           the built UEFI image: carries those drivers
+
+# --- scripts that may write to the phone's storage -----------------------------------------------------------
+flash    tools/userdata-carve.py                  prints the dd commands that cut the `darwin` partition off the end of Android's userdata (a new GPT); a person runs them once, by hand, under Android, and only for ufs_write=1 / var_store=1 persistence; the default run writes nothing
