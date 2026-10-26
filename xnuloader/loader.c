@@ -3994,7 +3994,12 @@ load_payload_from_volume(void)
 		volume_payload_note = "\\EFI\\hakios\\payload.bin is empty or does not fit in the payload region (63 MiB)";
 		goto close;
 	}
-	pages = (size + 0xfff) / 0x1000;
+	/*
+	 * Take the whole payload region, not only the pages the file fills: the rest of it is written later (a payload
+	 * sent over USB with `download:` goes up to the 63 MiB limit, and the panic log lives in the last MiB), and
+	 * memory the firmware has not given to us must not be written.
+	 */
+	pages = PAYLOAD_MAX_SIZE / 0x1000;
 	if (EFI_ERROR(BS->allocate_pages(2 /* AllocateAddress */, 2 /* EfiLoaderData */, pages, &address))) {
 		volume_payload_note = "the payload region is not free (the firmware keeps it reserved)";
 		goto close;
@@ -4004,6 +4009,9 @@ load_payload_from_volume(void)
 
 		if (EFI_ERROR(file->read(file, &chunk, (void *)(uintptr_t)(PAYLOAD_BASE + done))) || chunk == 0) {
 			volume_payload_note = "\\EFI\\hakios\\payload.bin could not be read to its end";
+			/* what was read stays in memory after the pages are given back: without this, the first MiB's XNUP
+			 * header would still be there and a half-read payload would be taken for a whole one */
+			((volatile struct payload_header *)PAYLOAD_BASE)->magic = 0;
 			BS->free_pages(PAYLOAD_BASE, pages);
 			goto close;
 		}

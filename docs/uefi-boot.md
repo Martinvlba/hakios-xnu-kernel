@@ -47,8 +47,10 @@ A file that is not a payload gives `is not a payload (no XNUP at its start)`, an
 - **63 MiB.** The loader's payload region is 64 MiB and its last MiB holds the panic log. The kernel is about 15 MiB;
   the **big iOS system image (2.5 GB) does not come this way**. It comes over USB (`xl ramdisk`, once per loader
   session) or, in the flash recipe, from the partition `darwin` (`docs/install.md`).
-- **The region has to be free.** The loader takes it with `AllocatePages(AllocateAddress)`. A firmware that keeps it
-  reserved refuses, and the loader says so and goes on without a payload, as it always did.
+- **The region has to be free.** The loader takes all 64 MiB of it with `AllocatePages(AllocateAddress)` (not only the
+  pages the file fills: a payload sent over USB later, and the panic log, are written into the rest). A firmware that
+  keeps it reserved refuses, and the loader says so and goes on without a payload, as it always did. A file that
+  cannot be read to its end is dropped, and its header is wiped, so a half-read payload is never started.
 - **Nothing is signed.** The loader is not signed and no Secure Boot is involved.
 
 ## On a phone: what is known and what is not
