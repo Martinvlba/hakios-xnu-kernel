@@ -135,6 +135,21 @@ else
 		note "bootloader as reported: locked=$lk verifiedboot=$vb (root-hiding modules can fake this; the real test is ./xl enter)"
 		bat=$(A 'cat /sys/class/power_supply/battery/capacity')
 		if [ -n "$bat" ] && [ "$bat" -lt 30 ] 2>/dev/null; then warn "battery $bat%" "charge it: HakiOS does not charge the phone while it runs"; else ok "battery ${bat:-?}%"; fi
+
+		# What a persistent install would stand on (docs/install.md). Only looked at: nothing here writes to the phone.
+		slot=$(A 'getprop ro.boot.slot_suffix')
+		if [ -n "$slot" ]; then
+			ok "A/B slots: Android runs from slot ${slot#_}; a persistent install would use the other slot and leave Android on this one"
+		else
+			warn "no A/B slot suffix reported" "a persistent install keeps Android on one slot and HakiOS on the other: without two slots there is no safe place for it (docs/install.md)"
+		fi
+		if [ "$root" = 1 ]; then
+			if A 'su -c "ls /dev/block/by-name"' | grep -qx darwin; then
+				ok "the partition darwin exists (the port's own: persistence and the iOS system image)"
+			else
+				note "no partition darwin yet: only persistence and a flash install need it (tools/userdata-carve.py plans it, and says what it does to Android's data)"
+			fi
+		fi
 	fi
 fi
 
