@@ -3906,6 +3906,26 @@ ramfb_phone_screen(void)
 	SCREEN.stride = PHONE_WIDTH * 4;
 }
 
+/*
+ * The greeting. Printed from efi_main, while the UEFI text console is still ours: the USB command
+ * loop that follows sets screen_quiet and leaves the screen alone, so what is on it now stays
+ * there. It also goes into the log, which "xl log" fetches.
+ */
+static void
+print_banner(void)
+{
+	print("\n");
+	print("   #   #   ###   #   #  #####   ###    ####\n");
+	print("   #   #  #   #  #  #     #    #   #  #\n");
+	print("   #####  #####  ###      #    #   #   ###\n");
+	print("   #   #  #   #  #  #     #    #   #      #\n");
+	print("   #   #  #   #  #   #  #####   ###   ####\n");
+	print("\n");
+	print("   hello hakios!\n");
+	print("   XNU loader: iOS on Android hardware\n");
+	print("\n");
+}
+
 efi_status EFIAPI
 efi_main(efi_handle image, efi_system_table *st)
 {
@@ -3918,6 +3938,7 @@ efi_main(efi_handle image, efi_system_table *st)
 
 	BS->set_watchdog_timer(0, 0, 0, NULL);
 	print("== XNULOADER v3 ==\n");
+	print_banner();
 	print("CurrentEL=%x MIDR=%x MMFR0=%x CNTFRQ=%d image=%x\n", READ_SYSREG(CurrentEL) >> 2, READ_SYSREG(MIDR_EL1),
 	    READ_SYSREG(ID_AA64MMFR0_EL1), READ_SYSREG(CNTFRQ_EL0), (uint64_t)(uintptr_t)&__ImageBase);
 
