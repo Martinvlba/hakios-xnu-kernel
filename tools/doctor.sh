@@ -81,7 +81,7 @@ fi
 have qemu-system-aarch64 && ok "qemu-system-aarch64: make qemu-open works" || warn "no qemu-system-aarch64" "optional: only for the QEMU targets"
 
 head1 "What is already built here"
-if [ -f fw-modem/modem.mdt ]; then ok "phone firmware pulled (fw-*/)"; else warn "no fw-modem/ yet" "with the phone on adb: devices/poco-x5-pro/pull-firmware.sh, or pull-firmware-root.sh if that gets nothing"; fi
+if [ -f fw-modem/modem.mdt ]; then ok "phone firmware pulled (fw-*/)"; else warn "no fw-modem/ yet" "with the phone on adb: devices/redwood/pull-firmware.sh, or pull-firmware-root.sh if that gets nothing"; fi
 if [ -f userland/system.apfs ] && [ -f userland/root.apfs ]; then ok "userland/system.apfs and root.apfs"; else warn "no iOS images yet" "make fetch, then PREBUILT=1 REST=1 MODEM=1 SYSTEM=1 userland/build.sh (needs iOS 16.5 from Apple's servers, ~8 GB)"; fi
 
 head1 "Phone"
@@ -109,12 +109,12 @@ else
 		note "reports: model='$model' board='$board' soc='$soc'"
 		note "device tree: model='$dtm' compatible='$dtc'"
 		if echo "$dtm $board" | grep -qi redwood && [ "$soc" = SM7325 ]; then
-			ok "redwood / SM7325: the reference platform (devices/poco-x5-pro)"
+			ok "redwood / SM7325: the reference platform (devices/redwood)"
 			if ! echo "$model" | grep -qiE 'poco|redwood|2210132'; then
 				note "the reported model '$model' is not a POCO X5 Pro name: it is probably spoofed; the device tree is what counts"
 			fi
 		elif [ -n "$dtm$soc" ]; then
-			warn "not the reference platform ($soc)" "a port is a new devices/<name>/: devices/poco-x5-pro/README.md; adb pull /sys/firmware/fdt and run tools/soc-args.py on it"
+			warn "not the reference platform ($soc)" "a port is a new devices/<name>/: devices/redwood/README.md; adb pull /sys/firmware/fdt and run tools/soc-args.py on it"
 		else
 			warn "could not read the device tree" "an adb shell may be restricted; try with root"
 		fi
@@ -125,9 +125,9 @@ else
 		fi
 		plain=$(A 'ls /vendor/firmware_mnt/image/modem.mdt 2>&1')
 		if echo "$plain" | grep -q '^/vendor/firmware_mnt/image/modem.mdt$'; then
-			ok "modem firmware is readable without root: devices/poco-x5-pro/pull-firmware.sh works"
+			ok "modem firmware is readable without root: devices/redwood/pull-firmware.sh works"
 		elif [ "$root" = 1 ] && A 'su -c "ls /vendor/firmware_mnt/image/modem.mdt"' | grep -q modem.mdt; then
-			warn "the firmware is there but only root can read it" "use devices/poco-x5-pro/pull-firmware-root.sh instead of pull-firmware.sh"
+			warn "the firmware is there but only root can read it" "use devices/redwood/pull-firmware-root.sh instead of pull-firmware.sh"
 		else
 			warn "modem firmware not found under /vendor/firmware_mnt/image" "check the ROM's firmware layout (docs/windows.md)"
 		fi

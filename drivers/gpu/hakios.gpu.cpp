@@ -1,7 +1,7 @@
 /*
  * HakiosGPU: the phone's Adreno for programs to draw with.
  *
- * bsd/dev/hakios.adreno.c wakes the GPU and, with boot-arg adreno_keep=1, keeps it on and
+ * drivers/gpu/hakios.adreno.c wakes the GPU and, with boot-arg adreno_keep=1, keeps it on and
  * starts this service. A program that opens it speaks the interface of Linux's msm DRM driver,
  * the one Mesa's freedreno knows: every request of that interface is a call of the user client
  * with the request's number as the selector and the request's structure passed in and back
@@ -45,7 +45,7 @@
 extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
 
 extern "C" {
-/* bsd/dev/hakios.adreno.c ("the GPU kept on"; declared in bsd/sys/hakios.input.h, which is not seen from here) */
+/* drivers/gpu/hakios.adreno.c ("the GPU kept on"; declared in bsd/sys/hakios.input.h, which is not seen from here) */
 bool hakios_gpu_ready(void);
 bool hakios_gpu_parameter(uint32_t which, uint64_t * value);
 uint64_t hakios_gpu_address(uint64_t size);

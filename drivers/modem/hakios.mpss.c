@@ -10,9 +10,9 @@
  * fw-modem/) -- into the 246 MB reserved for it and asks TrustZone to authenticate and start it.
  * From there everything is conversation through the shared memory: SMP2P for "up", "given up",
  * "stopped"; GLINK for channels; QRTR on the channel "IPCRTR" for the modem's services, which
- * speak QMI (bsd/dev/hakios.qmi.c knows the protocol; here only two of its messages are made by
+ * speak QMI (drivers/modem/hakios.qmi.c knows the protocol; here only two of its messages are made by
  * hand): the device management service is asked to put the modem online, and the network access
- * service what network it is on and how strong the signal is (bsd/dev/hakios.nas.c). What this
+ * service what network it is on and how strong the signal is (drivers/modem/hakios.nas.c). What this
  * learns goes to sysctl kern.hakios.cellular_* for the rest of the system; calls, SMS and data
  * are for the steps after this one.
  *
@@ -6340,7 +6340,7 @@ soc_override(void)
 	}
 }
 
-/* Called while the system starts (bsd/dev/hakios.input.c), after the Wi-Fi's start has been set going. */
+/* Called while the system starts (drivers/input/hakios.input.c), after the Wi-Fi's start has been set going. */
 void
 hakios_mpss_init(void)
 {

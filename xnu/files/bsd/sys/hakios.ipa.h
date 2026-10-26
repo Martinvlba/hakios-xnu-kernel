@@ -1,6 +1,6 @@
 /*
- * The modem's packets: the IPA's data path for this processor (bsd/dev/hakios.ipa.c) and the
- * network interface that stands on it (bsd/dev/hakios.cell.c).
+ * The modem's packets: the IPA's data path for this processor (drivers/modem/hakios.ipa.c) and the
+ * network interface that stands on it (drivers/modem/hakios.cell.c).
  *
  * The IPA (the SoC's packet engine) carries IP packets between the modem and this processor in
  * QMAP framing: a 4-byte header (pad length, mux id, packet length) before each packet. The

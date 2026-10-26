@@ -1,6 +1,6 @@
 #!/bin/bash
 # Give the kernel's build ath11k's descriptions of the messages a WCN6750's firmware speaks, for
-# bsd/dev/hakios.wlfw.c (a stand-in for ath11k's own qmi.c: see there). They are taken out of
+# drivers/wifi/hakios.wlfw.c (a stand-in for ath11k's own qmi.c: see there). They are taken out of
 # the driver's sources as they are -- the structures of its qmi.h and the tables of its qmi.c --
 # and written as one header into the kernel's build directory, where the compiler finds it and
 # git does not: ath11k's text is BSD-3-Clause-Clear and is not kept in the repository.

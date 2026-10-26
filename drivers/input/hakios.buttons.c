@@ -125,7 +125,7 @@ static vm_offset_t arb_core, arb_cnfg, arb_observer;
 
 /*
  * One transfer at a time through the arbiter for this system, whoever asks (the flashlight's
- * driver, bsd/dev/hakios.torch.c, as well): with two at once the arbiter drops one ("the transfer
+ * driver, drivers/camera/hakios.torch.c, as well): with two at once the arbiter drops one ("the transfer
  * was dropped"), as Linux never lets happen (one lock for the bus).
  */
 static LCK_GRP_DECLARE(spmi_lck_grp, "hakios-spmi");

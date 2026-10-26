@@ -21,7 +21,7 @@ HakiOS 在搭载高通 SoC 的 Android 手机上运行开源的 XNU 内核（xnu
   由 `xnu/apply.sh` 叠加到一份新克隆上；
 - 引导程序（`xnuloader/`）、我的程序和库（`userland/src/`）、工具（`tools/`）、构建和运行脚本；
 - `prebuilt/`：用本仓库构建出的内核、引导程序和库；
-- `devices/poco-x5-pro/`：一台手机所需的东西（UEFI 移植、设备树、固件脚本）。
+- `devices/redwood/`：一台手机所需的东西（UEFI 移植、设备树、固件脚本）。
 
 永远不会有的东西：
 
@@ -64,7 +64,7 @@ make qemu         # 20 分钟的会话
 
 ## 在手机上
 
-一台有移植的手机（`devices/poco-x5-pro/`，POCO X5 Pro 5G），已解锁引导程序，电脑上有 `adb` 和
+一台有移植的手机（`devices/redwood/`，POCO X5 Pro 5G），已解锁引导程序，电脑上有 `adb` 和
 `fastboot`，上一节的镜像，以及手机自己的固件：
 
 ```sh
@@ -106,7 +106,7 @@ make images       # 用户空间和镜像
 | `xnuloader/` | 引导程序（UEFI 应用） |
 | `userland/` | 我的程序和库（`src/`）、镜像构建、launchd 任务 |
 | `sysimage/` | 从 IPSW 取得并解包系统文件的脚本（不含文件本身） |
-| `devices/poco-x5-pro/` | 一台手机：UEFI 移植、设备树、预构建 UEFI 镜像、固件脚本 |
+| `devices/redwood/` | 一台手机：UEFI 移植、设备树、预构建 UEFI 镜像、固件脚本 |
 | `tools/` | APFS、固件、QMI 测试、运行脚本 |
 | `qemu/` | 在 QEMU 中运行 |
 | `docs/` | `cellular.md`：蜂窝网络（英文）；`ru/`：详细的俄文开发日志 |

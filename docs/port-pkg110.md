@@ -24,7 +24,7 @@ This is not a new port; it is bring-up of the existing `redwood` support on this
 ### SoC args verified against the hardware
 
 Pulled the phone's own `/sys/firmware/fdt` (via root) and ran `tools/soc-args.py` on it. Every
-address it produced matches the reference `devices/poco-x5-pro/soc.args`:
+address it produced matches the reference `devices/redwood/soc.args`:
 
 ```
 soc_ipa_base=0x1e40000   soc_gsi_base=0x1e04000   soc_ipcc=0x408000
@@ -40,12 +40,12 @@ fixed by the SoC, not the board, so the kernel's built-in SM7325 default (`0xc30
 
 ## Firmware: pulled — after a real porting fix
 
-The stock `devices/poco-x5-pro/pull-firmware.sh` got **0 files** on this ROM. Not because anything
+The stock `devices/redwood/pull-firmware.sh` got **0 files** on this ROM. Not because anything
 is missing: `/vendor/firmware_mnt` is a vfat mount owned by `system` with `fmask=0337`, and
 `/vendor/firmware` is not readable by the adb shell user either, so a plain `adb pull` is refused
 for every file. Under root all of it is there.
 
-Fix: `devices/poco-x5-pro/pull-firmware-root.sh` — the same pull by way of `su`, through a
+Fix: `devices/redwood/pull-firmware-root.sh` — the same pull by way of `su`, through a
 world-readable staging directory in `/data/local/tmp` that is removed afterwards. Nothing on the
 phone is changed. Result, verified:
 

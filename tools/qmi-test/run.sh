@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and run the tests of the QMI helpers (bsd/dev/hakios.qmi.c of the kernel tree) on this
+# Build and run the tests of the QMI helpers (drivers/modem/hakios.qmi.c of the kernel tree) on this
 # machine, under the address and undefined-behaviour sanitizers.
 #
 # With ath11k's sources at hand (tools/mk-ath11k.sh fetches them; ATH11K=<directory> to say where

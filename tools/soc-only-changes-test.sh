@@ -6,7 +6,7 @@ fails=0
 check() { # check LABEL WANT GOT
 	if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1"; echo "     want: [$2]"; echo "     got:  [$3]"; fails=$((fails + 1)); fi
 }
-ref=devices/poco-x5-pro/soc.args
+ref=devices/redwood/soc.args
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 check "the reference phone's own soc.args sends nothing" "" "$(soc_only_changes $ref | tr '\n' ' ')"

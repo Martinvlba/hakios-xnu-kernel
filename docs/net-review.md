@@ -13,12 +13,12 @@ Reviewed in full:
 | File | What it is |
 |---|---|
 | `xnu/files/bsd/sys/hakios.net.h` | the link ⇄ interface contract |
-| `xnu/files/bsd/dev/hakios.net.c` | `enN`: the Ethernet-looking interface on the kernel KPI |
-| `xnu/files/bsd/dev/hakios.virtio_net.c` | the QEMU virtio-net link behind `en0` |
-| `xnu/files/bsd/dev/hakios.cell.c` | `en1`: the modem's IP packets as Ethernet (ARP/DHCP in kernel) |
-| `xnu/files/bsd/dev/hakios.ipa.c` | the IPA/GSI data path (rings, endpoints, tables) |
-| `xnu/files/bsd/dev/hakios.apple80211.c` | the Apple80211 ioctl/event surface for `wifid` |
-| `xnu/files/bsd/dev/hakios.sta.c` | the station boundary (scan/join/leave serialization) |
+| `drivers/net/hakios.net.c` | `enN`: the Ethernet-looking interface on the kernel KPI |
+| `drivers/net/hakios.virtio_net.c` | the QEMU virtio-net link behind `en0` |
+| `drivers/modem/hakios.cell.c` | `en1`: the modem's IP packets as Ethernet (ARP/DHCP in kernel) |
+| `drivers/modem/hakios.ipa.c` | the IPA/GSI data path (rings, endpoints, tables) |
+| `drivers/wifi/hakios.apple80211.c` | the Apple80211 ioctl/event surface for `wifid` |
+| `drivers/wifi/hakios.sta.c` | the station boundary (scan/join/leave serialization) |
 | `wifi/lx/src/lx_80211.c` | the ath11k port's boundary: beacon parse, scan results, join |
 
 Not reviewed line-by-line this pass: `hakios.wifi.c` (DSP/subsystem bring-up — the radio works

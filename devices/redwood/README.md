@@ -20,7 +20,7 @@ what to rewrite for another phone.
 ## Firmware
 
 ```sh
-devices/poco-x5-pro/pull-firmware.sh      # the phone in Android, on adb
+devices/redwood/pull-firmware.sh      # the phone in Android, on adb
 ```
 
 Pulls the GPU (`fw-gpu/`), Wi-Fi (`fw-wifi/`), the audio DSP (`fw-audio/`, battery and charging

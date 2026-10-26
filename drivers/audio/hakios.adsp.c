@@ -2621,8 +2621,8 @@ apr_ask(uint8_t service, uint32_t opcode, const void *payload, uint32_t length, 
  * that a get does not use, and is answered with the property's number, its value and a result (0:
  * good). Only gets are sent from here: nothing is set, no limit, no current, no notice asked for.
  * With adsp=1 (battmgr=0: not) it is asked every BATTMGR_SECONDS while the DSP runs, and what it says
- * goes to bsd/dev/hakios.battery.c (hakios_battery_report()), and from there to the power source
- * that iOS reads (iokit/Kernel/hakios.battery.cpp). battmgr=2: every property once, for the log.
+ * goes to drivers/power/hakios.battery.c (hakios_battery_report()), and from there to the power source
+ * that iOS reads (drivers/power/hakios.battery.cpp). battmgr=2: every property once, for the log.
  * Units: capacity in hundredths of a percent, voltage in uV, current in uA (more than 0 while the
  * battery takes charge), the temperature in hundredths of a degree, charges in uAh.
  * The properties' numbers are this phone's firmware's, read with battmgr=2 and checked against what
@@ -3195,7 +3195,7 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 	thread_terminate(current_thread());
 }
 
-/* Called while the system starts (bsd/dev/hakios.input.c), after the Wi-Fi's start has been set going. */
+/* Called while the system starts (drivers/input/hakios.input.c), after the Wi-Fi's start has been set going. */
 void
 hakios_adsp_init(void)
 {

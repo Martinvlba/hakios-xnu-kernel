@@ -2,7 +2,7 @@
  * QMI, the message protocol the firmware of Qualcomm's processors speaks (the Wi-Fi DSP's
  * "WLFW" service among them): the helpers a client needs, under the names and with the meaning
  * of Linux's <linux/soc/qcom/qmi.h>, so that a driver written for Linux -- ath11k's qmi.c --
- * compiles against this header unchanged. The implementation (bsd/dev/hakios.qmi.c) is ours,
+ * compiles against this header unchanged. The implementation (drivers/modem/hakios.qmi.c) is ours,
  * written from what the interface and the wire format are publicly described to be; nothing of
  * Linux's implementation is in it.
  *

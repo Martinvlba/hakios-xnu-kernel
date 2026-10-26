@@ -3,7 +3,7 @@
 
 usage: tools/new-device.py NAME [--fdt FILE | --adb] [--out DIR] [--force]
 
-  NAME    the new directory under devices/ (lower case letters, digits and dashes: poco-x5-pro)
+  NAME    the new directory under devices/ (lower case letters, digits and dashes: redwood)
   --fdt   the phone's device tree, a file (adb pull /sys/firmware/fdt; the tree of the phone's own Android)
   --adb   pull it from the phone on adb now (as the shell user, then through su: on some ROMs the file is
           readable by root only)
@@ -18,7 +18,7 @@ What it makes, in devices/NAME/:
               the files whose head says where their numbers came from
   pull-soc.sh pull the tree again and regenerate soc.args
 
-It also compares the result with the reference phone's (devices/poco-x5-pro): a tree that gives the same
+It also compares the result with the reference phone's (devices/redwood): a tree that gives the same
 values means the kernel's built-in defaults already fit, and a port is then about the board (display,
 touch, UEFI) and not the SoC. Nothing here changes the phone; the only things read from it are its tree.
 """
@@ -35,14 +35,14 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SOC_ARGS = os.path.join(HERE, "soc-args.py")
-REFERENCE = "poco-x5-pro"
+REFERENCE = "redwood"
 REFERENCE_DTB = os.path.join(ROOT, "devices", REFERENCE, "prebuilt", "device-tree.dtb")
 
 # what is the phone's own, and the files whose head says where their numbers came from
 CHECKLIST = [
     ("UEFI", "the firmware that starts the loader: devices/%s/uefi/ is a port of Mu-Silicium; the vendor's drivers are "
              "extracted from your own phone (uefi/README.md)" % REFERENCE),
-    ("Display, buttons, touch", "xnu/files/bsd/dev/hakios.input.c, hakios.buttons.c, hakios.goodix.c (the reference phone's "
+    ("Display, buttons, touch", "drivers/input/hakios.input.c, hakios.buttons.c, hakios.goodix.c (the reference phone's "
                                 "controller; another phone has another)"),
     ("Storage", "hakios.ufs.c and hakios.ufshc.c (UFS); a phone with eMMC needs another driver"),
     ("CPU clocks", "hakios.cpufreq.c"),
@@ -108,7 +108,7 @@ def main():
     args = ap.parse_args()
 
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.name):
-        sys.exit("new-device: NAME is lower case letters, digits and dashes (like poco-x5-pro), got %r" % args.name)
+        sys.exit("new-device: NAME is lower case letters, digits and dashes (like redwood), got %r" % args.name)
     out = args.out or os.path.join(ROOT, "devices", args.name)
     if os.path.exists(out) and not args.force:
         sys.exit("new-device: %s exists (--force to write into it)" % out)

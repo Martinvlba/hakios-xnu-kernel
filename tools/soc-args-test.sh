@@ -1,14 +1,14 @@
 #!/bin/sh
 # Check that tools/soc-args.py still reproduces the POCO X5 Pro's soc_* arguments from its own
-# device tree, and that devices/poco-x5-pro/soc.args is in step with it. A guard against a change
+# device tree, and that devices/redwood/soc.args is in step with it. A guard against a change
 # to the generator (or the parser) silently shifting the addresses a port would get.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-dtb="$root/devices/poco-x5-pro/prebuilt/device-tree.dtb"
-want="$root/devices/poco-x5-pro/soc.args"
+dtb="$root/devices/redwood/prebuilt/device-tree.dtb"
+want="$root/devices/redwood/soc.args"
 got=$(python3 "$root/tools/soc-args.py" "$dtb")
 
-# the values the kernel carries as defaults (bsd/dev/hakios.mpss.c, hakios.ipa.c): the generator
+# the values the kernel carries as defaults (drivers/modem/hakios.mpss.c, hakios.ipa.c): the generator
 # must reproduce exactly these for the first phone, or a port built from a real tree is suspect
 expected='soc_ipa_base=0x1e40000
 soc_gsi_base=0x1e04000
@@ -35,7 +35,7 @@ if [ "$got" != "$expected" ]; then
 	exit 1
 fi
 if [ "$got" != "$(cat "$want")" ]; then
-	echo "soc-args-test: FAIL -- devices/poco-x5-pro/soc.args is out of step with the generator (regenerate it)"
+	echo "soc-args-test: FAIL -- devices/redwood/soc.args is out of step with the generator (regenerate it)"
 	exit 1
 fi
 echo "soc-args-test: the generator reproduces all 16 POCO X5 Pro soc_* values, and soc.args matches"

@@ -1,5 +1,5 @@
 /*
- * Tests of the QMI helpers (bsd/dev/hakios.qmi.c in the kernel tree) on the machine that builds
+ * Tests of the QMI helpers (drivers/modem/hakios.qmi.c in the kernel tree) on the machine that builds
  * them; tools/qmi-test/run.sh compiles and runs this.
  *
  * Three kinds:

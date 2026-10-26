@@ -1,14 +1,14 @@
 /*
  * HakiosWLAN: the registry entries by which iOS finds the Wi-Fi interface.
  *
- * en0 is made with the BSD interface KPI (bsd/dev/hakios.net.c) and has no IOKit object behind
+ * en0 is made with the BSD interface KPI (drivers/net/hakios.net.c) and has no IOKit object behind
  * it of its own; iOS looks for two, as IO80211Family would have made them:
  *
  *   - wifid's device is whatever service has the property IO80211InterfaceRole =
  *     "Infrastructure", and IO80211.framework binds to an interface through a service whose
  *     IOInterfaceName is the interface's name. The service has no user client, on purpose:
  *     the framework's attempt to open one fails, it says "Falling back to IOCTL path", and
- *     from then on every request is an ioctl on a socket, which bsd/dev/hakios.apple80211.c
+ *     from then on every request is an ioctl on a socket, which drivers/wifi/hakios.apple80211.c
  *     answers.
  *   - SystemConfiguration (SCNetworkInterfaceCopyAll) lists the network interfaces it finds as
  *     objects of the class IONetworkInterface, and calls one a Wi-Fi interface when its parent

@@ -21,8 +21,8 @@ sys.path.insert(0, HERE)
 from fdtbuild import cells, compat, fdt  # noqa: E402
 
 TOOL = os.path.join(HERE, "new-device.py")
-REFERENCE_DTB = os.path.join(ROOT, "devices", "poco-x5-pro", "prebuilt", "device-tree.dtb")
-REFERENCE_ARGS = os.path.join(ROOT, "devices", "poco-x5-pro", "soc.args")
+REFERENCE_DTB = os.path.join(ROOT, "devices", "redwood", "prebuilt", "device-tree.dtb")
+REFERENCE_ARGS = os.path.join(ROOT, "devices", "redwood", "soc.args")
 failures = []
 
 

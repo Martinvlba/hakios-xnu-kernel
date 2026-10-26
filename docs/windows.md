@@ -32,9 +32,9 @@ from Git Bash.
 - **Trust the device tree, not the product name.** Some units report a different brand and model than
   the board they really are (root-hiding modules fake the identity and even the bootloader's
   "locked" state). `tools/doctor.sh` prints both. The supported platform is `redwood` / SM7325.
-- **Firmware needs root on some ROMs.** If `devices/poco-x5-pro/pull-firmware.sh` reports every file
+- **Firmware needs root on some ROMs.** If `devices/redwood/pull-firmware.sh` reports every file
   "not on the phone" but `doctor` says the firmware is readable only by root, use
-  `devices/poco-x5-pro/pull-firmware-root.sh`. It copies under `su` to a staging directory, pulls, and
+  `devices/redwood/pull-firmware-root.sh`. It copies under `su` to a staging directory, pulls, and
   removes the staging directory; nothing on the phone is changed.
 
 ## Build and run

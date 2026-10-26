@@ -7,8 +7,8 @@ into an Android boot image for `fastboot boot`.
 
 The boot shim copies the FD to its base and the payload to PAYLOAD_BASE.
 
-The UEFI pieces are taken from a Mu-Silicium tree built here (Mu-Silicium/, see devices/poco-x5-pro/uefi/README.md)
-or, when there is none, from devices/poco-x5-pro/prebuilt/.
+The UEFI pieces are taken from a Mu-Silicium tree built here (Mu-Silicium/, see devices/redwood/uefi/README.md)
+or, when there is none, from devices/redwood/prebuilt/.
 
 usage: mkxnuimg.py [-p payload.bin] [-o out.img]
 """
@@ -16,7 +16,7 @@ import argparse, gzip, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MU = os.path.join(HERE, 'Mu-Silicium')
-PREBUILT = os.path.join(HERE, 'devices', 'poco-x5-pro', 'prebuilt')
+PREBUILT = os.path.join(HERE, 'devices', 'redwood', 'prebuilt')
 FD_BASE, FD_SIZE = 0x9FD00000, 0x200000
 PAYLOAD_BASE, PAYLOAD_MAX = 0xF0000000, 0x04000000
 
@@ -47,7 +47,7 @@ for name, path in parts.items():
         hint = ''
         if name == 'fd':
             hint = ("\n  The UEFI image is not in the repository: it carries the phone vendor's own drivers, which are not\n"
-                    "  redistributed here. Build it from your own phone's firmware: devices/poco-x5-pro/uefi/README.md")
+                    "  redistributed here. Build it from your own phone's firmware: devices/redwood/uefi/README.md")
         sys.exit(f'mkxnuimg.py: {path} not found{hint}')
 shim = open(parts['shim'], 'rb').read()
 fd = open(parts['fd'], 'rb').read()

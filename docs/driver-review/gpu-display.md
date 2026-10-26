@@ -6,8 +6,8 @@ Read-only review of the user-reachable surface of the GPU and display code. Noth
 
 | File | Lines |
 |---|---|
-| `xnu/files/bsd/dev/hakios.adreno.c` | 3843 |
-| `xnu/files/iokit/Kernel/hakios.gpu.cpp` | 1192 |
+| `drivers/gpu/hakios.adreno.c` | 3843 |
+| `drivers/gpu/hakios.gpu.cpp` | 1192 |
 | `xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp` | 1531 |
 | `xnu/files/iokit/Kernel/MiniIOSurface.cpp` | 1814 |
 | `xnu/files/iokit/Kernel/MiniIOSurface.h` | 174 |

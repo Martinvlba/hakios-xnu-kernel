@@ -80,7 +80,7 @@
  *
  * wifi=1 is all of it for whoever uses the phone: the steps that are needed (not the ones that
  * only look), ath11k as step 15 for real, its station given to the rest of the kernel to ask
- * (sys/hakios.sta.h: iOS's Wi-Fi side does, through bsd/dev/hakios.apple80211.c), the network
+ * (sys/hakios.sta.h: iOS's Wi-Fi side does, through drivers/wifi/hakios.apple80211.c), the network
  * of fw/network joined if the small image has that file, and everything left running while the
  * system does -- on a thread of its own, so that the system's start does not wait for it, and
  * without a word in the log but the outcome (what the steps say is kept, and shown if the radio
@@ -2723,7 +2723,7 @@ glink_send(const void *data, uint32_t length)
  * ("new server": a service, an instance, a node, a port), and later their going. We are node 1
  * (Linux's default, and what this phone's Android is); the DSP says who it is in what it sends.
  * The interface for the rest of the kernel is sys/hakios.qrtr.h: the four calls at the end of
- * this section, handed to the QMI helpers (bsd/dev/hakios.qmi.c), which is what speaks to the
+ * this section, handed to the QMI helpers (drivers/modem/hakios.qmi.c), which is what speaks to the
  * services.
  */
 #define HAKIOS_QRTR_MAX        8192            /* the most a datagram holds, either way */

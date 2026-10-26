@@ -3158,7 +3158,7 @@ hakios_adreno_quiesce(void)
 
 /*
  * With boot-arg adreno_keep=1 the steps are not undone: the GPU block stays as step 21 leaves it,
- * the 3D core powered and taking commands, and the service HakiosGPU (iokit/Kernel/hakios.gpu.cpp)
+ * the 3D core powered and taking commands, and the service HakiosGPU (drivers/gpu/hakios.gpu.cpp)
  * hands it to programs through the interface of Linux's msm driver, which is what Mesa's
  * freedreno speaks. That file keeps the buffers and the clients; what is the GPU's is here:
  * addresses in the 3D core's SMMU context, the ring, and the word by which the core says how
@@ -3417,7 +3417,7 @@ gpu_times(void)
 			unsigned by = 0;
 
 			if (gpu_log) {
-				/* "tl: q FENCE took US": what the core spent on that submission (iokit/Kernel/hakios.gpu.cpp: tl: Q) */
+				/* "tl: q FENCE took US": what the core spent on that submission (drivers/gpu/hakios.gpu.cpp: tl: Q) */
 				hakios_tl("tl: q %u took %llu\n", gpu_timed, ticks * 10 / 192);
 			}
 

@@ -61,10 +61,10 @@ gate anything that contains Apple's code behind it.**
 ### P0-a. Vendor binaries are in git (and the docs say they are not)
 
 `README.md` and `LEGAL.md` say the phone's firmware is "never" in the repository. But the tree tracks:
-`devices/poco-x5-pro/uefi/files/Binaries/redwood/**` (Qualcomm/Xiaomi UEFI drivers extracted from
+`devices/redwood/uefi/files/Binaries/redwood/**` (Qualcomm/Xiaomi UEFI drivers extracted from
 `xbl.img`, e.g. `DisplayDxe.efi`, `DALSYSDxe.efi`, `XBLCore.te`), the **built image
-`devices/poco-x5-pro/prebuilt/SILICIUM_UEFI.fd` (2 MB, contains those drivers)**, and
-`xnu/files/bsd/dev/hakios.focaltech_fw.h` (713 KB, a touch-controller firmware turned into a header).
+`devices/redwood/prebuilt/SILICIUM_UEFI.fd` (2 MB, contains those drivers)**, and
+`drivers/input/hakios.focaltech_fw.h` (713 KB, a touch-controller firmware turned into a header).
 `COMPLIANCE.md` itself marks all of this "to verify, not cleared". The upstream [Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium)
 licenses its *code* BSD-2-Clause (GPL for some dirs) and states **no terms** for the vendor-binaries
 folder, so "Project Silicium does it too" is not a licence.

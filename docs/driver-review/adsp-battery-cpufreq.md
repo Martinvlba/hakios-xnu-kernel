@@ -6,12 +6,12 @@ Files read in full (paths under `xnu/files/`):
 
 | File | Lines |
 |---|---|
-| `bsd/dev/hakios.adsp.c` | 3244 |
-| `bsd/dev/hakios.battery.c` | 198 |
-| `iokit/Kernel/hakios.battery.cpp` | 230 |
-| `bsd/dev/hakios.cpufreq.c` | 597 |
+| `drivers/audio/hakios.adsp.c` | 3244 |
+| `drivers/power/hakios.battery.c` | 198 |
+| `drivers/power/hakios.battery.cpp` | 230 |
+| `drivers/power/hakios.cpufreq.c` | 597 |
 
-Context also read: the callers `bsd/dev/hakios.input.c:217-226`, `osfmk/arm64/loader_return.c:377-379,445,492`, the consumer `bsd/dev/hakios.torch.c:454`, and the lock declarations in `hakios.wifi.c:190-192`. Nothing from the modem files was analysed.
+Context also read: the callers `drivers/input/hakios.input.c:217-226`, `osfmk/arm64/loader_return.c:377-379,445,492`, the consumer `drivers/camera/hakios.torch.c:454`, and the lock declarations in `hakios.wifi.c:190-192`. Nothing from the modem files was analysed.
 
 Method: read-only, line-by-line. For every value that the DSP, the always-on processor (AOP) or the firmware files supply (SMEM entry headers, SMP2P words, GLINK queue messages, QRTR and APR payloads, battmgr answers, MDT/ELF segment headers, the AOP mailbox descriptor, the command database) I traced how it becomes a size, an offset, a loop bound or an index. For every wait loop I noted the bound and the timeout action. Nothing was built or run, and no hardware facts were assumed. Where severity depends on silicon behaviour the finding says NEEDS-HARDWARE.
 

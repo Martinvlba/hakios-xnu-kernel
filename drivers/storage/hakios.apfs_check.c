@@ -1021,7 +1021,7 @@ apfs_check_concurrent(void)
  *
  * Where this can reach, which is the point: a block device.  The phone's flash is not one under
  * this kernel -- it is read through the loader's mailbox and, on the branch that writes to it at
- * all, through a character device of its own with its own bounds (bsd/dev/hakios.ufs.c) -- so
+ * all, through a character device of its own with its own bounds (drivers/storage/hakios.ufs.c) -- so
  * nothing here can touch it.  In QEMU and on the phone alike the only block devices are RAM
  * disks.  And it happens at all only when asked for twice over: apfs_check=7 and a path.
  */

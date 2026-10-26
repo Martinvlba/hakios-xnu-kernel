@@ -49,7 +49,7 @@ Packages as in Mu-Silicium's `setup_env.sh` (Arch: `git base-devel lld nasm clan
 aarch64-linux-gnu-gcc python python-pip python-virtualenv`).
 
 ```sh
-devices/poco-x5-pro/uefi/apply.sh          # clones Mu-Silicium (with submodules, ~3 GB) and applies the port
+devices/redwood/uefi/apply.sh          # clones Mu-Silicium (with submodules, ~3 GB) and applies the port
 python3 -m venv venv && venv/bin/pip install -r Mu-Silicium/pip-requirements.txt
 cd Mu-Silicium
 source ../venv/bin/activate
@@ -67,5 +67,5 @@ ln -s /usr/bin/nasm /usr/bin/ndisasm $D/Linux-x86-64/
 ```
 
 After a build, `mkxnuimg.py` (called by `./xl enter`) takes the UEFI from `Mu-Silicium/`, and
-`tools/update-prebuilt.sh` refreshes `devices/poco-x5-pro/prebuilt`. `devices/poco-x5-pro/uefi/export.sh`
+`tools/update-prebuilt.sh` refreshes `devices/redwood/prebuilt`. `devices/redwood/uefi/export.sh`
 is the reverse: it saves the changes from `Mu-Silicium/` here.

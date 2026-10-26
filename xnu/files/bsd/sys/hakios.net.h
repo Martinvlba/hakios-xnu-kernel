@@ -1,10 +1,10 @@
 /*
  * en0, and what stands behind it.
  *
- * The network interface iOS uses here is made in bsd/dev/hakios.net.c with the kernel's own
+ * The network interface iOS uses here is made in drivers/net/hakios.net.c with the kernel's own
  * interface KPI: Ethernet as far as the rest of the kernel and user space can tell. What carries
  * the frames is a "link", a driver of its own that knows nothing about interfaces: QEMU's virtio
- * network device today (bsd/dev/hakios.virtio_net.c), the phone's radio or frames carried over
+ * network device today (drivers/net/hakios.virtio_net.c), the phone's radio or frames carried over
  * the boot loader's USB channel tomorrow. This is all the two know of each other.
  *
  * A link driver

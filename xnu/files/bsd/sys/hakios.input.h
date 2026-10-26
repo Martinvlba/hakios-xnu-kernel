@@ -48,13 +48,13 @@ bool hakios_ufs_dev(dev_t dev);           /* one of the storage's devices */
 int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes); /* for drivers */
 void hakios_battery_init(void);        /* boot-arg battery=1: Qualcomm UEFI charger state shared by xnuloader */
 int hakios_battery_temperature(void);  /* the battery's temperature in C, -273 while it is not known */
-/* one transfer at a time through the PMIC arbiter for this system (bsd/dev/hakios.buttons.c) */
+/* one transfer at a time through the PMIC arbiter for this system (drivers/input/hakios.buttons.c) */
 void hakios_spmi_lock(void);
 void hakios_spmi_unlock(void);
 /*
- * How the battery is, as the audio DSP's battery manager says (bsd/dev/hakios.adsp.c, with adsp=1):
- * handed to bsd/dev/hakios.battery.c, which keeps it for the sysctls kern.hakios.battery_* and
- * passes it on to iokit/Kernel/hakios.battery.cpp, the power source that iOS reads. The structure
+ * How the battery is, as the audio DSP's battery manager says (drivers/audio/hakios.adsp.c, with adsp=1):
+ * handed to drivers/power/hakios.battery.c, which keeps it for the sysctls kern.hakios.battery_* and
+ * passes it on to drivers/power/hakios.battery.cpp, the power source that iOS reads. The structure
  * is repeated there (this header is not seen from iokit/), and `size` tells whether the two agree.
  */
 struct hakios_battery_state {
@@ -89,7 +89,7 @@ bool hakios_wlfw_exchange(uint32_t step);                              /* step 1
 bool hakios_wlfw_registers(uint64_t *address, uint32_t *size, bool *mission); /* ... and what it learnt for step 16 */
 void hakios_wlfw_stop(uint32_t step);                                  /* ... and its end, before the DSP is stopped */
 void hakios_wifi_quiesce(void);        /* on the way back to the loader: the Wi-Fi DSP, if it still runs, shut down */
-/* ath11k's object and the kernel's side of it (bsd/dev/hakios.lx.c), and what that asks of the phone's radio */
+/* ath11k's object and the kernel's side of it (drivers/wifi/hakios.lx.c), and what that asks of the phone's radio */
 int hakios_lx_start(void);             /* the driver brought up on the radio as far as it is built: 0 or an errno */
 void hakios_lx_stop(void);             /* ... and down again, if it stayed up (a network joined) */
 int hakios_lx_prepare(void);           /* before all that: the memory the radio will be shown, taken; 0 or an errno */
@@ -103,8 +103,8 @@ bool hakios_wifi_radio_address(uint8_t *address);      /* the radio's own addres
 bool hakios_wifi_network(uint8_t *name, unsigned *name_length, uint8_t *passphrase, unsigned *passphrase_length);
 
 /*
- * The GPU kept on (boot-arg adreno_keep=1), for iokit/Kernel/hakios.gpu.cpp: see "the GPU kept on"
- * in bsd/dev/hakios.adreno.c. One caller at a time.
+ * The GPU kept on (boot-arg adreno_keep=1), for drivers/gpu/hakios.gpu.cpp: see "the GPU kept on"
+ * in drivers/gpu/hakios.adreno.c. One caller at a time.
  */
 bool hakios_gpu_ready(void);
 bool hakios_gpu_parameter(uint32_t which, uint64_t *value);

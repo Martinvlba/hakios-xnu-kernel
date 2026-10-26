@@ -28,8 +28,35 @@ while IFS= read -r f; do
 	mkdir -p "$HERE/files.new/$(dirname "$f")"
 	if [ "$(uname)" = Darwin ]; then cp -pP "$f" "$HERE/files.new/$f"; else cp -P --preserve=mode "$f" "$HERE/files.new/$f"; fi
 done < "$HERE/files.list"
+
+# The drivers (drivers/map) are kept by subsystem in drivers/<subsystem>/, not under files/: take them out of
+# files.new and put each one where the map says. A hakios.* file the map does not list is refused, not guessed at.
+MAP="$HERE/../drivers/map"
+[ -f "$MAP" ] || { echo "export.sh: no $MAP" >&2; exit 1; }
+LISTED=$(awk '{ sub(/#.*/, "") } NF == 2 { print $2 }' "$MAP")
+UNLISTED=$(cd "$HERE/files.new" && find bsd/dev iokit/Kernel -type f -name 'hakios.*' 2>/dev/null | sort |
+	grep -vxF -f <(printf '%s\n' "$LISTED") || true)
+if [ -n "$UNLISTED" ]; then
+	echo "export.sh: these new drivers are not in drivers/map (add '<subsystem> <path>' for each, then run this again):" >&2
+	echo "$UNLISTED" | sed 's/^/    /' >&2
+	rm -rf "$HERE/files.new"; exit 1
+fi
+NDRIVERS=0
+while read -r sub tree _; do
+	case "$sub" in ''|'#'*) continue ;; esac
+	if [ ! -f "$HERE/files.new/$tree" ]; then
+		echo "export.sh: drivers/map lists $tree but the kernel tree has no such new file (deleted? take its line out of drivers/map)" >&2
+		rm -rf "$HERE/files.new"; exit 1
+	fi
+	mkdir -p "$HERE/../drivers/$sub"
+	mv "$HERE/files.new/$tree" "$HERE/../drivers/$sub/$(basename "$tree")"
+	NDRIVERS=$((NDRIVERS + 1))
+done < "$MAP"
+find "$HERE/files.new" -type d -empty -delete 2>/dev/null || true
+mkdir -p "$HERE/files.new"
 rm -rf "$HERE/files" "$HERE/files.list"
 mv "$HERE/files.new" "$HERE/files"
 
 echo "xnu/hakios.patch: $(grep -c '^diff --git' "$HERE/hakios.patch") files changed, $(wc -c < "$HERE/hakios.patch") bytes"
 echo "xnu/files: $(find "$HERE/files" -type f | wc -l) new files, $(du -sk "$HERE/files" | cut -f1) KB"
+echo "drivers/: $NDRIVERS drivers"

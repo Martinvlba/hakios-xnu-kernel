@@ -52,12 +52,12 @@ def found(d):
 
 FILES = {
     # kernel: the direct forms, in the old place (xnu/files) and the new one (drivers/)
-    "xnu/files/bsd/dev/hakios.adreno.c": 'void f(void) { PE_parse_boot_argn("k_direct", &v, sizeof(v)); PE_parse_boot_arg_str("k_string", b, 8); }\n',
+    "drivers/gpu/hakios.adreno.c": 'void f(void) { PE_parse_boot_argn("k_direct", &v, sizeof(v)); PE_parse_boot_arg_str("k_string", b, 8); }\n',
     "drivers/gpu/hakios.gpu.cpp": 'static TUNABLE(uint32_t, gOnTheBeat, "k_tunable", 1);\nstatic TUNABLE_WRITEABLE(uint32_t, gW, "k_writeable", 0);\n',
     # kernel: a file with its own option(name) that calls PE_parse_boot_argn(name)
-    "xnu/files/bsd/dev/hakios.mpss.c": 'static bool\noption(const char *name)\n{\n\treturn PE_parse_boot_argn(name, &v, 4);\n}\nvoid g(void) { if (option("k_wrapped")) {} }\n',
+    "drivers/modem/hakios.mpss.c": 'static bool\noption(const char *name)\n{\n\treturn PE_parse_boot_argn(name, &v, 4);\n}\nvoid g(void) { if (option("k_wrapped")) {} }\n',
     # kernel: Wi-Fi, through the helper and through the Linux layer
-    "xnu/files/bsd/dev/hakios.wifi.c": 'void h(void) { hakios_wifi_option("k_wifi_helper"); }\n',
+    "drivers/wifi/hakios.wifi.c": 'void h(void) { hakios_wifi_option("k_wifi_helper"); }\n',
     "wifi/lx/src/lx_bus.c": 'void i(void) { if (lx_os_option("k_wifi_lx")) {} }\n',
     # the loader
     "xnuloader/loader.c": 'static void j(const char *c) { if (starts_with(c, "l_arg=") || starts_with(c, "ku_both=")) {} }\n',
@@ -65,7 +65,7 @@ FILES = {
     "userland/src/eagl.c": 'void k(char *arguments) { strstr(arguments, "u_strstr=1"); strstr(arguments, "ku_both="); }\n',
     "userland/src/init.c": 'static const char *\nboot_arg(const char *name)\n{ return 0; }\nvoid m(void) { boot_arg("u_helper"); }\n',
     # the kernel also reads ku_both
-    "xnu/files/bsd/dev/hakios.net.c": 'void n(void) { PE_parse_boot_argn("ku_both", &v, 4); }\n',
+    "drivers/net/hakios.net.c": 'void n(void) { PE_parse_boot_argn("ku_both", &v, 4); }\n',
     # NOT arguments: must not be found
     "xnu/files/bsd/dev/hakios.other.c": 'static bool option(int x);\nvoid p(void) { option("not_k_no_definition"); }\n',     # option() here is no wrapper: no definition of option(const char *name)
     "xnu/files/bsd/dev/hakios.comment.c": '/* boot-arg adreno_zap=0 for the second run; nothing reads it now */\nvoid q(void) {}\n',

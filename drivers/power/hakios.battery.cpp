@@ -9,8 +9,8 @@
  * and everything else follows from that: the status bar's battery, the lock screen's "Charging",
  * the Batteries widget, Settings > Battery.
  *
- * What the values are comes from the audio DSP's battery manager (bsd/dev/hakios.adsp.c,
- * with adsp=1, unless battmgr=0), by way of bsd/dev/hakios.battery.c, which calls
+ * What the values are comes from the audio DSP's battery manager (drivers/audio/hakios.adsp.c,
+ * with adsp=1, unless battmgr=0), by way of drivers/power/hakios.battery.c, which calls
  * HakiosBatteryReport() with every reading; the first one makes the service. Nothing here asks
  * the charger anything or tells it anything.
  *
@@ -185,7 +185,7 @@ HakiosBattery::report(const struct hakios_battery_state * b)
 	updateStatus();
 }
 
-/* With every reading of the battery (bsd/dev/hakios.battery.c); the first one makes the service. One caller at a time. */
+/* With every reading of the battery (drivers/power/hakios.battery.c); the first one makes the service. One caller at a time. */
 void
 HakiosBatteryReport(const void * state, unsigned size)
 {

@@ -461,7 +461,7 @@ cmd_db_address(const char *name)
 	return 0;
 }
 
-/* Up to three writes through command slot set 0, and the wait until RPMh has done them (as bsd/dev/hakios.goodix.c) */
+/* Up to three writes through command slot set 0, and the wait until RPMh has done them (as drivers/input/hakios.goodix.c) */
 static bool
 ddr_rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 {

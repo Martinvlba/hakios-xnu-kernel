@@ -46,15 +46,15 @@ Things to know:
 | `iokit/Kernel/GenericARMPE.cpp`, `MiniIOSurface.*`, `MiniIOMobileFramebuffer.cpp`, `MiniAppleKeyStore.cpp` | the platform expert and replacements for closed drivers: surfaces, the display, the key store |
 | `bsd/miscfs/apfs/`, `bsd/miscfs/ramfs/` | read-only APFS and a writable RAM file system |
 | `bsd/kern/kern_minimac.c`, `libkern/amfi/` | AMFI and Sandbox stubs |
-| `bsd/dev/hakios.input.c`, `hakios.goodix.c` | input: `/dev/hakios-touch`, the Goodix GT9916 touch controller |
-| `bsd/dev/hakios.cpufreq.c` | CPU clocks (Qualcomm EPSS) |
-| `bsd/dev/hakios.net.c`, `hakios.virtio_net.c` | the `en0` network interface |
-| `bsd/dev/hakios.adreno.c`, `iokit/Kernel/hakios.gpu.cpp` | the Adreno 642L GPU |
-| `bsd/dev/hakios.wifi.c`, `hakios.wlfw.c` | Wi-Fi (WCN6750): shared memory, the radio's DSP, the driver |
-| `bsd/dev/hakios.qmi.c`, `hakios.nas.c` | QMI and the NAS client |
-| `bsd/dev/hakios.mpss.c` | the modem: firmware, file systems, IPA, SIM, registration |
-| `bsd/dev/hakios.audio.c`, `hakios.adsp.c`, `hakios.speaker.c`, `hakios.mic.c` | sound through the audio DSP; the battery comes through it too |
-| `bsd/dev/hakios.haptic.c`, `hakios.camera.c`, `hakios.ufs.c` | the vibration motor, the cameras, the UFS storage |
+| `drivers/input/hakios.input.c`, `hakios.goodix.c` | input: `/dev/hakios-touch`, the Goodix GT9916 touch controller |
+| `drivers/power/hakios.cpufreq.c` | CPU clocks (Qualcomm EPSS) |
+| `drivers/net/hakios.net.c`, `hakios.virtio_net.c` | the `en0` network interface |
+| `drivers/gpu/hakios.adreno.c`, `drivers/gpu/hakios.gpu.cpp` | the Adreno 642L GPU |
+| `drivers/wifi/hakios.wifi.c`, `hakios.wlfw.c` | Wi-Fi (WCN6750): shared memory, the radio's DSP, the driver |
+| `drivers/modem/hakios.qmi.c`, `hakios.nas.c` | QMI and the NAS client |
+| `drivers/modem/hakios.mpss.c` | the modem: firmware, file systems, IPA, SIM, registration |
+| `drivers/audio/hakios.audio.c`, `hakios.adsp.c`, `hakios.speaker.c`, `hakios.mic.c` | sound through the audio DSP; the battery comes through it too |
+| `drivers/haptic/hakios.haptic.c`, `hakios.camera.c`, `hakios.ufs.c` | the vibration motor, the cameras, the UFS storage |
 | `bsd/pthread/pthread_kext_static.c` | the pthread kext linked into the kernel |
 
 The patch also fixes what keeps open XNU from building and running outside Apple: the makefiles

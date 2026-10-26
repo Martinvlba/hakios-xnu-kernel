@@ -1,5 +1,5 @@
 /*
- * The speakers' guard (bsd/dev/hakios.guard.c) on this machine, with signals made up for it:
+ * The speakers' guard (drivers/storage/hakios.guard.c) on this machine, with signals made up for it:
  * what comes out, second by second, for a sustained full-scale tone at the amplifiers' levels that
  * are tried on the phone, for music-like noise, and for the tone once it stops (the cooling).
  *

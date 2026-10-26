@@ -52,16 +52,16 @@ bool hakios_audio_volume(uint32_t *below, bool *muted, uint32_t *generation);
 void hakios_audio_init(void);
 void hakios_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
 void hakios_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
-void hakios_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (bsd/dev/hakios.haptic.c) */
+void hakios_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (drivers/haptic/hakios.haptic.c) */
 void hakios_haptic_quiesce(void);      /* its chip back into reset: at the run's end and on a panic's way out */
 void hakios_haptic_pretend(uint32_t peak); /* a test's stand-in for iOS's waveform: as if a write of this loudness came */
-void hakios_torch_init(void);          /* boot-arg torch=N: the phone's flashlight (bsd/dev/hakios.torch.c) */
+void hakios_torch_init(void);          /* boot-arg torch=N: the phone's flashlight (drivers/camera/hakios.torch.c) */
 void hakios_torch_quiesce(void);       /* the light off: at the run's end and on a panic's way out */
-void hakios_camera_init(void);         /* boot-arg cam=N: the phone's cameras (bsd/dev/hakios.camera.c) */
+void hakios_camera_init(void);         /* boot-arg cam=N: the phone's cameras (drivers/camera/hakios.camera.c) */
 void hakios_camera_quiesce(void);      /* whatever of them was switched on, off: at the run's end and on a panic's way out */
 
 /*
- * The phone's speakers (bsd/dev/hakios.speaker.c): its two Awinic amplifiers, set up as
+ * The phone's speakers (drivers/audio/hakios.speaker.c): its two Awinic amplifiers, set up as
  * Android's driver sets them up, from Android's own configuration file (see there).
  */
 bool hakios_speaker_prepare(const uint8_t *acf, uint64_t size);       /* found, reset, configured: powered down, muted */
@@ -74,7 +74,7 @@ void hakios_speaker_quiesce(void);     /* powered down at once, without sleeping
 uint32_t hakios_speaker_monitor(bool tell);
 
 /*
- * The speakers' guard (bsd/dev/hakios.guard.c): what the samples go through in the feeder on their
+ * The speakers' guard (drivers/storage/hakios.guard.c): what the samples go through in the feeder on their
  * way to the amplifiers, for want of the DSP's speaker protection. Levels in eighths of a dB.
  */
 #define HAKIOS_GUARD_SILENT    0xffffffffu     /* the amplifiers are off: nothing reaches the speakers */
@@ -99,7 +99,7 @@ bool hakios_audio_recording_fed(void);
 void hakios_audio_record_fed(const int16_t *frames, uint32_t count);
 
 /*
- * The audio DSP's services, for the sound's path (bsd/dev/hakios.adsp.c, bsd/dev/hakios.sound.c).
+ * The audio DSP's services, for the sound's path (drivers/audio/hakios.adsp.c, drivers/audio/hakios.sound.c).
  * hakios_adsp_apr() sends one APR packet to a service of the DSP (AFE 4, ASM 7, ADM 8) with the
  * given port and token (0: one of its own) and, with wait_ms, waits for the packet that carries
  * that token back. What is not waited for goes to the handler of events, if there is one and it

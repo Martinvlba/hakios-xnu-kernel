@@ -48,7 +48,7 @@
 #                                   GL=test: only the library and bin/gl_test (a triangle, src/gl_test.c;
 #                                   RC_JOBS=rc.jobs.gltest runs it); the window server stays as it is.
 #                      ADSP=1       with the audio DSP's firmware from ../fw-audio in fw/ (20 MB; for the
-#                                   kernel's adsp_step=N, bsd/dev/hakios.adsp.c, which runs before the root is
+#                                   kernel's adsp_step=N, drivers/audio/hakios.adsp.c, which runs before the root is
 #                                   mounted). Not beside GL=1: the two do not fit the 64 MB the loader takes with
 #                                   the kernel. adsp=1 needs none of it: the system image has the firmware in /fw.
 #                      MODEM=1      stage checked local MPSS firmware from ../fw-modem in system.apfs /fw.
@@ -106,7 +106,7 @@ IOS_JOBS=${JOBS-"
 	com.apple.SpringBoard
 "}
 # iOS's own Wi-Fi daemon, for Settings to have a Wi-Fi to show: the kernel answers it in
-# bsd/dev/hakios.apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
+# drivers/wifi/hakios.apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
 # networks the radio hears. NOT FINISHED: a network cannot be joined from Settings yet.
 # It is in by default now, because it costs nothing where there is no radio at all: in QEMU it comes up, talks
 # to itself about country codes and sits there -- 114 processes started against 119 without it, no crash, never
@@ -363,13 +363,13 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $IOS/rootfs root/LaunchDaemons $IOS_JOBS
 fi
 # firmware of the phone's own hardware, where somebody has pulled it from the phone's Android into ../fw-gpu
-# (it is the vendor's and never in the repository): the kernel's GPU bring-up, bsd/dev/hakios.adreno.c, finds it in fw/
+# (it is the vendor's and never in the repository): the kernel's GPU bring-up, drivers/gpu/hakios.adreno.c, finds it in fw/
 if [ -d ../fw-gpu ]; then
 	mkdir -p root/fw
 	cp ../fw-gpu/* root/fw/
 fi
 # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
-# (bsd/dev/hakios.wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
+# (drivers/wifi/hakios.wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
 # board data and the regulatory database (image/qca6750 there; 60 and 24 KB)
 if [ -f ../fw-wifi/wpss.mdt ]; then
 	mkdir -p root/fw
@@ -384,12 +384,12 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
 fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
-# (bsd/dev/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
+# (drivers/haptic/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
 if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
 fi
-# ... and the cameras' register tables (bsd/dev/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
+# ... and the cameras' register tables (drivers/camera/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
 # hakios_<maker>_<sensor>_<camera>.bin, in ../fw-camera (the vendor's: neither they nor the tables are in the
 # repository): camera-<sensor>.tab
@@ -407,7 +407,7 @@ for tuned in ../fw-camera/com.qti.tuned.hakios_*.bin; do
 	mkdir -p root/fw
 	../tools/camtuning.py "$tuned" "root/fw/camera-$sensor.isp" >/dev/null
 done
-# ... and with ADSP=1 the image of the audio DSP, from the same place into ../fw-audio (bsd/dev/hakios.adsp.c):
+# ... and with ADSP=1 the image of the audio DSP, from the same place into ../fw-audio (drivers/audio/hakios.adsp.c):
 # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
 # the loader takes.
 if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
@@ -446,7 +446,7 @@ for f in extensions.plist extensions.plist.sig; do
 done
 [ -d root/lib/HakiosAudio.driver ] && ln -s /redwood/lib/HakiosAudio.driver root/hal/HakiosAudio.driver
 # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
-# as it is, which the kernel's drivers use where it lies in memory (bsd/dev/hakios.image.c)
+# as it is, which the kernel's drivers use where it lies in memory (drivers/storage/hakios.image.c)
 python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1
 [ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs redwood=root
 
@@ -556,7 +556,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	mv sysroot/sbin/launchd sysroot/sbin/launchd.ios
 	cp obj/stage0 sysroot/sbin/launchd
 	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
-	# it once the root is mounted (bsd/dev/hakios.adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
+	# it once the root is mounted (drivers/audio/hakios.adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
 	if [ -f ../fw-audio/adsp.mdt ]; then
 		mkdir -p sysroot/fw
 		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
@@ -566,7 +566,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# This stages the files; a separate XNU MPSS driver is still required to start the modem.
 	if [ -n "$MODEM" ]; then
 		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
-		../devices/poco-x5-pro/tools/modem_firmware.py --dtb ../devices/poco-x5-pro/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
+		../devices/redwood/tools/modem_firmware.py --dtb ../devices/redwood/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
 			--node /soc/qcom,mss@4080000 >/dev/null
 		mkdir -p sysroot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/
@@ -576,7 +576,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 			rm -rf sysroot/fw/image && cp -R ../fw-modem/image sysroot/fw/image
 		fi
 	fi
-	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (bsd/dev/hakios.speaker.c,
+	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (drivers/audio/hakios.speaker.c,
 	# for sound=3): Android's own register values, which are not in the repository either
 	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
 		mkdir -p sysroot/fw

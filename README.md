@@ -25,7 +25,7 @@ Only my code and my data:
 - the boot loader (`xnuloader/`), my programs and libraries (`userland/src/`), tools (`tools/`),
   build and run scripts;
 - `prebuilt/`: the kernel, loader and libraries built from this repository;
-- `devices/poco-x5-pro/`: what one phone needs (its UEFI port, device tree, firmware script).
+- `devices/redwood/`: what one phone needs (its UEFI port, device tree, firmware script).
 
 Not in the repository, never:
 
@@ -71,11 +71,11 @@ The lock screen appears after two or three minutes. The mouse with the button he
 
 ## On the phone
 
-A phone with a port (`devices/poco-x5-pro/`, POCO X5 Pro 5G), its boot loader unlocked, `adb` and
+A phone with a port (`devices/redwood/`, POCO X5 Pro 5G), its boot loader unlocked, `adb` and
 `fastboot` on the PC, the images from the previous section, and the phone's own firmware:
 
 ```sh
-devices/poco-x5-pro/pull-firmware.sh    # GPU, Wi-Fi, audio/battery, haptics, modem, cameras -> fw-*/
+devices/redwood/pull-firmware.sh    # GPU, Wi-Fi, audio/battery, haptics, modem, cameras -> fw-*/
 ./xl enter                          # Android -> fastboot -> our loader in RAM
 ./xl ramdisk userland/system.apfs   # the system image into the phone's RAM (~80 s), once per loader session
 XL_SB_DELAY=8 XL_SECS=600 \
@@ -129,7 +129,7 @@ module, or the open lzfse library gets built). User space and the images: `REST=
 | `xnuloader/` | the boot loader (a UEFI application) |
 | `userland/` | my programs and libraries (`src/`), the image build, launchd jobs |
 | `sysimage/` | scripts that fetch and unpack the OS files from the IPSW (none of the files themselves) |
-| `devices/poco-x5-pro/` | one phone: its UEFI port, device tree, prebuilt UEFI images, firmware script, tools |
+| `devices/redwood/` | one phone: its UEFI port, device tree, prebuilt UEFI images, firmware script, tools |
 | `tools/` | APFS, firmware, QMI tests, run scripts |
 | `qemu/` | running in QEMU |
 | `docs/` | `notes.md`: the detailed notes (Russian); `cellular.md`: cellular; `air.md`, `metal.md`: the GPU |
@@ -139,7 +139,7 @@ module, or the open lzfse library gets built). User space and the images: `REST=
 
 The kernel, loader and user space are shared. Everything about one phone lives in
 `devices/<name>/`: its UEFI, device tree, firmware list and tools. Today there is one,
-`devices/poco-x5-pro/`, and its README is the map of what a port to another Qualcomm phone must bring.
+`devices/redwood/`, and its README is the map of what a port to another Qualcomm phone must bring.
 The phone's drivers are the files `xnu/files/bsd/dev/hakios.*.c`; the head of each says where its
 numbers came from.
 

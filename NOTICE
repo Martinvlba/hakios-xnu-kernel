@@ -6,15 +6,15 @@ In the repository:
 - XNU (Apple): the kernel sources are fetched by xnu/apply.sh from github.com/apple-oss-distributions/xnu;
   our patch and files are a derivative work under the Apple Public Source License 2.0 (LICENSE.APSL).
 - libdeflate (Eric Biggers), xnu/files/bsd/miscfs/apfs/libdeflate/: MIT, see its COPYING.
-- mkbootimg.py (Android Open Source Project), devices/poco-x5-pro/prebuilt/mkbootimg.py: Apache License 2.0.
-- Mu-Silicium / Project Mu (Project Silicium, Microsoft and contributors): devices/poco-x5-pro/uefi/ holds a
+- mkbootimg.py (Android Open Source Project), devices/redwood/prebuilt/mkbootimg.py: Apache License 2.0.
+- Mu-Silicium / Project Mu (Project Silicium, Microsoft and contributors): devices/redwood/uefi/ holds a
   patch and files against it; their license applies to the derived parts (BSD-2-Clause-Patent).
-- UEFI driver binaries of the phone's own firmware, devices/poco-x5-pro/uefi/files/Binaries/redwood/: the
+- UEFI driver binaries of the phone's own firmware, devices/redwood/uefi/files/Binaries/redwood/: the
   vendor's (Qualcomm/Xiaomi), extracted from the phone's xbl.img the way Project Silicium redistributes
   such drivers for other phones. They are needed only to rebuild the UEFI image; they can be removed and
   extracted by each user from their own phone's firmware with UEFIReader.
 
-- the FocalTech touch firmware, xnu/files/bsd/dev/hakios.focaltech_fw.h: the touch vendor's;
+- the FocalTech touch firmware, drivers/input/hakios.focaltech_fw.h: the touch vendor's;
   generated from a device blob, redistribution terms "to verify" (THIRD_PARTY_LICENSES.md).
 
 - the Wi-Fi driver: Linux's ath11k (BSD-3-Clause-Clear) and FreeBSD's LinuxKPI headers (BSD-2-Clause) are
@@ -27,6 +27,6 @@ Fetched at build time, never committed:
 - the iPhoneOS 16.5 SDK from github.com/theos/sdks, and theos's cctools (Apple's open-source cctools): the
   kernel's and user space's build tools.
 - the phone's firmware (GPU, Wi-Fi, audio DSP, modem, haptics, cameras): the vendor's, pulled from the
-  user's own phone (devices/poco-x5-pro/pull-firmware.sh).
+  user's own phone (devices/redwood/pull-firmware.sh).
 - lzfse (Apple, BSD-3-Clause), built by xnuloader/mkidentity.sh when no LZFSE decoder is installed.
 - Mesa (for GL=1 images), Procursus and Sileo packages (tools/mk-jb.sh): their own licenses.

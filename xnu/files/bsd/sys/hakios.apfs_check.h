@@ -1,7 +1,7 @@
 /*
  * Mount the APFS volume on /dev/rvblk0 and walk it, to compare with what the host reader
  * sees in the same image.  Only with boot-arg apfs_check.
- * See bsd/dev/hakios.apfs_check.c.
+ * See drivers/storage/hakios.apfs_check.c.
  */
 #ifndef _SYS_HAKIOS_APFS_CHECK_H_
 #define _SYS_HAKIOS_APFS_CHECK_H_

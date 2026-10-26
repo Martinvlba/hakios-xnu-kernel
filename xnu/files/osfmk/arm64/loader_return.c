@@ -59,7 +59,7 @@ extern void hakios_torch_quiesce(void);
 extern void hakios_camera_quiesce(void);
 extern void hakios_mic_quiesce(void);
 extern void hakios_ufs_quiesce(void);
-extern void hakios_var_save_on_return(void);   /* bsd/dev/hakios.ufs.c: the data volume into the flash */
+extern void hakios_var_save_on_return(void);   /* drivers/storage/hakios.ufs.c: the data volume into the flash */
 void loader_checkpoint(uint64_t n);
 
 /* Also referenced from the early exception vector in start.s. */

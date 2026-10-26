@@ -2,7 +2,7 @@
 
 Сейчас сотовая связь в HakiOS **не работает**, но модем уже запускается из XNU (см. «21 октября» ниже). Wi-Fi использует WPSS и свой GLINK/QRTR; модем MPSS — отдельный процессор с другим каналом. `hakios.qmi.c` кодирует сообщения QMI и теперь позволяет привязать клиент к заданному транспорту QRTR, но канал к MPSS ещё не реализован. У iOS также нет драйверов AppleBaseband и AppleIPAppender для этого аппаратного пути. Запуск `CommCenter` без них уже проверялся: он завершается аварийно (см. README, раздел «Телефония»).
 
-Проверка `python3 devices/poco-x5-pro/tools/modem_firmware.py --dtb devices/poco-x5-pro/prebuilt/device-tree.dtb --firmware-dir fw-modem --node /soc/qcom,mss@4080000` сопоставила 28 сегментов штатной прошивки с областью `mpss@8b800000` (PAS ID 4). `MODEM=1 SYSTEM=1 ... userland/build.sh` теперь может положить эти локальные файлы в системный APFS после проверки. Это только подготовка образа: наличие прошивки в `/fw` не запускает MPSS. Исходник `hakios.nas.c` содержит клиент QMI NAS для заданного транспорта QRTR: он ищет службу, запрашивает регистрацию и силу сигнала, разбирает ответы и сбрасывает состояние при исчезновении службы. Уровень `bars` остаётся нулевым без подтверждённой регистрации. MPSS-транспорта в XNU пока нет, поэтому этот клиент ещё не получает сообщения с телефона и не подключён к статус-бару iOS. Форматы NAS сверены с [описанием libqmi](https://github.com/linux-mobile-broadband/libqmi/blob/main/data/qmi-service-nas.json).
+Проверка `python3 devices/redwood/tools/modem_firmware.py --dtb devices/redwood/prebuilt/device-tree.dtb --firmware-dir fw-modem --node /soc/qcom,mss@4080000` сопоставила 28 сегментов штатной прошивки с областью `mpss@8b800000` (PAS ID 4). `MODEM=1 SYSTEM=1 ... userland/build.sh` теперь может положить эти локальные файлы в системный APFS после проверки. Это только подготовка образа: наличие прошивки в `/fw` не запускает MPSS. Исходник `hakios.nas.c` содержит клиент QMI NAS для заданного транспорта QRTR: он ищет службу, запрашивает регистрацию и силу сигнала, разбирает ответы и сбрасывает состояние при исчезновении службы. Уровень `bars` остаётся нулевым без подтверждённой регистрации. MPSS-транспорта в XNU пока нет, поэтому этот клиент ещё не получает сообщения с телефона и не подключён к статус-бару iOS. Форматы NAS сверены с [описанием libqmi](https://github.com/linux-mobile-broadband/libqmi/blob/main/data/qmi-service-nas.json).
 
 ## Проверка на телефоне, 20 октября 2026
 
@@ -10,7 +10,7 @@
 
 ## Что установлено по redwood
 
-`devices/poco-x5-pro/prebuilt/device-tree.dtb` содержит зарезервированную память `mpss@8b800000`, `qcom,smp2p-modem`, `qcom,glink/modem/qcom,modem_qrtr`, `qcom,ipa@1e00000` и `qcom,rmnet-ipa`. Это разные части тракта: запуск прошивки модема, сигнализация, управляющий QMI-канал и передача IP-пакетов. Дерево Android [redwood](https://github.com/Redwood-AOSP/android_device_xiaomi_redwood) включает `full_base_telephony.mk`; его `init.qcom.rc` запускает `vendor.qcrild` и `vendor.qcrild2`. [Ветка araxys с ядром/DTB](https://github.com/Redwood-AOSP/android_device_xiaomi_redwood-kernel/tree/araxys) пригодна как аппаратный справочник. Бинарники Android RIL нельзя просто запустить в iOS: им нужны Android binder, HAL, службы и ABI.
+`devices/redwood/prebuilt/device-tree.dtb` содержит зарезервированную память `mpss@8b800000`, `qcom,smp2p-modem`, `qcom,glink/modem/qcom,modem_qrtr`, `qcom,ipa@1e00000` и `qcom,rmnet-ipa`. Это разные части тракта: запуск прошивки модема, сигнализация, управляющий QMI-канал и передача IP-пакетов. Дерево Android [redwood](https://github.com/Redwood-AOSP/android_device_xiaomi_redwood) включает `full_base_telephony.mk`; его `init.qcom.rc` запускает `vendor.qcrild` и `vendor.qcrild2`. [Ветка araxys с ядром/DTB](https://github.com/Redwood-AOSP/android_device_xiaomi_redwood-kernel/tree/araxys) пригодна как аппаратный справочник. Бинарники Android RIL нельзя просто запустить в iOS: им нужны Android binder, HAL, службы и ABI.
 
 Проверка по USB 20 октября 2026 года: fastboot определил продукт `redwood` и разблокированный загрузчик; Android сообщил `ro.boot.hardware.sku=redwood`, `ro.soc.model=SM7325`. Под Android подсистема `modem` и прошивка `yupik_ipa_fws` были `ONLINE`, `vendor.qcrild`, `vendor.qcrild2`, `vendor.qrtr-ns` — `running`; присутствовали `rmnet_ipa0` и `rmnet_data0`–`rmnet_data5`. Состояние SIM: `ABSENT,LOADED` для двух слотов. Временная загрузка `xnuloader` через `fastboot boot` и его `selftest` прошли (`selftest-ok`); это проверка загрузчика, а не сотовой связи в XNU.
 
@@ -22,7 +22,7 @@ Android `dmesg` уточняет последовательность: снач�
 
 Порядок доведения до работающей связи:
 
-1. На подключённом Android собрать отчёт `python3 devices/poco-x5-pro/tools/cellular_probe.py --adb` и сверить DTB, версию прошивки и активные службы. Скрипт читает только открытые свойства и не собирает IMEI, IMSI и номера SIM.
+1. На подключённом Android собрать отчёт `python3 devices/redwood/tools/cellular_probe.py --adb` и сверить DTB, версию прошивки и активные службы. Скрипт читает только открытые свойства и не собирает IMEI, IMSI и номера SIM.
 2. Поднять MPSS в XNU с собственным GLINK/QRTR-каналом, отдельным от WPSS; проверить обнаружение QMI-служб, не отправляя команд регистрации или передачи данных.
 3. Реализовать QMI DMS/UIM/NAS/WDS и состояние SIM/сети; отдельно включить путь IPA/rmnet для мобильных данных.
 4. Подключить эти возможности к CoreTelephony/CommCenter через совместимый сервис и аппаратный драйвер, затем проверить SIM, регистрацию, входящие/исходящие вызовы, SMS и мобильные данные на телефоне. VoLTE/IMS — отдельная работа.
@@ -32,9 +32,9 @@ Android `dmesg` уточняет последовательность: снач�
 ## Команды до и после подключения
 
 ```sh
-python3 devices/poco-x5-pro/tools/cellular_probe.py > modem-dtb.json
+python3 devices/redwood/tools/cellular_probe.py > modem-dtb.json
 # После подключения телефона с разрешённой USB-отладкой:
-python3 devices/poco-x5-pro/tools/cellular_probe.py --adb > modem-android.json
+python3 devices/redwood/tools/cellular_probe.py --adb > modem-android.json
 ```
 
 Для другого устройства передать его DTB через `--dtb PATH`; прошивку на телефон инструмент не записывает.
@@ -42,7 +42,7 @@ python3 devices/poco-x5-pro/tools/cellular_probe.py --adb > modem-android.json
 ## 21 октября 2026: модем запущен из XNU
 
 Ядро теперь собирается на этом Mac (см. `xnu/README.md`, «Сборка на macOS»), и драйвер
-`bsd/dev/hakios.mpss.c` — копия пути аудио‑DSP (`hakios.adsp.c`) с числами модема — проверен
+`drivers/modem/hakios.mpss.c` — копия пути аудио‑DSP (`hakios.adsp.c`) с числами модема — проверен
 на телефоне через `xl run` с `modem_step=11 modem_return=1`:
 
 - шаги 1–10 проходят: прошивка `modem.*` из `/fw` системного образа (85 МБ, 28 сегментов)

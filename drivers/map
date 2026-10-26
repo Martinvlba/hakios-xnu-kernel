@@ -1,0 +1,61 @@
+# Which subsystem directory each driver of the kernel lives in, and where it goes in Apple's XNU tree.
+#
+#   <subsystem>  <path in the XNU tree>
+#
+# The repository file is drivers/<subsystem>/<file name>. xnu/apply.sh copies each of them to its path in the tree,
+# xnu/export.sh copies them back, tools/drivers-check.py (and CI) checks that this list and the directories agree.
+# A new hakios.* file in bsd/dev/ or iokit/Kernel/ has to be listed here: export.sh refuses to guess.
+#
+# Subsystems: input storage gpu camera haptic audio power wifi modem net core
+
+input    bsd/dev/hakios.goodix.c
+input    bsd/dev/hakios.focaltech_fw.h
+input    bsd/dev/hakios.input.c
+input    bsd/dev/hakios.buttons.c
+input    bsd/dev/hakios.virtio_input.c
+
+storage  bsd/dev/hakios.ufs.c
+storage  bsd/dev/hakios.ufshc.c
+storage  bsd/dev/hakios.ufshc.h
+storage  bsd/dev/hakios.sparse.c
+storage  bsd/dev/hakios.image.c
+storage  bsd/dev/hakios.guard.c
+storage  bsd/dev/hakios.apfs_check.c
+storage  bsd/dev/hakios.virtio_blk.c
+
+gpu      bsd/dev/hakios.adreno.c
+gpu      iokit/Kernel/hakios.gpu.cpp
+
+camera   bsd/dev/hakios.camera.c
+camera   bsd/dev/hakios.torch.c
+
+haptic   bsd/dev/hakios.haptic.c
+
+audio    bsd/dev/hakios.adsp.c
+audio    bsd/dev/hakios.audio.c
+audio    bsd/dev/hakios.sound.c
+audio    bsd/dev/hakios.speaker.c
+audio    bsd/dev/hakios.mic.c
+audio    bsd/dev/hakios.virtio_sound.c
+
+power    bsd/dev/hakios.battery.c
+power    iokit/Kernel/hakios.battery.cpp
+power    bsd/dev/hakios.cpufreq.c
+
+wifi     bsd/dev/hakios.wifi.c
+wifi     bsd/dev/hakios.wlfw.c
+wifi     bsd/dev/hakios.lx.c
+wifi     bsd/dev/hakios.sta.c
+wifi     bsd/dev/hakios.apple80211.c
+wifi     iokit/Kernel/hakios.wlan.cpp
+
+modem    bsd/dev/hakios.mpss.c
+modem    bsd/dev/hakios.cell.c
+modem    bsd/dev/hakios.qmi.c
+modem    bsd/dev/hakios.nas.c
+modem    bsd/dev/hakios.ipa.c
+
+net      bsd/dev/hakios.net.c
+net      bsd/dev/hakios.virtio_net.c
+
+core     bsd/dev/hakios.version.c

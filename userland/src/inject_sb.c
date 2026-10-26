@@ -225,7 +225,7 @@ snapshot_output_format(__unused id self, __unused SEL selector, id snapshot)
  * back the value the real implementation computed; the status bar then shows whatever iOS last
  * knew, which is better than crashing.
  * With adsp=1 the battery is a power source (the service HakiosBattery, an IOPMPowerSource:
- * iokit/Kernel/hakios.battery.cpp), which powerd reads like an iPhone's own, and from it iOS knows
+ * drivers/power/hakios.battery.cpp), which powerd reads like an iPhone's own, and from it iOS knows
  * everything by itself; once that service is there, the hooks hand everything to iOS's own code.
  */
 static float  (*original_battery_level)(id self, SEL sel);
@@ -1322,7 +1322,7 @@ hakios_springboard_init(void)
 	    poster_switcher ? "not offered" : "NOT withheld");
 	/*
 	 * Cellular, a survey first (the modem's bars come from the kernel: sysctl kern.hakios.cellular_*,
-	 * bsd/dev/hakios.mpss.c): where UIKit makes the status bar's cellular entry from the raw data,
+	 * drivers/modem/hakios.mpss.c): where UIKit makes the status bar's cellular entry from the raw data,
 	 * and with which signature -- said in the log with the unslid address, for the hook to come.
 	 */
 	{

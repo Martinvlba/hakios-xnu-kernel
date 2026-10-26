@@ -966,7 +966,7 @@ begin_end_io_operation(__unused AudioServerPlugInDriverRef driver, __unused Audi
 /*
  * What iOS plays on the actuator -- the haptics: the system's feedbacks and the ringer's vibration,
  * CoreHaptics' patterns, UIKit's feedbacks, as waveforms of one channel -- goes to the kernel's motor
- * driver (/dev/hakios-haptic, bsd/dev/hakios.haptic.c, haptic=5), which plays Android's own
+ * driver (/dev/hakios-haptic, drivers/haptic/hakios.haptic.c, haptic=5), which plays Android's own
  * waveforms on the phone's motor by it. (iOS plays on this device at all only because the device
  * tree says the phone's haptics are "closed-loop": see mkidentity.py.) Said the first times, with
  * how loud.

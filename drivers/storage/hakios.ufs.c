@@ -1063,7 +1063,7 @@ ufs_entry(const char *name)
 }
 
 /*
- * For the kernel's own drivers (the modem's file systems, bsd/dev/hakios.mpss.c): bytes
+ * For the kernel's own drivers (the modem's file systems, drivers/modem/hakios.mpss.c): bytes
  * [offset, offset + len) of the partition of that name (or of its _a or _b slot), and how big it
  * is. ENXIO without the storage, ENOENT without the partition; nothing is written.
  */

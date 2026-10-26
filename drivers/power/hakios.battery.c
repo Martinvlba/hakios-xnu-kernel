@@ -111,9 +111,9 @@ battery_poll(void)
 }
 
 /*
- * What the audio DSP's battery manager says (bsd/dev/hakios.adsp.c, with adsp=1 unless battmgr=0):
+ * What the audio DSP's battery manager says (drivers/audio/hakios.adsp.c, with adsp=1 unless battmgr=0):
  * the values that Android shows, from where Android takes them. They are kept here for the sysctls
- * and passed on to the power source that iOS reads (iokit/Kernel/hakios.battery.cpp).
+ * and passed on to the power source that iOS reads (drivers/power/hakios.battery.cpp).
  */
 static int battery_full_uah, battery_design_uah, battery_cycles, battery_source_dsp;
 
@@ -126,7 +126,7 @@ SYSCTL_INT(_kern_hakios, OID_AUTO, battery_cycles, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_INT(_kern_hakios, OID_AUTO, battery_from_dsp, CTLFLAG_RD | CTLFLAG_LOCKED,
     &battery_source_dsp, 0, "1 when the values come from the audio DSP's battery manager");
 
-extern void HakiosBatteryReport(const void *state, unsigned size);     /* iokit/Kernel/hakios.battery.cpp */
+extern void HakiosBatteryReport(const void *state, unsigned size);     /* drivers/power/hakios.battery.cpp */
 
 void
 hakios_battery_report(const struct hakios_battery_state *b)

@@ -1,6 +1,6 @@
 /*
  * QMI, the protocol in which the driver talks to the radio's firmware before the radio's own
- * registers exist. The helpers are the kernel's (bsd/sys/hakios.qmi.h, bsd/dev/hakios.qmi.c),
+ * registers exist. The helpers are the kernel's (bsd/sys/hakios.qmi.h, drivers/modem/hakios.qmi.c),
  * under Linux's names; a kernel tree that does not have them yet gets LinuxKPI's header, in
  * which every call fails.
  */

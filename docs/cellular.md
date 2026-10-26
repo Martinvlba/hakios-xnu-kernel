@@ -29,7 +29,7 @@ Where the modem stands (October 2026). The detailed, step-by-step diary in Russi
 ## The data path (2.0)
 
 Packets go through the IPA, the SoC's packet engine, the way Linux's `drivers/net/ipa` does it
-for IPA 4.11; everything is in `xnu/files/bsd/dev/hakios.ipa.c` and `hakios.cell.c`.
+for IPA 4.11; everything is in `drivers/modem/hakios.ipa.c` and `hakios.cell.c`.
 
 - Before the modem starts, the kernel sets up this processor's side of the IPA: four GSI
   channels with their event rings (the command channel 5, the LAN receive channel 14, the modem
@@ -82,7 +82,7 @@ XL_SB_DELAY=8 tools/modem-cycle.sh "modem=1 modem_again=1 modem_buffer=0xa800000
 
 `modem_step=N` runs the bring-up step by step and returns to the loader with the log;
 `modem=1` brings the modem up beside the system. Everything is in
-`xnu/files/bsd/dev/hakios.mpss.c` (the modem), `hakios.nas.c` (NAS), `hakios.qmi.c` (QMI).
+`drivers/modem/hakios.mpss.c` (the modem), `hakios.nas.c` (NAS), `hakios.qmi.c` (QMI).
 
 ## Kernel arguments
 

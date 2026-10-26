@@ -1,5 +1,5 @@
 /*
- * /dev/hakios-camera: the phone's wide camera for iOS (boot-arg cam=5; bsd/dev/hakios.camera.c).
+ * /dev/hakios-camera: the phone's wide camera for iOS (boot-arg cam=5; drivers/camera/hakios.camera.c).
  *
  *   open()   the first one powers the sensor up and starts its frames (the sensor's mode: boot-arg
  *            cam_mode, else the module file's 4000x3000 one); the last close puts everything down

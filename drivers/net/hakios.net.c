@@ -34,7 +34,7 @@
 #include <sys/sockio.h>
 #include <sys/systm.h>
 
-extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* iokit/Kernel/hakios.wlan.cpp */
+extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* drivers/wifi/hakios.wlan.cpp */
 
 static LCK_GRP_DECLARE(net_lck_grp, "hakios-net");
 
@@ -262,7 +262,7 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 	case SIOCDELMULTI:
 		break;                          /* the link hands us everything anyway */
 	default:
-		/* what iOS's Wi-Fi side asks of a radio's interface: bsd/dev/hakios.apple80211.c */
+		/* what iOS's Wi-Fi side asks of a radio's interface: drivers/wifi/hakios.apple80211.c */
 		error = n->link->wireless ? hakios_apple80211_ioctl(command, data) : EOPNOTSUPP;
 		break;
 	}

@@ -12,10 +12,10 @@ Read-only audit. Nothing was built, run or modified except this file.
 | `wifi/lx/src/lx_base.c` (LinuxKPI stand-ins: threads, work, memory, DMA pool) | 1235 |
 | `wifi/lx/src/lx_bus.c` (bus, ring service thread, IRQ glue, driver start/stop) | 863 |
 | `wifi/lx/src/lx.h` | 20 |
-| `xnu/files/bsd/dev/hakios.lx.c` (kernel side of the driver object) | 582 |
-| `xnu/files/bsd/dev/hakios.wlfw.c` (WLFW client; also read the codec in `hakios.qmi.c` 197-575 and the rx/txn code 617-963, only as far as WLFW uses it) | 545 |
-| `xnu/files/bsd/dev/hakios.sta.c` | 371 |
-| `xnu/files/bsd/dev/hakios.apple80211.c` | 739 |
+| `drivers/wifi/hakios.lx.c` (kernel side of the driver object) | 582 |
+| `drivers/wifi/hakios.wlfw.c` (WLFW client; also read the codec in `hakios.qmi.c` 197-575 and the rx/txn code 617-963, only as far as WLFW uses it) | 545 |
+| `drivers/wifi/hakios.sta.c` | 371 |
+| `drivers/wifi/hakios.apple80211.c` | 739 |
 
 Also read for evidence: `tools/wpa-test/test_wpa.c`, `xnu/files/bsd/sys/hakios.sta.h`, `hakios_wifi_network()` in `hakios.wifi.c`, the boot seed in `xnuloader/loader.c` 3050-3080, `xnu/files/osfmk/minicrypto/mc_provider.c` (PRNG part).
 

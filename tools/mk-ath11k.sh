@@ -13,7 +13,7 @@
 #                         headers of FreeBSD that cannot serve under XNU as they are, and the
 #                         functions underneath (locks, sleeping, work, memory, firmware, the
 #                         radio's bus) written on the handful of calls that the kernel's
-#                         bsd/dev/hakios.lx.c offers (bsd/sys/hakios.lx.h of the kernel tree).
+#                         drivers/wifi/hakios.lx.c offers (bsd/sys/hakios.lx.h of the kernel tree).
 #
 # Not all of the driver is built yet: DRIVER below lists the files that are. What they call in
 # the files that are not becomes a function that says its name in the log and answers 0

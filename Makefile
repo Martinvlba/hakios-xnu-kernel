@@ -25,12 +25,12 @@
 #   make phone               with a .config, its arguments are the kernel's; without, the phone line below
 #   FRAGMENTS="open trace"   fragments for a NAME_defconfig: make redwood_defconfig FRAGMENTS=open
 #
-#   DEVICE=poco-x5-pro   the device directory under devices/ (default poco-x5-pro)
+#   DEVICE=redwood   the device directory under devices/ (default redwood)
 #   ARGS="..."           kernel arguments for make phone (default: the .config's, else everything the phone has)
 #   SECS=600             the session's length for make phone / make qemu
 #   JOBS=8               parallel jobs for the kernel build
 
-DEVICE ?= poco-x5-pro
+DEVICE ?= redwood
 JOBS ?= 8
 SECS ?= 600
 # qemu-open runs the open configuration: configs/defconfig (nothing of a phone's own, one core)

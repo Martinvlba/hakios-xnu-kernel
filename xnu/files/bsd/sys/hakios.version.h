@@ -1,5 +1,5 @@
 /*
- * The version of this kernel (bsd/dev/hakios.version.c): sysctl kern.hakios.version and a line of the boot log.
+ * The version of this kernel (drivers/core/hakios.version.c): sysctl kern.hakios.version and a line of the boot log.
  */
 #ifndef _SYS_HAKIOS_VERSION_H_
 #define _SYS_HAKIOS_VERSION_H_

@@ -2,9 +2,9 @@
 
 ## Scope and method
 
-- File: `xnu/files/bsd/dev/hakios.wifi.c`, 4394 lines, read in full, line by line.
+- File: `drivers/wifi/hakios.wifi.c`, 4394 lines, read in full, line by line.
 - A few lines of context were read in other files to size the impact of a finding. They were not audited:
-  `xnu/files/bsd/sys/hakios.qrtr.h`, `xnu/files/bsd/dev/hakios.qmi.c` (the receive path only), `userland/build.sh` (how `fw/network` is installed), and a grep for users of `hakios_wifi_say`, `hakios_wifi_tell` and `passphrase`.
+  `xnu/files/bsd/sys/hakios.qrtr.h`, `drivers/modem/hakios.qmi.c` (the receive path only), `userland/build.sh` (how `fw/network` is installed), and a grep for users of `hakios_wifi_say`, `hakios_wifi_tell` and `passphrase`.
 - Modem code was not examined.
 - Method: manual tracing of every value that comes from a remote processor or the firmware (SMEM partition and item headers, SMP2P, the QMP descriptor, GLINK queue words, QRTR headers, MDT/ELF header, QMI-reported register window) to its first use as a size, offset or index. Wait loops, error paths, locks, the shutdown path, the log functions and boot-arg parsing were traced the same way.
 - Nothing was built or run. Findings carry CONFIRMED (traced end to end in the source), PLAUSIBLE, or NEEDS-HARDWARE. "Remote" below means the DSP, the AOP or the radio firmware, and the shared memory is writable by them by design.

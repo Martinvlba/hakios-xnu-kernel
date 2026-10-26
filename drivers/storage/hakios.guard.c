@@ -1,6 +1,6 @@
 /*
  * The speakers' guard: what the samples go through on their way to the phone's two amplifiers
- * (bsd/dev/hakios.sound.c's feeder), in place of the protection Android has in the audio DSP.
+ * (drivers/audio/hakios.sound.c's feeder), in place of the protection Android has in the audio DSP.
  *
  * Under Android the DSP runs Awinic's algorithm (SKTune, "aw882xx_rx_switch") with each
  * speaker's calibration: it keeps the cone's excursion and the voice coil's temperature in

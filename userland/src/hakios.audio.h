@@ -54,7 +54,7 @@ void hakios_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio
 void hakios_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
 
 /*
- * The phone's speakers (bsd/dev/hakios.speaker.c): its two Awinic amplifiers, set up as
+ * The phone's speakers (drivers/audio/hakios.speaker.c): its two Awinic amplifiers, set up as
  * Android's driver sets them up, from Android's own configuration file (see there).
  */
 bool hakios_speaker_prepare(const uint8_t *acf, uint64_t size);       /* found, reset, configured: powered down, muted */
@@ -65,7 +65,7 @@ void hakios_speaker_stop(void);        /* faded out, muted, powered down, in And
 void hakios_speaker_quiesce(void);     /* powered down at once, without sleeping: on a panic's way out */
 
 /*
- * The audio DSP's services, for the sound's path (bsd/dev/hakios.adsp.c, bsd/dev/hakios.sound.c).
+ * The audio DSP's services, for the sound's path (drivers/audio/hakios.adsp.c, drivers/audio/hakios.sound.c).
  * hakios_adsp_apr() sends one APR packet to a service of the DSP (AFE 4, ASM 7, ADM 8) with the
  * given port and token (0: one of its own) and, with wait_ms, waits for the packet that carries
  * that token back. What is not waited for goes to the handler of events, if there is one and it

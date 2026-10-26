@@ -56,7 +56,7 @@ A file that is not a payload gives `is not a payload (no XNUP at its start)`, an
 ## On a phone: what is known and what is not
 
 - Project Silicium's Boot Manager, in this port, is changed to start the XNU loader **from the container the shim
-  leaves in memory instead of a menu** (`devices/poco-x5-pro/uefi/README.md`). It does not look for a loader on a
+  leaves in memory instead of a menu** (`devices/redwood/uefi/README.md`). It does not look for a loader on a
   volume. So the file-of-the-volume way has **not** been tried on the phone, and it needs a change to the Boot
   Manager (or a UEFI that boots from a volume) before it can be.
 - Whether Silicium leaves `0xF0000000` free at the point where the loader runs is not known.

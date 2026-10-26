@@ -1,6 +1,6 @@
 /*
  * A virtio block device for QEMU: a disk image on the host becomes /dev/rvblk0 in the
- * guest.  Only with boot-arg virtio_blk=1.  See bsd/dev/hakios.virtio_blk.c.
+ * guest.  Only with boot-arg virtio_blk=1.  See drivers/storage/hakios.virtio_blk.c.
  */
 #ifndef _SYS_HAKIOS_VIRTIO_BLK_H_
 #define _SYS_HAKIOS_VIRTIO_BLK_H_

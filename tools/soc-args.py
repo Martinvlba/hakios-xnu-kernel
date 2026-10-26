@@ -3,7 +3,7 @@
 
 usage: tools/soc-args.py DEVICE-TREE.dtb
 
-The kernel's modem and IPA drivers (bsd/dev/hakios.mpss.c, hakios.ipa.c) carry the first phone's
+The kernel's modem and IPA drivers (drivers/modem/hakios.mpss.c, hakios.ipa.c) carry the first phone's
 addresses as defaults and take any that differ from boot-args soc_* (see soc_override there). This
 reads a phone's own flattened device tree -- /sys/firmware/fdt on a rooted phone, or the dtb a port
 already has -- and prints the soc_* it needs, which devices/<name>/soc.args holds and the run
