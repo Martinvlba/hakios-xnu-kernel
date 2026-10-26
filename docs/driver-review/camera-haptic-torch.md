@@ -225,3 +225,20 @@ Camera, user-space side
 - Behaviour with two simultaneous camera readers beyond what is said above; behaviour when `psci_smp_stop_others()` leaves a stopped CPU holding `ios_lock` or `hakios_smmu_lock` (the quiesce paths skip those locks when `leaving`, torch/haptic/camera all do).
 - Interplay with the audio DSP driver's use of the RPMh TCS 0 and with hakios.speaker.c / buttons for shared pins and the SPMI arbiter beyond the spin lock.
 - userland/src/inject_media.c (writes the torch node) and the camera ISP's float handling.
+
+## Fix status
+
+Nothing was built or run; each edit was re-read for syntax and types only.
+
+- CAM-1: FIXED (hakios.camera.c). New `ios_readers` count (under `ios_lock`); `camdev_read` counts itself in the same lock hold that marks the place READING and takes `at` and the frame size from `ring`, `ring_place_bytes` and `ring_frame_bytes` there; it leaves the count (and `wakeup`s) in its final lock section. New `ios_drain_readers()` (waits under `ios_lock` with `msleep` until the count is 0) is called before `ring_free()` in `ios_stop()` and in `fake_session()`. Lock order: the drain holds only `ios_lock` (power is already down); nothing else nests with it. The optional "refresh `ios_last_read` while a read is in progress" was not done: the drain already makes an idle stop safe.
+- CAM-2: SKIPPED. Capping the mode's pixels or fps for user-chosen modes changes the documented ABI (`HAKIOS_CAMERA_SENSOR` takes any mode), and the real mode sizes live in tables that are not in the tree. Replacing `give_up` with a fall back to the previous sensor and mode is a design change. Node mode is policy (see DEV-1).
+- TORCH-1: FIXED (hakios.torch.c). `dark()` sets a `forcing` flag while it runs and `put()` ignores the `broken` latch only then (all other checks, the allow-list, the arbiter check and the read-back stay). `dark()` also tries all four steps instead of stopping at the first failure; a clean run does the same writes in the same order. Not done: the repeated dark() retry every 100 ms in `serve()` (a design change).
+- TORCH-2: FIXED (hakios.torch.c). `light()` sets `lit = true` before the module-enable write; `dark()` still clears it only on success. In the torch=2 path, a failed `light(1000)` now calls `dark()` if `lit` is set. Quiesce is unchanged: it already calls `dark()` when `lit` is set, which is now true in the failing case.
+- HAPTIC-1: FIXED (hakios.haptic.c). `loaded = level >= 3 && configure() && load_waveforms()` is evaluated apart from `level == 4`; level 5 calls `serve()` only when `loaded`, otherwise `give_up("the waveforms are not loaded")` (chip into reset).
+- CAM-3: FIXED (hakios.camera.c). `vaf()` records `vaf_voted = on` before the RPMh request, as `rails()` does, so `af_down()` sends the "off" even if RPMh did not report done in time. Worst case is one extra harmless "off" request. Whether a late completion really happens is hardware behaviour.
+- CAM-4: FIXED (hakios.camera.c). `power_step()` passes `delay_us` capped at 100000 to `sensor_delay()`, the same cap the sensor-register path uses.
+- CAM-5: FIXED (hakios.camera.c). `ios_select()` rejects modes with `frame_length <= EXPOSURE_MARGIN`, `frame_length > FRAME_LINES_MAX`, width or height over 16384; `capture_sensor()` rejects width/height over 16384 and `frame_length <= 40` (EXPOSURE_MARGIN is defined later in the file, so the literal 40 as in `exposure()`). 16384 x 16384 keeps the 32-bit sizes and the SMMU third-level count in range.
+- CAM-6: FIXED (hakios.camera.c). New `keep_lock` mutex (own mutex, not `ios_lock`, so the capture thread never waits on a user copy) held across the header and data writes in `keep_picture()`; never nested with `ios_lock`.
+- HAPTIC-2: SKIPPED. A duty-cycle limit needs the motor's thermal limits (hardware) and is a policy change.
+- TORCH-3: SKIPPED. The cap is per request by design; a hard on-time limit is a policy change.
+- DEV-1: SKIPPED. Node mode 0666 is policy and was not to be changed.

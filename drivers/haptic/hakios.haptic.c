@@ -937,6 +937,8 @@ serve(void)
 static void
 haptic_thread(__unused void *parameter, __unused wait_result_t result)
 {
+	bool loaded = false;
+
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
 	say("haptic: level %u: %s\n", level, level == 1 ? "a look, reading only" : level == 2 ? "the reset released, registers read" :
 	    level == 3 ? "the chip configured and its waveforms loaded, nothing played" : level == 4 ? "one effect played" :
@@ -958,7 +960,9 @@ haptic_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 	} else {
 		show_registers();
-		if (level >= 3 && configure() && load_waveforms() && level == 4) {
+		/* (kept apart from `level == 4' so that level 5 can tell that the waveforms are really in the RAM) */
+		loaded = level >= 3 && configure() && load_waveforms();
+		if (loaded && level == 4) {
 			uint32_t effect = 1;
 
 			PE_parse_boot_argn("haptic_effect", &effect, sizeof(effect));
@@ -966,8 +970,11 @@ haptic_thread(__unused void *parameter, __unused wait_result_t result)
 				effect = 1;     /* (the short ones only) */
 			}
 			(void)play_effect(effect);
-		} else if (level == 5 && !broken) {
+		} else if (level == 5 && !broken && loaded) {
+			/* (not started when the waveforms did not load: it would play whatever the RAM held) */
 			serve();
+		} else if (level == 5 && !broken) {
+			give_up("the waveforms are not loaded");
 		}
 	}
 	say("haptic: done\n");

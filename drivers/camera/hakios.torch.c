@@ -67,6 +67,8 @@ extern void loader_log_putc(char c);
 
 static uint32_t level;
 static bool broken, leaving;
+/* set only while dark() runs: the "turn off" writes may pass the `broken' latch (a lit LED must always get its off writes) */
+static volatile bool forcing;
 
 static int say(const char *format, ...) __printflike(1, 2);
 
@@ -327,7 +329,8 @@ put(uint8_t reg, uint8_t value)
 	for (size_t i = 0; i < sizeof(writable_regs); i++) {
 		allowed |= writable_regs[i] == reg;
 	}
-	if (broken || !allowed || !flash.writable || flash.write == 0 || flash.id != 0x2ee) {
+	/* (the latch does not stop dark(): after a failed write the final "off" would otherwise do nothing and the LED stay on) */
+	if ((broken && !forcing) || !allowed || !flash.writable || flash.write == 0 || flash.id != 0x2ee) {
 		give_up(allowed ? "a write that may not be made" : "a register that is not to be written");
 		return false;
 	}
@@ -492,10 +495,13 @@ light(uint32_t permille)
 	if (!configure() || !put_bits(FLASH_IRESOLUTION, 0x01, 0x00) || !put_bits(FLASH_ITARGET0, 0x7f, (uint8_t)code)) {
 		return false;
 	}
-	if (!lit && (!put(FLASH_MODULE_EN, 0x80) || !put_bits(FLASH_EN_LED_CTRL, 0x01, 0x01))) {
-		return false;
+	if (!lit) {
+		/* lit is set before the enabling writes: one that lands but fails its read-back must still get a dark() later */
+		lit = true;
+		if (!put(FLASH_MODULE_EN, 0x80) || !put_bits(FLASH_EN_LED_CTRL, 0x01, 0x01)) {
+			return false;
+		}
 	}
-	lit = true;
 	return true;
 }
 
@@ -503,9 +509,15 @@ light(uint32_t permille)
 static bool
 dark(void)
 {
-	bool ok = put_bits(FLASH_EN_LED_CTRL, 0x01, 0x00) && put(FLASH_MODULE_EN, 0x00) && put_bits(FLASH_ITARGET0, 0x7f, 0x00) &&
-	    put_bits(FLASH_SAFETY_TIMER0, 0x80, 0x00);
+	bool ok;
 
+	/* every step is tried even if an earlier one failed, and none is stopped by `broken': a half-done "off" leaves the LED on */
+	forcing = true;
+	ok = put_bits(FLASH_EN_LED_CTRL, 0x01, 0x00);
+	ok = put(FLASH_MODULE_EN, 0x00) && ok;
+	ok = put_bits(FLASH_ITARGET0, 0x7f, 0x00) && ok;
+	ok = put_bits(FLASH_SAFETY_TIMER0, 0x80, 0x00) && ok;
+	forcing = false;
 	lit = !ok && lit;
 	return ok;
 }
@@ -714,6 +726,9 @@ torch_thread(__unused void *parameter, __unused wait_result_t result)
 				note("off again after %u s", secs);
 			}
 			show_registers();
+		} else if (lit) {
+			/* light() failed after it may have enabled the channel: switch it off again */
+			(void)dark();
 		}
 	} else {
 		serve();

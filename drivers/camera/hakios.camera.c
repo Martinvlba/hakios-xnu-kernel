@@ -1266,7 +1266,8 @@ power_step(const struct ctab_entry *e, bool up)
 		give_up("a power sequence not understood");
 		return false;
 	}
-	sensor_delay(e->delay_us);
+	/* (capped at 100 ms, as the sensor tables' delays are: a corrupt table must not keep the rails up or spin for minutes) */
+	sensor_delay(e->delay_us > 100000 ? 100000 : e->delay_us);
 	return true;
 }
 
@@ -2985,8 +2986,9 @@ vaf(bool on)
 	values[1] = VRM_MODE_HPM;
 	addresses[2] = base + VRM_ENABLE;
 	values[2] = on;
+	/* the vote is recorded before the request, as rails() does: one RPMh finishes after our wait must still be given back */
+	vaf_voted = on;
 	done = on ? rpmh_write(3, addresses, values) : rpmh_write(1, &addresses[2], &values[2]);
-	vaf_voted = on && done;
 	say("camera: RPMh %s L9C (%#x) %s\n", done ? "took" : "DID NOT SAY IT TOOK", base, on ? "on at 2800 mV" : "off");
 	return done;
 }
@@ -3146,7 +3148,9 @@ capture_sensor(void)
 	if (!PE_parse_boot_argn("cam_settle", &settle, sizeof(settle)) || settle == 0) {
 		settle = mode->settle;  /* (the module file's, for this mode) */
 	}
-	if (mode->lanes < 1 || mode->lanes > (mode->cphy ? 3u : 4u) || mode->data_type != RAW10_DT || width % 4 != 0) {
+	/* (sides over 16384 would wrap the 32-bit frame size below; a frame_length of 40 or less would wrap exposure()'s `- 40') */
+	if (mode->lanes < 1 || mode->lanes > (mode->cphy ? 3u : 4u) || mode->data_type != RAW10_DT || width % 4 != 0 ||
+	    width > 16384 || height > 16384 || mode->frame_length <= 40) {
 		say("camera: mode %u: %u lanes, data type %#x: not what this is written for\n", mode_n, mode->lanes, mode->data_type);
 		return;
 	}
@@ -3278,6 +3282,8 @@ static const struct ctab_mode *ios_mode;
 static uint32_t ios_mode_n, ios_line_ns;
 static volatile bool ios_open, ios_streaming, ios_wanted;  /* open; frames coming; a read wants them */
 static uint64_t ios_last_read, ios_given, ios_frames_done, ios_writes_late;
+/* reads copying from the ring now (under ios_lock): a session's end waits for them before it frees the ring */
+static unsigned ios_readers;
 static struct { uint32_t lines, gain, frame_lines; bool pending; uint32_t focus; bool focus_pending; } ios_ask;
 static struct { uint32_t lines, gain, frame_lines; uint64_t from; } ios_now, ios_next;
 /*
@@ -3396,6 +3402,20 @@ ring_alloc(uint32_t frame_bytes)
 	return true;
 }
 
+/*
+ * Waits until no read is copying from the ring. Every place is FREE by now, so no new read can start
+ * one; this stops ring_free() from freeing the memory under a read that is mid-copy.
+ */
+static void
+ios_drain_readers(void)
+{
+	lck_mtx_lock(&ios_lock);
+	while (ios_readers != 0) {
+		(void)msleep(&ios_readers, &ios_lock, PZERO, "hakios-camera-drain", NULL);
+	}
+	lck_mtx_unlock(&ios_lock);
+}
+
 /* The session's end, whatever ended it: the sensor's "off", the blocks, the supplies, the memory. */
 static void
 ios_stop(const char *why)
@@ -3419,6 +3439,7 @@ ios_stop(const char *why)
 	csiphy_down();
 	titan_down();
 	power_down();
+	ios_drain_readers();
 	ring_free();
 	say("camera: the frames for iOS stopped (%s): %llu done, %llu given, %llu written over\n", why, ios_frames_done, ios_given,
 	    ios_writes_late);
@@ -3765,6 +3786,7 @@ fake_session(void)
 	}
 	lck_mtx_unlock(&ios_lock);
 	wakeup(&ios_frames_done);
+	ios_drain_readers();
 	ring_free();
 	say("camera: the frames for iOS stopped (%s): %llu done, %llu given\n", !ios_open ? "closed" : ios_switch_to != 0 ?
 	    "another sensor asked for" : "nobody reads", ios_frames_done, ios_given);
@@ -3805,6 +3827,8 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	struct hakios_camera_frame f;
 	uint64_t since = ios_ms();
 	int b = -1, error = 0;
+	vm_offset_t at = 0;             /* the place's address and the frame's size, taken under the lock with the place */
+	uint32_t frame_bytes = 0;
 
 	lck_mtx_lock(&ios_lock);
 	ios_last_read = ios_ms();
@@ -3843,6 +3867,13 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		ios_last_read = ios_ms();
 	}
 	place[b].state = PLACE_READING;
+	/*
+	 * Counted as a reader in the same lock hold that chose the place (the ring is live while a place is READY):
+	 * a session's end waits for this read, so the ring is not freed under the copy below (a use-after-free).
+	 */
+	ios_readers++;
+	at = ring + (uint64_t)b * ring_place_bytes;
+	frame_bytes = ring_frame_bytes;
 	ios_given = place[b].sequence;
 	bzero(&f, sizeof(f));
 	memcpy(f.magic, HAKIOS_CAMERA_MAGIC, 8);
@@ -3870,8 +3901,7 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 
 	error = uiomove((caddr_t)&f, (int)MIN(sizeof(f), (size_t)uio_resid(uio)), uio);
 	if (error == 0 && uio_resid(uio) > 0) {
-		vm_offset_t at = ring + (uint64_t)b * ring_place_bytes;
-		uint32_t n = (uint32_t)MIN((uint64_t)ring_frame_bytes, (uint64_t)uio_resid(uio));
+		uint32_t n = (uint32_t)MIN((uint64_t)frame_bytes, (uint64_t)uio_resid(uio));
 
 		uint64_t t0 = mach_absolute_time(), t1, t2;
 
@@ -3897,9 +3927,14 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		place[b].state = PLACE_READY;
 	}
 	ios_last_read = ios_ms();
+	ios_readers--;                  /* (the copy is over: a session's end waiting to free the ring may go on) */
 	lck_mtx_unlock(&ios_lock);
+	wakeup(&ios_readers);
 	return error;
 }
+
+/* serialises the writers of `keep' (never held together with ios_lock) */
+static LCK_MTX_DECLARE(keep_lock, &ios_lck_grp);
 
 /* HAKIOS_CAMERA_KEEP: a picture for the host, in one piece of memory the loader hands over. */
 static int
@@ -3914,6 +3949,11 @@ keep_picture(const struct hakios_camera_command *c, struct uio *uio)
 	if (keep == 0 || keep_bytes < want) {
 		return ENOSPC;                  /* (the piece is made when the device is, while there is memory in one piece) */
 	}
+	/*
+	 * One writer at a time (its own mutex: ios_lock is the capture thread's and must not wait on a user copy):
+	 * two writers would interleave one picture's header with the other's data in `keep'.
+	 */
+	lck_mtx_lock(&keep_lock);
 	h = (struct cam_header *)keep;
 	bzero(h, CAM_HEADER_BYTES);
 	memcpy(h->magic, "RWCAM001", 8);
@@ -3934,6 +3974,7 @@ keep_picture(const struct hakios_camera_command *c, struct uio *uio)
 	loader_recording[0] = kvtophys(keep);
 	loader_recording[1] = want;
 	loader_recording[2] = (uint64_t)keep;
+	lck_mtx_unlock(&keep_lock);
 	say("camera: a picture from iOS for the host: %ux%u, format %u, %u bytes\n", c->a, c->b, c->d, c->bytes);
 	return error;
 }
@@ -4033,7 +4074,11 @@ ios_select(unsigned index, uint32_t mode_n)
 	ios_mode_n = mode_n;
 	ios_mode = &ctab_modes[mode_n];
 	if (ios_mode->lanes < 1 || ios_mode->lanes > (ios_mode->cphy ? 3u : 4u) || ios_mode->data_type != RAW10_DT ||
-	    ios_mode->width % 4 != 0 || ios_mode->fps_milli == 0 || ios_mode->frame_length == 0) {
+	    ios_mode->width % 4 != 0 || ios_mode->fps_milli == 0 || ios_mode->frame_length == 0 ||
+	    /* (a frame_length not above the margin makes `frame_length - EXPOSURE_MARGIN' wrap; sides over 16384 make the
+	     * 32-bit frame size wrap, so the ring and the IFE's writes would disagree) */
+	    ios_mode->frame_length <= EXPOSURE_MARGIN || ios_mode->frame_length > FRAME_LINES_MAX || ios_mode->width > 16384 ||
+	    ios_mode->height > 16384) {
 		say("camera: mode %u is not what this is written for\n", mode_n);
 		return false;
 	}
