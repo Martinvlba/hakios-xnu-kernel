@@ -15,19 +15,35 @@
 #   make clean           build output of the kernel, loader and images
 #   make doctor          check this machine and a phone on adb for what HakiOS needs (tools/doctor.sh)
 #
+# Configuration, the way Linux's make does it (configs/, tools/hakios-config.py; docs/configs.md):
+#   make redwood_defconfig   .config from configs/defconfig + configs/redwood_defconfig (any NAME_defconfig)
+#   make virt.config         lay a fragment (configs/virt.config) over the .config there is
+#   make config              show the .config: its symbols, the kernel's arguments, the firmware it wants
+#   make savedefconfig       the .config as a minimal defconfig
+#   make phone               with a .config, its arguments are the kernel's; without, the phone line below
+#   FRAGMENTS="open trace"   fragments for a NAME_defconfig: make redwood_defconfig FRAGMENTS=open
+#
 #   DEVICE=poco-x5-pro   the device directory under devices/ (default poco-x5-pro)
-#   ARGS="..."           kernel arguments for make phone (default: everything the phone has)
+#   ARGS="..."           kernel arguments for make phone (default: the .config's, else everything the phone has)
 #   SECS=600             the session's length for make phone / make qemu
 #   JOBS=8               parallel jobs for the kernel build
 
 DEVICE ?= poco-x5-pro
 JOBS ?= 8
 SECS ?= 600
-ARGS_OPEN ?= cpus=1
+# qemu-open runs the open configuration: configs/defconfig (nothing of a phone's own, one core)
+ARGS_OPEN ?= $(shell tools/hakios-config.py args --defconfig defconfig)
+ifneq ($(wildcard .config),)
+# a .config is the kernel's arguments; the runner then does not add its own four (cores, clock, storage): they are in it
+ARGS ?= $(shell tools/hakios-config.py args)
+RUNNER_BASE = BASE_ARGS=
+else
 ARGS ?= touchscreen=1 gpu=1 adsp=1 sound=4 wifi=1 haptic=5 modem=1 modem_again=1 modem_buffer=0xa8000000
+RUNNER_BASE =
+endif
 IMAGE_OPTS ?= REST=1
 
-.PHONY: help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor
+.PHONY: help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig
 
 help:
 	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
@@ -79,7 +95,24 @@ qemu-open: kernel loader-open hello
 	qemu/run.sh $(SECS) | tee logs/qemu-open.log
 
 phone:
-	XL_SB_DELAY=8 tools/modem-cycle.sh "$(ARGS)" $(SECS)
+	[ ! -f .config ] || tools/hakios-config.py check
+	XL_SB_DELAY=8 $(RUNNER_BASE) tools/modem-cycle.sh "$(ARGS)" $(SECS)
+
+# ---- configuration (configs/, tools/hakios-config.py) ---------------------------------------------------------
+defconfig:
+	tools/hakios-config.py defconfig defconfig $(FRAGMENTS)
+
+%_defconfig:
+	tools/hakios-config.py defconfig $* $(FRAGMENTS)
+
+%.config:
+	tools/hakios-config.py merge $*
+
+config:
+	tools/hakios-config.py show
+
+savedefconfig:
+	tools/hakios-config.py savedefconfig
 
 prebuilt:
 	tools/update-prebuilt.sh

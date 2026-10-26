@@ -1,0 +1,19 @@
+# HakiOS defconfig for the POCO X5 Pro 5G (redwood, SM7325, devices/poco-x5-pro): the arguments the project's own phone line uses.
+# It is exactly what `make phone` and tools/modem-cycle.sh passed before there were configurations, so choosing it changes nothing.
+# Needs the phone's own firmware pulled from your phone (devices/poco-x5-pro/pull-firmware.sh): `tools/hakios-config.py needs`.
+CONFIG_DEVICE="poco-x5-pro"
+CONFIG_SOC="sc7280"
+CONFIG_FIRMWARE="device"
+CONFIG_CPUS=8
+CONFIG_BOOTCPU=7
+CONFIG_CPUFREQ=y
+CONFIG_UFS=2
+CONFIG_TOUCHSCREEN=y
+CONFIG_GPU=y
+CONFIG_ADSP=y
+CONFIG_SOUND=4
+CONFIG_WIFI=y
+CONFIG_HAPTIC=5
+CONFIG_MODEM=y
+CONFIG_MODEM_AGAIN=y
+CONFIG_MODEM_BUFFER=0xa8000000

@@ -1,0 +1,4 @@
+# HakiOS defconfig: what every configuration starts from. It is the open one: nothing of a phone's own, one core.
+# (`make qemu-open` runs this; a device's defconfig is laid over it: make redwood_defconfig.)
+CONFIG_FIRMWARE="none"
+CONFIG_CPUS=1

@@ -27,6 +27,8 @@ jobs:
         run: python3 tools/provenance-test.py
       - name: A run sends only the soc_* values that differ from the kernel's defaults
         run: bash tools/soc-only-changes-test.sh
+      - name: Configurations - defconfigs, fragments, the arguments made from them
+        run: python3 tools/hakios-config-test.py
       - name: The kernel's version string is made as it should be
         run: python3 tools/kernel-version-test.py
       - name: The kernel patch applies to Apple's tree
