@@ -6,7 +6,7 @@ legal opinion, and it does not assert that the project is free of all risk. See 
 
 ## Apple Public Source License 2.0 (the kernel)
 
-`xnu/hakios.patch` and everything under `xnu/files/` are modifications of Apple's XNU, which Apple
+`xnu/hakios.patch` and everything under `xnu/files/` and `drivers/` are modifications of Apple's XNU, which Apple
 publishes under the APSL 2.0. The full text is in `LICENSE.APSL`. The obligations we track:
 
 - **Source availability (APSL 2.3).** Our modifications are published here as source. The exact

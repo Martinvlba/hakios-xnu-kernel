@@ -2,7 +2,7 @@ HakiOS
 
 Two licenses apply, by directory:
 
-1. The kernel: xnu/hakios.patch and everything under xnu/files/ are a derivative work of
+1. The kernel: xnu/hakios.patch and everything under xnu/files/ and drivers/ are a derivative work of
    Apple's XNU and are licensed under the Apple Public Source License, Version 2.0, whose full
    text is in LICENSE.APSL. Per its terms the modifications are published here as source and
    Apple's notices are kept in the files they belong to.

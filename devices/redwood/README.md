@@ -12,7 +12,7 @@ tree and its Android. A port to another Qualcomm phone is another directory like
 | The phone's firmware | **not in the repository**: `pull-firmware.sh` pulls it off your phone over `adb` into `fw-*/` at the top |
 | Tools | `tools/modem_firmware.py` (the modem image by the device tree), `tools/cellular_probe.py` (the modem's nodes in the device tree) |
 
-What the kernel does for this phone in particular is the drivers `xnu/files/bsd/dev/hakios_*.c`
+What the kernel does for this phone in particular is the drivers `drivers/*/hakios.*`
 (display, Goodix touch, UFS, Adreno 642L, WCN6750 Wi-Fi, the audio DSP, the modem, the Awinic
 haptics, the cameras); the head of each file says where its numbers come from. That is the map of
 what to rewrite for another phone.

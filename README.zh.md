@@ -17,7 +17,7 @@ HakiOS 在搭载高通 SoC 的 Android 手机上运行开源的 XNU 内核（xnu
 
 只有我的代码和我的数据：
 
-- 内核：对 Apple 开源 XNU 的补丁（`xnu/hakios.patch`，APSL 2.0）和我的驱动文件（`xnu/files/`），
+- 内核：对 Apple 开源 XNU 的补丁（`xnu/hakios.patch`，APSL 2.0）和我的驱动文件（`xnu/files/`、`drivers/`），
   由 `xnu/apply.sh` 叠加到一份新克隆上；
 - 引导程序（`xnuloader/`）、我的程序和库（`userland/src/`）、工具（`tools/`）、构建和运行脚本；
 - `prebuilt/`：用本仓库构建出的内核、引导程序和库；
@@ -102,7 +102,7 @@ make images       # 用户空间和镜像
 | 目录 | 内容 |
 |---|---|
 | `xnu/` | 内核补丁和文件；`apply.sh`、`export.sh`；内核 README |
-| `xnu/files/bsd/dev/hakios.*.c` | 我的驱动：显示、触摸、UFS、GPU、Wi-Fi、音频、调制解调器、SIM/NAS、振动、摄像头 |
+| `drivers/*/hakios.*` | 我的驱动：显示、触摸、UFS、GPU、Wi-Fi、音频、调制解调器、SIM/NAS、振动、摄像头 |
 | `xnuloader/` | 引导程序（UEFI 应用） |
 | `userland/` | 我的程序和库（`src/`）、镜像构建、launchd 任务 |
 | `sysimage/` | 从 IPSW 取得并解包系统文件的脚本（不含文件本身） |

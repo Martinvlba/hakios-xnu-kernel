@@ -4,6 +4,7 @@ Our changes to XNU `xnu-8796.121.2` (the kernel of iOS 16.5, Darwin 22.5.0):
 
 - `hakios.patch`: changes to Apple's files;
 - `files/`: new files at their paths in the XNU tree;
+- `../drivers/`: the drivers, by subsystem (`drivers/README.md`); `apply.sh` puts them at their paths in the tree;
 - `apply.sh`: fetches the sources from Apple's GitHub and lays all of this over them;
   `export.sh`: the reverse, run before committing.
 

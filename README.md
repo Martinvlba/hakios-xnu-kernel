@@ -21,7 +21,7 @@ device tree and its own Android, so a port to another Qualcomm phone is a new di
 Only my code and my data:
 
 - the kernel: a patch to Apple's open-source XNU (`xnu/hakios.patch`, APSL 2.0) and my driver
-  files (`xnu/files/`), laid over a fresh clone by `xnu/apply.sh`;
+  files (`xnu/files/`, `drivers/`), laid over a fresh clone by `xnu/apply.sh`;
 - the boot loader (`xnuloader/`), my programs and libraries (`userland/src/`), tools (`tools/`),
   build and run scripts;
 - `prebuilt/`: the kernel, loader and libraries built from this repository;
@@ -125,7 +125,7 @@ module, or the open lzfse library gets built). User space and the images: `REST=
 | Directory | Contents |
 |---|---|
 | `xnu/` | the kernel patch and files; `apply.sh`, `export.sh`; a README about the kernel |
-| `xnu/files/bsd/dev/hakios.*.c` | my drivers: display, touch, UFS, GPU, Wi-Fi, audio, modem (`hakios.mpss.c`), its packets (`hakios.ipa.c`, `hakios.cell.c`), SIM/NAS, haptics, cameras |
+| `drivers/*/hakios.*` | my drivers: display, touch, UFS, GPU, Wi-Fi, audio, modem (`hakios.mpss.c`), its packets (`hakios.ipa.c`, `hakios.cell.c`), SIM/NAS, haptics, cameras |
 | `xnuloader/` | the boot loader (a UEFI application) |
 | `userland/` | my programs and libraries (`src/`), the image build, launchd jobs |
 | `sysimage/` | scripts that fetch and unpack the OS files from the IPSW (none of the files themselves) |
@@ -140,7 +140,7 @@ module, or the open lzfse library gets built). User space and the images: `REST=
 The kernel, loader and user space are shared. Everything about one phone lives in
 `devices/<name>/`: its UEFI, device tree, firmware list and tools. Today there is one,
 `devices/redwood/`, and its README is the map of what a port to another Qualcomm phone must bring.
-The phone's drivers are the files `xnu/files/bsd/dev/hakios.*.c`; the head of each says where its
+The phone's drivers are the files `drivers/*/hakios.*` (by subsystem: `drivers/README.md`); the head of each says where its
 numbers came from.
 
 ## Cellular

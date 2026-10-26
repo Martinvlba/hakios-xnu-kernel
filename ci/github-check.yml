@@ -37,6 +37,8 @@ jobs:
         run: |
           python3 tools/boot-args-test.py
           python3 tools/boot-args.py --check
+      - name: The drivers are kept by subsystem and every one is in drivers/map
+        run: python3 tools/drivers-check.py
       - name: The kernel patch applies to Apple's tree
         run: |
           git clone -q --depth 1 --branch xnu-8796.121.2 https://github.com/apple-oss-distributions/xnu.git /tmp/xnu
