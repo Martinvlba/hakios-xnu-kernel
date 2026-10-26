@@ -89,6 +89,8 @@ struct lx_radio {
 	unsigned heard_count, heard_lost;
 	struct lx_heard heard[HEARD_MOST];
 	uint8_t want[32], want_length;		/* the name of the network that is wanted ... */
+	uint8_t want_bssid[6];			/* ... and, if not all zero, the access point of that name that is wanted */
+	bool target_fixed;			/* the join has chosen: heard() leaves `target` as it is */
 	unsigned width;				/* MHz of the channel joined: 20, or with wifi_wide=1 what the access point offers */
 	struct lx_target target;		/* ... and the best of it */
 
@@ -564,7 +566,12 @@ heard(struct lx_radio *radio, const uint8_t *frame, unsigned length, unsigned fr
 	lx_os_lock();
 	if (name != NULL && radio->want_length != 0 && name[1] == radio->want_length &&
 	    memcmp(name + 2, radio->want, radio->want_length) == 0 && (!radio->target.found || signal > radio->target.signal) &&
-	    length - 36 <= ELEMENTS_MOST && radio->sta == NULL) {
+	    length - 36 <= ELEMENTS_MOST && radio->sta == NULL && !radio->target_fixed &&
+	    (is_zero_ether_addr(radio->want_bssid) || memcmp(radio->want_bssid, frame + 16, ETH_ALEN) == 0)) {
+		/*
+		 * (Only the access point that was asked for, if one was, and only until the join has chosen: a stronger beacon of
+		 * the same name must not replace the address, capability and elements of the one the join is made with.)
+		 */
 		radio->target.found = true;
 		memcpy(radio->target.address, frame + 16, ETH_ALEN);
 		radio->target.frequency = (uint16_t)frequency;
@@ -639,7 +646,7 @@ say_heard(struct lx_radio *radio)
 
 	for (unsigned n = 0; n < radio->heard_count; n++) {
 		const struct lx_heard *network = NULL;
-		char name[33];
+		char name[33], address[18];
 		unsigned which = 0, channel;
 		bool wanted;
 
@@ -666,10 +673,12 @@ say_heard(struct lx_radio *radio)
 		/* (the network that is wanted is the user's own: its name is not said even here) */
 		wanted = radio->want_length != 0 && network->name_length == radio->want_length &&
 		    memcmp(network->name, radio->want, radio->want_length) == 0;
-		printf("lx: heard: channel %3u (%u MHz) %4d dBm  %02x:%02x:%02x:%02x:%02x:%02x  %s, %u times  \"%s\"\n", channel,
-		    network->frequency, network->signal, network->sender[0], network->sender[1], network->sender[2], network->sender[3],
-		    network->sender[4], network->sender[5], !(network->capability & 0x10) ? "open" : network->protected ? "RSN" :
-		    "protected", network->times, wanted ? "(the network that is wanted)" : name);
+		/* (nor is its address said: the BSSID of the user's own access point says where the user is) */
+		snprintf(address, sizeof(address), "%02x:%02x:%02x:%02x:%02x:%02x", network->sender[0], network->sender[1],
+		    network->sender[2], network->sender[3], network->sender[4], network->sender[5]);
+		printf("lx: heard: channel %3u (%u MHz) %4d dBm  %s  %s, %u times  \"%s\"\n", channel,
+		    network->frequency, network->signal, wanted ? "xx:xx:xx:xx:xx:xx" : address, !(network->capability & 0x10) ? "open" :
+		    network->protected ? "RSN" : "protected", network->times, wanted ? "(the network that is wanted)" : name);
 	}
 	for (unsigned channel = 0; channel < nitems(on_channel); channel++) {
 		if (on_channel[channel] != 0) {
@@ -805,9 +814,16 @@ handshake_message(struct lx_radio *radio, const uint8_t *frame, unsigned length)
 		queue_work(radio->work, &radio->group_work);
 	}
 	if (said != LX_WPA_NOTHING) {
+		/*
+		 * The result of the handshake is not last-writer-wins: once message 3 has passed its MIC (KEYS) a later frame -- an
+		 * unsigned one from anyone in range can say BAD or ANSWER -- must not hide it, or the join would time out although
+		 * the keys are agreed (IEEE 802.11i, 8.5.3: only a verified message counts).
+		 */
 		lx_os_lock();
-		radio->handshake = said;
-		radio->handshake_why = why;
+		if (radio->handshake != LX_WPA_KEYS) {
+			radio->handshake = said;
+			radio->handshake_why = why;
+		}
 		lx_os_wakeup(&radio->handshake);
 		lx_os_unlock();
 	}
@@ -1418,12 +1434,24 @@ static void
 group_rekey(struct work_struct *work)
 {
 	struct lx_radio *radio = __containerof(work, struct lx_radio, group_work);
-	struct ieee80211_key_conf *old = radio->group_key;
+	struct ieee80211_key_conf *old = radio->group_key, *fresh;
 	int error = 0;
 
 	radio->rekeys++;
-	radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &error);
+	fresh = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &error);
 	lx_tell("lx: the group's new key (number %u) is given to the driver: %d\n", radio->wpa.group_index, error);
+	if (error != 0) {
+		/*
+		 * The firmware did not take the new key: the old one stays (it is not dropped for a key that is not there), and the
+		 * new configuration, which key_set() returns even then, is wiped and freed; nothing was installed to disable.
+		 */
+		if (fresh != NULL) {
+			explicit_bzero(fresh->key, 16);
+			kfree(fresh);
+		}
+		return;
+	}
+	radio->group_key = fresh;
 	key_drop(radio, &old, false);
 }
 
@@ -1600,7 +1628,12 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	bzero(radio->ba, sizeof(radio->ba));
 	memcpy(radio->want, name, name_length);
 	radio->want_length = (uint8_t)name_length;
+	/* (under the lock: heard() writes the target under it, from the receive thread) */
+	lx_os_lock();
 	bzero(target, sizeof(*target));
+	memcpy(radio->want_bssid, what->bssid, ETH_ALEN);
+	radio->target_fixed = false;
+	lx_os_unlock();
 	if ((ret = station_up(radio)) != 0) {
 		return (ret);
 	}
@@ -1626,6 +1659,10 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	for (unsigned attempt = 0; attempt < 3 && !target->found; attempt++) {
 		station_scan(radio, name, name_length, false, NULL);
 	}
+	/* the choice is made: a beacon heard from here on does not change it (the join goes on with this one's address and elements) */
+	lx_os_lock();
+	radio->target_fixed = true;
+	lx_os_unlock();
 	if (!target->found) {
 		lx_tell("lx: THE NETWORK THAT IS WANTED WAS NOT HEARD (a name of %u bytes), in three scans\n", name_length);
 		return (ENOENT);
@@ -1792,7 +1829,11 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 	/* the handshake: the access point begins it; its messages come in as frames and are answered where they come in */
 	began = lx_os_nanoseconds();
 	lx_os_lock();
-	while (radio->handshake != LX_WPA_KEYS && radio->handshake != LX_WPA_BAD && radio->answer != ANSWER_GONE &&
+	/*
+	 * (A message that is not good does not end the wait: it may be a forged frame, and a frame that fails its check is discarded
+	 * -- IEEE 802.11i, 8.5.3 -- while the genuine messages can still come. The reason is still said below if the time runs out.)
+	 */
+	while (radio->handshake != LX_WPA_KEYS && radio->answer != ANSWER_GONE &&
 	    lx_os_nanoseconds() - began < 8000000000ull) {
 		lx_os_sleep(&radio->handshake, 20 * 1000000ull);
 	}

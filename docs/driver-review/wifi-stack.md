@@ -263,3 +263,20 @@ Concurrency and lock order: no cycle found among `lx_lock`, `bus.service`, `wiph
 - Side channels: the AES code is table-driven and `times()` has a data-dependent ternary; it runs only for the key unwrap, so only a local cache-timing attacker would matter.
 - 40/80 MHz width selection and rate/HT/VHT handling were read for bounds only, not for correctness against the standard; power save, roaming, regulatory domain logic and the `wifi_lx=1` register-trace path were skimmed.
 - Behaviour on hardware (everything marked PLAUSIBLE or NEEDS-HARDWARE).
+
+## Fix status
+
+- W1: FIXED (partly). `lx_wpa.c` `lx_wpa_message()`: an unsigned message 1 is accepted only while no signed message has been accepted yet (`!replay_known`); afterwards it is ignored (`LX_WPA_NOTHING`, no reply, keys untouched). This closes the 30 ms window before `key_set()` and the after-join KCK/KEK overwrite. SKIPPED: the candidate-key scheme for a forged message 1 *before* message 3 (needs new fields in `struct lx_wpa`, i.e. `lx_wpa.h`, which was not in the editable set; the forged frame still makes that join fail, as W2 case 1 describes).
+- W2: FIXED. `lx_80211.c` `handshake_message()`: `radio->handshake` is no longer overwritten once it is `LX_WPA_KEYS`; `station_join()`: the wait no longer ends on `LX_WPA_BAD` (only KEYS, the AP's deauthentication or the 8 s timeout), the reason is still logged on timeout. A genuinely wrong passphrase still ends through deauthentication or the timeout.
+- W3: SKIPPED. NEEDS-HARDWARE: whether the driver sets `RX_FLAG_DECRYPTED`/`IV_STRIPPED` on every legitimate 802.11-form frame is not known; requiring it could drop real group traffic.
+- W4: SKIPPED. Protocol/design change (per-key PN state, and whether `status->extiv` carries the PN depends on the firmware/driver).
+- W5: SKIPPED. Replacing the bump allocator with a freeing allocator is a design change and needs knowledge of which ath11k allocations go through it.
+- W6: SKIPPED. The seed is in `xnuloader/loader.c`, outside the editable files.
+- W7: FIXED (partly). `lx_wpa.c` `group_key()`: the GTK KDE must be 16 bytes and have key number 1 to 3. SKIPPED: the Install/Secure bit checks (supplicants such as wpa_supplicant do not require them; rejecting could break real APs) and the RSNE comparison with the beacon (needs a changed `lx_wpa_message()` signature / `lx_wpa.h`).
+- W8: FIXED. `lx_80211.c`: the requested BSSID is stored in `radio->want_bssid` and tested in `heard()`; a new `radio->target_fixed` stops `heard()` from replacing `target` once the join has chosen; the `bzero(target)` is now under `lx_os_lock()`. SKIPPED: `vif->bss_conf.bssid` still points at `target.address` (now stable after the choice).
+- W9: SKIPPED. Locking/teardown redesign (PLAUSIBLE, needs a `leaving` protocol across rx, work items and the driver).
+- W10: FIXED (partly). `lx_80211.c` `group_rekey()`: on a failed `set_key` the old key is kept and the new configuration is wiped and freed. SKIPPED: not sending group message 2 and not consuming the replay counter on failure (needs a handshake design change).
+- W11: SKIPPED. `timer_delete_sync()` waiting risks self-deadlock when called from the ticker's own callback, and bounding `irq_group()` needs knowledge of the vector's (edge/level) re-arm behaviour.
+- W12: FIXED. `lx_80211.c` `say_heard()`: the BSSID of the wanted network is not printed. `lx_wpa.c`: the last AES block `t[16]` in `aes_decrypt()`, `a[8]` in `aes_unwrap()` and `data[]` after a failed unwrap are wiped.
+
+Test: `tools/wpa-test` (copied to WSL, built with the sanitizers, no output left in the tree) passes, 195 checks 0 failed (seed 1); with seed 7 and one extra ad-hoc check (a forged message 1 after message 3 changes no key and gets no reply) 207 checks, 0 failed. `lx_80211.c` was only re-read, not compiled.
