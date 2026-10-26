@@ -13,6 +13,11 @@ jobs:
       - name: Shell scripts parse
         run: |
           git ls-files '*.sh' xl | xargs -r -n1 bash -n
+      - name: Scripts that start with #! are executable in git (a Windows commit with a pathspec records 644)
+        run: |
+          bad=$(git ls-files -s | awk '$1=="100644"{print $4}' | while read -r f; do
+            case "$f" in *.sh|*.py|xl) head -c2 "$f" | grep -q '^#!' && echo "$f";; esac; done)
+          if [ -n "$bad" ]; then echo "not executable in git (git update-index --chmod=+x):"; echo "$bad"; exit 1; fi
       - name: Makefile help
         run: make help
       - name: Provenance - every binary and blob explained, nothing proprietary, nothing writes to the phone
