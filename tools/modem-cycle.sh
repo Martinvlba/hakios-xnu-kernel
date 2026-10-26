@@ -10,7 +10,9 @@ ARGS=$1; SECS=${2:-300}
 # kernel command line so hakios.mpss.c / hakios.ipa.c map that phone's blocks. SOC_ARGS names the file;
 # default is the one device there is. The POCO's values equal the kernel defaults, so this is a no-op there.
 SOC_ARGS=${SOC_ARGS-$(ls devices/*/soc.args 2>/dev/null | head -1)}
-SOC=""; [ -n "$SOC_ARGS" ] && [ -f "$SOC_ARGS" ] && SOC=$(tr -d '\r' < "$SOC_ARGS" | tr '\n' ' ')
+# only what differs from the kernel's built-in defaults: the rest changes nothing, and the command line is short
+. tools/soc-only-changes.sh
+SOC=""; [ -n "$SOC_ARGS" ] && SOC=$(soc_only_changes "$SOC_ARGS" | tr '\n' ' ')
 for i in $(seq 1 2160); do s=$(./xl state); [ "$s" != absent ] && break; sleep 10; done
 echo "$(date +%T) phone: $s"; [ "$s" = absent ] && { echo "NO PHONE"; exit 1; }
 ./xl enter 2>&1 | tail -1
