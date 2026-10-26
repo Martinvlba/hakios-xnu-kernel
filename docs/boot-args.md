@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **314 arguments**: 265 read by the kernel, 14 by the loader, 44 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **316 arguments**: 267 read by the kernel, 14 by the loader, 44 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
@@ -180,7 +180,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_pas_mpss` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_MPSS` |  |
 | `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
 
-## Audio and battery (31)
+## Audio and battery (33)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -196,6 +196,8 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `adsp_wait` | K | `hakios.adsp.c` | `CONFIG_ADSP_WAIT` |  |
 | `battery` | KL | `hakios.adsp.c`, `hakios.battery.c`, `loader.c` | `CONFIG_BATTERY` |  |
 | `battery_shared_pa` | K | `hakios.battery.c` |  | the loader (the address of its charger page) |
+| `battery_stop` | K | `hakios.battguard.c` | `CONFIG_BATTERY_STOP` |  |
+| `battery_stop_poll` | K | `hakios.battguard.c` | `CONFIG_BATTERY_STOP_POLL` |  |
 | `battmgr` | K | `hakios.adsp.c` | `CONFIG_BATTMGR` |  |
 | `mic` | K | `hakios.mic.c` | `CONFIG_MIC` |  |
 | `mic_adc` | K | `hakios.mic.c` | `CONFIG_MIC_ADC` |  |

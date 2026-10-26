@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 311 symbols in 17 groups; 9 are set.
+# 313 symbols in 17 groups; 9 are set.
 #
 
 #
@@ -455,7 +455,7 @@ CONFIG_GPU=y
 # CONFIG_VBLUR is not set
 
 #
-# Audio and battery (30)
+# Audio and battery (32)
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
@@ -466,6 +466,12 @@ CONFIG_SOUND=4
 
 # the microphone (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
 # CONFIG_MIC is not set
+
+# hand control back to the loader when the battery is at or below this percent three looks in a row (0: never); acts ...
+# CONFIG_BATTERY_STOP is not set
+
+# how often the battery guard looks, in seconds (5 to 600; 20) [requires CONFIG_BATTERY_STOP]
+# CONFIG_BATTERY_STOP_POLL is not set
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_AGAIN is not set

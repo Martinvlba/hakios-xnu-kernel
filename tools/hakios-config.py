@@ -72,6 +72,9 @@ SYMBOLS = [
     ("THERMAL_POLL", "int", "thermal_poll", "how often the sensors are read, in milliseconds (200 to 60000; 2000)", None, "THERMAL"),
     ("THERMAL_STOP", "int", "thermal_stop", "hand control back to the loader when the hottest sensor reads this many degrees three times in a row "
                                            "(0: never; 105): the protection of a phone left running unattended", None, "THERMAL"),
+    ("BATTERY_STOP", "int", "battery_stop", "hand control back to the loader when the battery is at or below this percent three looks in a row (0: never); "
+                                            "acts only on a known charge, with a battery and no charger: for a run nobody watches", None, None),
+    ("BATTERY_STOP_POLL", "int", "battery_stop_poll", "how often the battery guard looks, in seconds (5 to 600; 20)", None, "BATTERY_STOP"),
     ("PMIC", "bool", "pmic", "list every block of the power-management chips the SPMI arbiter shows, and read the PMIC's clock; read only", None, None),
     # Linux's CONFIG_CMDLINE: whatever the symbols above do not cover, as name=value words in quotes. It is not an escape
     # from the checks: every name must be one the source reads (configs/boot-args.lst), so a typo is an error, not a no-op.
@@ -88,7 +91,7 @@ GROUP_OF = {
     "WIFI": "Wi-Fi", "HAPTIC": "Haptics and torch", "CAM": "Cameras",
     "MODEM": "Cellular", "MODEM_AGAIN": "Cellular", "MODEM_BUFFER": "Cellular",
     "NET_TRACE": "Network", "NET_NAMES": "Network", "VIRTIO_NET": "Network",
-    "SOCINFO": "Chip, thermal and PMIC", "THERMAL": "Chip, thermal and PMIC", "THERMAL_POLL": "Chip, thermal and PMIC",
+    "BATTERY_STOP": "Audio and battery", "BATTERY_STOP_POLL": "Audio and battery", "SOCINFO": "Chip, thermal and PMIC", "THERMAL": "Chip, thermal and PMIC", "THERMAL_POLL": "Chip, thermal and PMIC",
     "THERMAL_STOP": "Chip, thermal and PMIC", "PMIC": "Chip, thermal and PMIC", "BOOTARGS": "Extra arguments",
 }
 LAYER_OF = {}
@@ -120,7 +123,7 @@ GENERATED = load_generated()
 SYMBOLS += GENERATED
 BY_NAME = {s[0]: s for s in SYMBOLS}
 FIRMWARE_VALUES = ("device", "none")
-RANGES = {"CPUS": (1, 8), "BOOTCPU": (0, 7), "UFS": (1, 2), "THERMAL_POLL": (200, 60000), "THERMAL_STOP": (0, 160)}
+RANGES = {"CPUS": (1, 8), "BOOTCPU": (0, 7), "UFS": (1, 2), "THERMAL_POLL": (200, 60000), "THERMAL_STOP": (0, 160), "BATTERY_STOP": (0, 99), "BATTERY_STOP_POLL": (5, 600)}
 
 
 class ConfigError(Exception):

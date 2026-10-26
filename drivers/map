@@ -62,3 +62,4 @@ core     bsd/dev/hakios.version.c
 core    bsd/dev/hakios.socinfo.c
 power   bsd/dev/hakios.thermal.c
 power   bsd/dev/hakios.pmic.c
+power   bsd/dev/hakios.battguard.c

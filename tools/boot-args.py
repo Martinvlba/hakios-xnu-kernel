@@ -62,7 +62,7 @@ GROUPS = [
     ("Security stand-ins", r"kern_minimac|miniamfi"),
     ("Wi-Fi", r"hakios\.(wifi|wlfw|lx|sta|apple80211)\.|^lx_[a-z0-9]+\.c$"),     # wifi/lx/src/lx_*.c: the Linux layer
     ("Cellular", r"hakios\.(mpss|ipa|cell|nas|qmi)\."),
-    ("Audio and battery", r"hakios\.(adsp|audio|sound|speaker|mic|virtio_sound|battery)\."),
+    ("Audio and battery", r"hakios\.(adsp|audio|sound|speaker|mic|virtio_sound|battery|battguard)\."),
     ("Cameras", r"hakios\.camera\."),
     ("Touch and buttons", r"hakios\.(goodix|input|buttons|virtio_input)\."),
     ("Storage and APFS", r"hakios\.(ufs|ufshc|virtio_blk|sparse|apfs_check)\.|apfs_vfsops\."),
