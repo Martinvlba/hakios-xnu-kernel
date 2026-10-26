@@ -51,6 +51,7 @@ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 #define STATUS_DRIVER           2
 #define STATUS_DRIVER_OK        4
 #define STATUS_FEATURES_OK      8
+#define STATUS_FAILED           0x80
 
 #define QUEUE_SIZE              64
 #define DESC_F_WRITE            2
@@ -258,6 +259,8 @@ input_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 		bool returned = false;
 
 		while (d->seen != *(volatile uint16_t *)&d->used->idx) {
+			/* the ring entry and the event must be read after the index that announced them (arm64 does not order those loads by itself) */
+			__builtin_arm_dmb(0x9);         /* ISHLD */
 			uint32_t id = d->used->ring[d->seen++ % QUEUE_SIZE].id % QUEUE_SIZE;
 
 			input_event(d, &d->events[id]);
@@ -302,6 +305,9 @@ input_attach(struct input_device *d, int slot)
 	reg_write(d, VIRTIO_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
 	if (!(reg_read(d, VIRTIO_STATUS) & STATUS_FEATURES_OK)) {
 		printf("virtio-input: slot %d: features refused\n", slot);
+		/* the device never got this page: give it back and tell the device the driver gave up, so the failing slot costs nothing */
+		reg_write(d, VIRTIO_STATUS, STATUS_FAILED);
+		kmem_free(kernel_map, page, PAGE_SIZE);
 		return false;
 	}
 
@@ -309,6 +315,9 @@ input_attach(struct input_device *d, int slot)
 	reg_write(d, VIRTIO_QUEUE_SEL, 0);
 	if (reg_read(d, VIRTIO_QUEUE_NUM_MAX) < QUEUE_SIZE) {
 		printf("virtio-input: slot %d: event queue of %u\n", slot, reg_read(d, VIRTIO_QUEUE_NUM_MAX));
+		/* same as above: the queue was never given to the device */
+		reg_write(d, VIRTIO_STATUS, STATUS_FAILED);
+		kmem_free(kernel_map, page, PAGE_SIZE);
 		return false;
 	}
 	for (int i = 0; i < QUEUE_SIZE; i++) {

@@ -158,6 +158,13 @@ touch_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	struct hakios_touch t;
 	int error = 0, moved = 0;
 
+	/* a buffer smaller than one record can never be served: say so, instead of blocking for data and then returning 0 (end of file) */
+	if (uio_resid(uio) == 0) {
+		return 0;
+	}
+	if (uio_resid(uio) < (user_ssize_t)sizeof(t)) {
+		return EINVAL;
+	}
 	lck_mtx_lock(&touch_lock);
 	while (touch_head == touch_tail) {
 		error = msleep(&touch_queue, &touch_lock, PZERO | PCATCH, "hakios-touch", NULL);
@@ -172,6 +179,10 @@ touch_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		error = uiomove((caddr_t)&t, sizeof(t), uio);
 		lck_mtx_lock(&touch_lock);
 		if (error) {
+			/* the copy-out failed: put the record back at the head so a lost DOWN or UP does not leave a finger stuck (only if the ring still has room for it) */
+			if (touch_tail - touch_head < TOUCH_QUEUE) {
+				touch_queue[--touch_head % TOUCH_QUEUE] = t;
+			}
 			break;
 		}
 		moved++;

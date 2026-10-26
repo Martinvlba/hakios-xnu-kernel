@@ -29,6 +29,7 @@
  * own device tree.
  */
 #include <kern/clock.h>
+#include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -41,6 +42,9 @@ extern void hakios_tl(const char *format, ...) __printflike(1, 2);
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
+
+/* RPMh's sequencer (TCS 0 of the RSC): the audio DSP's and the modem's drivers write the same slots, so every request goes through this lock */
+extern lck_mtx_t hakios_rsc_lock;
 
 static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
 
@@ -203,13 +207,17 @@ rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 static bool
 rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 {
-	uint32_t irq_enable = rd(TCS(TCS_IRQ_ENABLE));
+	uint32_t irq_enable;
 	bool done;
 
+	/* the other drivers that write this slot set take the same lock, so that two requests never mix their address and data words */
+	lck_mtx_lock(&hakios_rsc_lock);
+	irq_enable = rd(TCS(TCS_IRQ_ENABLE));
 	/* the slot set must be idle, and switched off the way the hardware wants it: trigger, then enable */
 	for (int i = 0; rd(TCS(TCS_STATUS)) == 0; i++) {
 		if (i > 2000) {
 			printf("goodix: RPMh: the command slots stay busy\n");
+			lck_mtx_unlock(&hakios_rsc_lock);
 			return false;
 		}
 		sleep_us(100);
@@ -235,6 +243,7 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	wr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
 	wr(TCS(TCS_IRQ_CLEAR), 1);
 	wr(TCS(TCS_IRQ_ENABLE), irq_enable);
+	lck_mtx_unlock(&hakios_rsc_lock);
 	return done;
 }
 
@@ -1218,6 +1227,13 @@ focaltech_contact_update(uint32_t id, uint32_t event, uint32_t x, uint32_t y,
 		return;
 	}
 	seen.touches++;
+	/* the chip's 15-bit values can exceed the panel: keep them inside it, so the mirroring below cannot underflow */
+	if (x > max_report_x - 1) {
+		x = max_report_x - 1;
+	}
+	if (y > max_report_y - 1) {
+		y = max_report_y - 1;
+	}
 	switch (flip) {
 	case 1: x = max_report_x - 1 - x; break;
 	case 2: y = max_report_y - 1 - y; break;
@@ -1344,16 +1360,20 @@ show_state(const char *when)
 	    gpio_get(68), gpio_get(96));
 }
 
-/* Power the chip up from nothing, in the vendor driver's order. */
-static void
+/* Power the chip up from nothing, in the vendor driver's order. False if the I/O supply could not be switched on. */
+static bool
 power_on(void)
 {
 	gpio_output(PIN_RESET, false, PULL_UP, 8);
 	gpio_configure(PIN_INT, 0, PULL_UP, 8, false);
-	io_supply_on();
+	/* without its I/O rail the chip must not get the analog supply or be driven: stop before AVDD */
+	if (!io_supply_on()) {
+		return false;
+	}
 	sleep_ms(3);
 	gpio_output(PIN_AVDD, true, PULL_NONE, 2);
 	sleep_ms(15);
+	return true;
 }
 
 static void
@@ -1380,7 +1400,10 @@ bring_up(void)
 	touch_chip = touch_chip_detect();
 	printf("goodix: ID gpio96=%u gpio68=%u: selected %s\n", gpio_get(PIN_GOODIX_ID),
 	    gpio_get(PIN_FOCALTECH_ID), chip_name());
-	power_on();
+	if (!power_on()) {
+		printf("goodix: the I/O supply is not on; the chip is left alone\n");
+		return false;
+	}
 
 	if (clocks_on()) {
 		printf("goodix: serial engine: firmware %#x, interface %#x, parameters %#x, source clock %u Hz (select %u)\n",

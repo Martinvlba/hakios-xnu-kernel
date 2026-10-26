@@ -189,3 +189,18 @@ virtio_input.c:
 - Whether the PRAM download can touch persistent flash, and whether the vendor flow's own integrity step exists in the boot ROM.
 - The iOS sandbox profile for `/dev/hakios-touch` (F3 impact).
 - Build correctness (flags of `kmem_alloc`, `__builtin_arm_dmb` use) and the other drivers in the tree, other than reading the lines named above for `hakios_rsc_lock`.
+
+## Fix status
+
+Edited: drivers/input/hakios.goodix.c, hakios.input.c, hakios.virtio_input.c. Nothing was compiled or run; every edit was re-read for syntax and types.
+
+- F1 FIXED. goodix.c: `rpmh_write()` now takes `hakios_rsc_lock` (extern declared next to the other externs, `<kern/locks.h>` included) before the first TCS 0 access and releases it on the busy return and at the end. Same lock the audio DSP and modem drivers take; the lock is a leaf here (nothing else is taken while it is held), so no ordering problem. The mutex is held across `sleep_us`, exactly as adsp.c does.
+- F2 FIXED (the ignored error). goodix.c: `power_on()` returns bool and `bring_up()` stops with a message before AVDD or any bus work if `io_supply_on()` fails. NOT done: driving AVDD low and clearing the GCC clock votes when a later bring-up step fails. Power-down order and clock-vote semantics are hardware knowledge; SKIPPED for that part.
+- F3 SKIPPED. Mode 0666 of /dev/hakios-touch is policy and was explicitly not to be changed.
+- F4 FIXED. input.c `touch_read()`: if `uiomove` fails, the dequeued record is put back at the head (only if the ring still has room, so it can never overwrite a live slot).
+- F5 FIXED. input.c `touch_read()`: a zero-length read returns 0, a read of 1..23 bytes returns EINVAL instead of blocking and then returning EOF. Reads of 24 bytes or more behave as before.
+- F6 SKIPPED. A checksum of the FocalTech firmware needs a value generated at build time for hakios.focaltech_fw.h (not a file I may edit) and, for an on-chip check, knowledge of the boot ROM protocol that cannot be established from the repository.
+- F7 FIXED. goodix.c `focaltech_contact_update()`: x and y are clamped to `max_report - 1` before the flip, so the mirroring cannot underflow. In range values and the unflipped case are unchanged (an out-of-range value was already ending at 65535).
+- F8 FIXED. virtio_input.c `input_poll()`: `__builtin_arm_dmb(0x9)` (ISHLD) after the `used->idx` check, before the ring entry and the event are read.
+- F9 FIXED. virtio_input.c `input_attach()`: both failure returns now write STATUS_FAILED (0x80, new define) to the device and `kmem_free` the page. The device was never given the queue on those paths.
+- F10 SKIPPED. Which of gpio52/gpio53 is the chip's output is hardware knowledge, and dropping or changing the probe order is a behaviour decision for the owner.

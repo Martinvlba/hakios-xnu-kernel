@@ -196,3 +196,25 @@ Before each submission buffers are cleaned and invalidated (`dc civac`, adreno.c
 - `hakios.image.c` (`hakios_image_file`) and the callers outside this group (`HakiosGPUStart/Stop` call sites, `loader_return.c`).
 - Userland (`userland/src/eagl.c`, `tools/mesa/hakios-drm`) and the display_probe code (`adreno.c:3568-3703`; it only reads and writes two clock-enable bits).
 - Cellular modem code (out of scope).
+
+## Fix status
+
+Edited: drivers/gpu/hakios.gpu.cpp, drivers/gpu/hakios.adreno.c, xnu/files/iokit/Kernel/MiniIOSurface.cpp, MiniIOMobileFramebuffer.cpp (MiniIOSurface.h unchanged). Nothing was compiled or run; every edit was re-read for syntax and types.
+
+- G1 SKIPPED. Command-stream validation, CP_PROTECT and kernel-only mappings are a design and hardware matter (register semantics, privilege bit meaning); not invented here.
+- G2 FIXED. MiniIOMobileFramebuffer.cpp: new `surfaceHolds()` (64-bit arithmetic) is checked in `drawLayer()` for the rows and columns it reads (offset + (rows-1)*stride + columns*4 must be within allocSize) and in `record()` for the whole display; a surface that does not hold them is not read. This covers a small stride, element height above 1 and a wrapped client size, whatever they were created with. MiniIOSurface.cpp `surfaceCreate()`: wrapped surfaces' owner-given IOSurfaceAllocSize must be non-zero and at most 512 MB (same limit as other surfaces); plane width/height are capped at 16384 and a computed plane size is done in 64 bits and refused above 512 MB. NOT changed: creation still accepts a stride below width*bytes-per-element and the element-height row count, because a client with an unusual element definition would be refused; the read-side check makes both memory-safe.
+- G3 FIXED. gpu.cpp `kMsmWaitFence`: a fence ahead of `hakios_gpu_last()` returns kIOReturnBadArgument before `gpuWait()`, so a bad argument can no longer latch `gGPUReported`.
+- G4 FIXED. gpu.cpp `freeBuffer()`: the buffer is taken out of its handle (memory/surface NULL, counters decremented) and the rest works on a local copy, before `gpuWait()` can drop the lock; a second close of the handle now gets BadArgument.
+- G5 FIXED. MiniIOMobileFramebuffer.cpp `drawLayer()`: destination rectangle computed in 64 bits; one beyond +-16M panel pixels, or wholly off the panel, is not drawn (a layer wholly left of the panel previously computed columns far outside the source row); the row loop and the helper threads' split use the on-panel rows (`ry0/ry1` in `RowJob`), while the scaling still uses the original py0/py1 so partly off-panel layers draw exactly as before.
+- G6 FIXED in part. gpu.cpp `show()`: `rowBytes * height` above 256 MB (the buffer maximum) is refused. SKIPPED: per-client and global byte budgets for buffers and surfaces (a policy choice of limits), and the surface table.
+- G7 FIXED. MiniIOSurface.cpp `methodCreate()`: `allocSize` copied to a local before the creator's hold is dropped.
+- G8 FIXED. MiniIOMobileFramebuffer.cpp `vsync()`: the async send is done with `fLock` held (as the report suggests); `registerNotificationPort()` swaps under the same lock, so the old port is only released after the send. The send uses kIOUserNotifyOptionCanDrop; owner to confirm it cannot block.
+- G9 SKIPPED. Ownership and privilege checks on surface IDs are policy, not to be changed here.
+- G10 FIXED. MiniIOMobileFramebuffer.cpp `drawLayer()`: on any failed blend-row allocation every array that was made is freed with the size it was made with and set to NULL before the size is reset to 0.
+- G11 FIXED in part. gpu.cpp `submit()`: the log no longer prints `addresses[0]`/`words[0]` when `count == 0`. NOT done: rejecting a submission with no command buffer; what the ring does with an empty submission (fence only) was not established, so behaviour is unchanged.
+- G12 FIXED. adreno.c `step_gmu_firmware()`: block address + size is computed in 64 bits in both checks (TCM write is refused if the block wraps past 4 GB; memory copy only if the block lies inside a block that was made).
+- G13 FIXED in part. adreno.c `hakios_gpu_address_free()`: a range overlapping a free one is refused with a message, so a double free cannot corrupt the list. SKIPPED: the TLB sync result (timing and a recovery action need hardware knowledge).
+- G14 FIXED. gpu.cpp `millisecondsUntil()`: seconds*1e9 and the nanosecond add use overflow-checked builtins; an overflowing positive time is the 5 s cap, a negative one is "now".
+- G15 SKIPPED. Releasing the global GPU lock while waiting for ring space is a locking-design change.
+- G16 SKIPPED. Cache invalidation after GPU writes depends on the SMMU/bus coherency model; NEEDS-HARDWARE.
+- G17 SKIPPED. Needs to know whether IOKit serialises `clientClose()` against calls in flight; not established.
