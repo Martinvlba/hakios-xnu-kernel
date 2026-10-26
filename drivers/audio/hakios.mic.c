@@ -1546,9 +1546,10 @@ static uint32_t mic_secs = 10;
 /*
  * The stream run, read for mic_secs (for_ios: while iOS has the device open): how loud it is, every
  * second (for iOS: the first three, then every 30th); into the recording with rec_sound_mic=1; for
- * iOS into the ring.
+ * iOS into the ring. False if it could not get going (the run refused, a read not sent, no read ever came
+ * back): not a failure that sets `broken', so for_ios() counts it from this.
  */
-static void
+static bool
 listen(bool for_ios)
 {
 	uint32_t run[3] = { 0, 0, 0 }, frames = 0, seconds = 0, peak = 0, periods = 0, empty = 0;
@@ -1565,13 +1566,13 @@ listen(bool for_ios)
 	if (!hakios_adsp_apr(APR_SVC_ASM, MIC_STREAM_PORT, 0, ASM_SESSION_CMD_RUN_V2, run, sizeof(run), APR_WAIT_MS, &answer) ||
 	    answer.opcode != APR_BASIC_RSP_RESULT || answer.words[1] != 0) {
 		say("mic: the session, run: REFUSED OR NO ANSWER (%#x %#x)\n", answer.opcode, answer.words[1]);
-		return;
+		return false;
 	}
 	say("mic: the session 2, run: done\n");
 	for (unsigned p = 0; p < MIC_PERIODS; p++) {
 		if (!mic_read(p)) {
 			say("mic: a read could not be sent\n");
-			return;
+			return false;
 		}
 	}
 	if (for_ios) {
@@ -1594,13 +1595,14 @@ listen(bool for_ios)
 			hakios_haptic_pretend(0);
 			tap = 2;
 		}
-		if ((for_ios ? (!ios_wants || stopping) : elapsed_ms >= mic_secs * 1000ull) || broken) {
+		/* (`stopping' ends every kind of run: hakios_mic_dsp_down() waits for mic_lock, which is held until this returns) */
+		if ((for_ios ? !ios_wants : elapsed_ms >= mic_secs * 1000ull) || stopping || broken) {
 			break;
 		}
 		if (!(read_ready & (1u << next))) {
 			if (elapsed_ms > 1500 && reads_done == 0) {
 				say("mic: NO READ HAS COME BACK in 1.5 s\n");
-				break;
+				return false;
 			}
 			sleep_ms(2);
 			continue;
@@ -1674,6 +1676,7 @@ listen(bool for_ios)
 			squares = 0;
 		}
 	}
+	return true;
 }
 
 static void
@@ -1736,7 +1739,7 @@ for_ios(void)
 	say("mic: THE MICROPHONE IS IOS'S (/dev/hakios-mic) from here on, until the run ends: it listens only while iOS records\n");
 	while (!stopping) {
 		uint64_t began, ns;
-		bool failed;
+		bool failed, up;
 
 		if (!ios_wants) {
 			sleep_ms(20);
@@ -1755,10 +1758,12 @@ for_ios(void)
 		began = mach_absolute_time();
 		say("mic: iOS records (%u): the path up%s\n", recordings, quiet ? " (the lines that say all went well are not said again)" :
 		    "");
-		if (path_up()) {
-			listen(true);
-		}
-		failed = broken;
+		/*
+		 * (a bring-up or a start that fails without setting `broken' counts as a failure too: otherwise the three-recordings
+		 * limit below never applies and, while iOS keeps the device open, the path is brought up and undone for ever)
+		 */
+		up = path_up() && listen(true);
+		failed = broken || !up;
 		absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
 		say("mic: iOS's recording %u %s after %llu.%llu s; last: %s; %llu frames skipped as too late, %llu reads found too little\n",
 		    recordings, failed ? "BROKE OFF" : "ended", ns / NSEC_PER_SEC, ns % NSEC_PER_SEC / (NSEC_PER_SEC / 10), last_write,

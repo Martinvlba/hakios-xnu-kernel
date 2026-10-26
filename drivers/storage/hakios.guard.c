@@ -157,7 +157,10 @@ block(int16_t *frames, uint32_t count)
 {
 	uint32_t attenuation = guard.attenuation;
 	struct hakios_guard_report *r = &guard.report;
-	uint64_t to_speaker = attenuation == HAKIOS_GUARD_SILENT ? 0 : amplitude(2 * attenuation);
+	/* (2 * attenuation is kept from wrapping in 32 bits: a wrapped value says nothing about the level, and for some it is
+	   a huge one, which makes the power limits see no power at all while the amplifiers are not turned down) */
+	uint64_t to_speaker = attenuation == HAKIOS_GUARD_SILENT ? 0 :
+	    amplitude(attenuation > HAKIOS_GUARD_SILENT / 2 ? HAKIOS_GUARD_SILENT - 1 : 2 * attenuation);
 	uint64_t sum[2] = { 0, 0 }, g2 = ONE, g, start = guard.level, ceiling;
 	uint32_t binding = 0;
 

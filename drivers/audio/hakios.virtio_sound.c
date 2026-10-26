@@ -247,7 +247,17 @@ static void
 sound_pump(void)
 {
 	while (tx.seen != *(volatile uint16_t *)&tx.used->idx) {
-		tx_free[tx_free_count++] = (uint16_t)(tx.used->ring[tx.seen++ % QUEUE_SIZE].id / 2);
+		uint32_t n;
+
+		/* (the device wrote the ring entry before it moved idx: read it only after idx, not ahead of it) */
+		__builtin_arm_dmb(0xb);
+		n = tx.used->ring[tx.seen++ % QUEUE_SIZE].id / 2;
+		/* (the id is the device's: one that is not one of our buffers, or more buffers than there are, would write outside
+		   tx_free[] and the shared area below; such an entry is dropped) */
+		if (n >= TX_BUFFERS || tx_free_count >= TX_BUFFERS) {
+			continue;
+		}
+		tx_free[tx_free_count++] = (uint16_t)n;
 	}
 	while (tx_free_count != 0 && ring_tail - ring_head >= PERIOD_FRAMES) {
 		uint16_t n = tx_free[--tx_free_count];

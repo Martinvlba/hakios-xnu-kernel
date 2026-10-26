@@ -253,3 +253,24 @@ userland/src/audio_plugin.c
 - QEMU's virtio-sound device behaviour; the audio_plugin.c property/object plumbing outside I/O and volume.
 - Timing, latency and audio quality (underflow behaviour of the 160 ms DSP queue, the 5 ms virtio poll).
 - Nothing was built or executed; no sanitizer or fuzzing was run on the ACF parser.
+
+## Fix status
+
+Edits only in drivers/audio/hakios.{audio,sound,speaker,mic,virtio_sound}.c and drivers/storage/hakios.guard.c. Nothing was compiled or run.
+
+- S-01 FIXED. Three layers: audio.c audio_ioctl clamps the user's `below` to HAKIOS_AUDIO_BELOW_MAX (90 * 8 = speaker.c VOLUME_LOWEST, the documented "sound_below=720" floor); sound.c watch() now uses a saturating below_with(extra) instead of `below + extra` (three places), and guard_level() never passes a level equal to the HAKIOS_GUARD_SILENT sentinel; speaker.c hakios_speaker_volume() clamps `below` to VOLUME_LOWEST before `volume_at + below`, so the fade loop's target can no longer wrap under volume_at and the loop always ends. guard.c block(): `2 * attenuation` no longer wraps in 32 bits (the blind-guard range from item 5). Not done: an iteration limit on the fade loop (not needed once the target is in range) and a guard_level() clamp beyond the sentinel one.
+- S-02 FIXED with S-01 (clamp of `extra` in audio.c, saturating sum in sound.c).
+- S-03 FIXED. speaker.c acf_monitor(): both table-end checks are done in uint64; the `less` addition for the battery rows now saturates at 0xffff instead of wrapping.
+- S-04 FIXED (partly). speaker.c hakios_speaker_stop(): every failed step now goes through stop_failed(), which calls power_down_now() (both amplifiers, unless already broken), so a failed read in sysctrl() no longer leaves the amplifiers up. NOT done: take_down() in sound.c still ignores the result of the stop (it is a void function; changing it is a design change), but it now finds the amplifiers powered down or retained as "started" for the quiesce.
+- S-05 FIXED (partly). speaker.c power_down_now(): `started` is cleared only when the power-down write and read-back were acknowledged, so hakios_speaker_quiesce() still tries again. SKIPPED: the bus recovery (clocking out SCL pulses) in bus_take(); it needs knowledge of the I2C/amplifier hardware.
+- S-06 FIXED. mic.c: listen() now returns bool (false when the RUN is refused, a read cannot be sent, or no read comes back in 1.5 s); for_ios() counts `!path_up() || !listen()` as a failure, so the existing three-failure limit applies. Not done: counting "listen produced no samples" beyond those cases.
+- S-07 FIXED. sound.c space_on(): the three page-table pages are allocated once and re-zeroed on reuse, instead of a new kmem_alloc at every call.
+- S-08 SKIPPED. The fix is a change of the node mode (0666), which is policy and not to be changed here; the refcount of opens and the rate limit of the ioctl log are a design change.
+- S-09 SKIPPED. Changing the SoundWire read id range (and re-testing the FIFO) depends on how the hardware treats id 0 and an empty FIFO (NEEDS-HARDWARE).
+- S-10 SKIPPED. NEEDS-HARDWARE: what to do when the command FIFO stays full, and every caller would have to propagate a failure.
+- S-11 SKIPPED. NEEDS-HARDWARE: cache maintenance for the DSP's buffers depends on whether the stream is I/O-coherent.
+- S-12 FIXED. virtio_sound.c sound_pump(): a barrier after the idx load, and a used-ring id that is not one of the TX_BUFFERS buffers (or more entries than buffers) is dropped instead of used as an index.
+- S-13 SKIPPED. In hakios.adsp.c, which is not in this task's file list (someone else's).
+- S-14 SKIPPED. In userland/src/audio_plugin.c, outside the allowed files. Its fix (isnan) is still needed; the kernel clamp does not cover it.
+- S-15 SKIPPED. A pending-period retry mask in the feeder and mic loop is a design change.
+- S-16 FIXED. mic.c listen(): `stopping` now ends the loop for mic=1..3 too, so hakios_mic_dsp_down() is not held for mic_secs.

@@ -632,7 +632,15 @@ space_on(void)
 	uint64_t *root, *second, *third, table_root;
 	uint32_t smr = SMMU_SMR(space.match), s2cr = SMMU_S2CR(space.match), sees = 1u << 31 | AUDIO_STREAM;
 
-	if (kmem_alloc(kernel_map, &space.tables, 3 * 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	/*
+	 * (the page tables are allocated once and reused: this runs at every first user of the DSP's buffers, and nothing frees
+	 * the tables, so a new allocation each time would lose 12 KB of wired memory per recording or run)
+	 */
+	if (space.tables != 0) {
+		bzero((void *)space.tables, 3 * 4096);
+	} else if (kmem_alloc(kernel_map, &space.tables, 3 * 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+	    KERN_SUCCESS) {
+		space.tables = 0;
 		return false;
 	}
 	root = (uint64_t *)space.tables;
@@ -1213,7 +1221,22 @@ feeder_thread(__unused void *parameter, __unused wait_result_t result)
 static void
 guard_level(uint32_t level_below)
 {
-	hakios_guard_attenuation(level_below < guard_as ? level_below : guard_as);
+	uint32_t as = level_below < guard_as ? level_below : guard_as;
+
+	/* (HAKIOS_GUARD_SILENT means "the amplifiers are off": a level must never be taken for it, it would turn the power limits off) */
+	hakios_guard_attenuation(as >= HAKIOS_GUARD_SILENT ? HAKIOS_GUARD_SILENT - 1 : as);
+}
+
+/*
+ * sound_below and the volume iOS has set (`extra', eighths of a dB under it), added up: saturating, so that a
+ * huge sound_below or `extra' cannot wrap the sum round to a small number, that is to a loud level.
+ */
+static uint32_t
+below_with(uint32_t extra)
+{
+	uint64_t total = (uint64_t)below + extra;
+
+	return total > HAKIOS_GUARD_SILENT - 1 ? HAKIOS_GUARD_SILENT - 1 : (uint32_t)total;
 }
 
 /*
@@ -1264,19 +1287,19 @@ watch(void)
 					hakios_speaker_stop();
 					on = false;
 				}
-			} else if (on && !hakios_speaker_volume(below + extra, 1)) {
+			} else if (on && !hakios_speaker_volume(below_with(extra), 1)) {
 				guard_off(true);
 				on = false;
 				given_up = true;
 			} else if (!given_up) {
-				guard_level(below + extra);
+				guard_level(below_with(extra));
 			}
 		}
 		if (!on && !given_up && !muted && sounded != 0 && now - sounded < 100000) {
 			say_when("iOS plays: the amplifiers are started");
 			starts++;
 			ios_peak = 0;
-			if (!hakios_speaker_start() || !hakios_speaker_volume(below + extra, 1)) {
+			if (!hakios_speaker_start() || !hakios_speaker_volume(below_with(extra), 1)) {
 				say("sound: THE AMPLIFIERS DID NOT START; iOS's sound goes on to the DSP, unheard\n");
 				guard_off(true);
 				given_up = true;

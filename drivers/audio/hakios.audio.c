@@ -253,6 +253,7 @@ audio_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 }
 
 /* the speakers' volume, as iOS sets it (sys/hakios.audio.h): kept for the sink's driver to look at */
+#define HAKIOS_AUDIO_BELOW_MAX  (90 * 8)        /* eighths of a dB: the amplifiers' own lowest volume (speaker.c VOLUME_LOWEST) */
 static uint32_t volume_below, volume_generation;
 static bool volume_muted;
 
@@ -260,17 +261,24 @@ static int
 audio_ioctl(__unused dev_t dev, u_long command, caddr_t data, __unused int flags, __unused struct proc *p)
 {
 	const struct hakios_audio_volume *volume = (const struct hakios_audio_volume *)data;
+	uint32_t below;
 
 	if (command != HAKIOS_AUDIO_SET_VOLUME) {
 		return ENOTTY;
 	}
+	/*
+	 * The amplifiers go no lower than -90 dB (hakios.speaker.c's VOLUME_LOWEST, the "mute volume"): a larger `below'
+	 * means nothing there, and from user space (the node is open to all) it would make the sums made with it
+	 * (sound_below + below) wrap round to a level far louder than the one asked for.
+	 */
+	below = volume->below > HAKIOS_AUDIO_BELOW_MAX ? HAKIOS_AUDIO_BELOW_MAX : volume->below;
 	lck_mtx_lock(&audio_lock);
-	volume_below = volume->below;
+	volume_below = below;
 	volume_muted = volume->muted != 0;
 	volume_generation++;
 	lck_mtx_unlock(&audio_lock);
-	printf("hakios-audio: the volume: %s%u.%03u dB under the loudest\n", volume->muted ? "muted; " : "", volume->below / 8,
-	    volume->below % 8 * 125);
+	printf("hakios-audio: the volume: %s%u.%03u dB under the loudest\n", volume->muted ? "muted; " : "", below / 8,
+	    below % 8 * 125);
 	return 0;
 }
 

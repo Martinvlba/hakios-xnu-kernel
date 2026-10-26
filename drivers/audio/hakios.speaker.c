@@ -475,8 +475,11 @@ acf_monitor(uint16_t device, const uint8_t *block, uint32_t length)
 	vbat_count = le32(block + 0x3c);
 	vbat_size = le32(block + 0x40);
 	vbat_at = le32(block + 0x44);
+	/* (the end of each table is worked out in 64 bits: in 32 a crafted size or offset wraps and the check passes, and the
+	   rows read below would then lie gigabytes outside the file's buffer) */
 	if (sum != le32(block) || temp_size < 12 || vbat_size < 12 || temp_count > MONITOR_ROWS || vbat_count > MONITOR_ROWS ||
-	    temp_at + temp_count * temp_size > length || vbat_at + vbat_count * vbat_size > length) {
+	    (uint64_t)temp_at + (uint64_t)temp_count * temp_size > length ||
+	    (uint64_t)vbat_at + (uint64_t)vbat_count * vbat_size > length) {
 		say("speaker: device %u's monitor table is not of the shape known: not used\n", device);
 		return;
 	}
@@ -499,7 +502,10 @@ acf_monitor(uint16_t device, const uint8_t *block, uint32_t length)
 		a->vbat_rows[i].max = (int16_t)(row[2] | row[3] << 8);
 		a->vbat_rows[i].less = (uint16_t)(row[6] | row[7] << 8);
 		if (vmax < 0 && per_eighth > 0) {
-			a->vbat_rows[i].less += (uint16_t)((-(int64_t)vmax + per_eighth / 2) / per_eighth);
+			/* (saturating: a huge vmax in the file must not wrap the 16-bit reduction round to a small one) */
+			int64_t more = (-(int64_t)vmax + per_eighth / 2) / per_eighth;
+
+			a->vbat_rows[i].less = (uint16_t)(more > 0xffff - a->vbat_rows[i].less ? 0xffff : a->vbat_rows[i].less + more);
 		}
 	}
 	a->temp_count = temp_count;
@@ -638,9 +644,11 @@ power_down_now(const char *why)
 		value |= SYSCTRL_PWDN | SYSCTRL_AMPPD | SYSCTRL_HMUTE;
 		if (!register_write(a->address, AW_SYSCTRL, value) || !register_read(a->address, AW_SYSCTRL, &after)) {
 			say("speaker: the amplifier %s: 0x04 <- %#06x NOT ACKNOWLEDGED\n", a->where, value);
-		} else {
-			say("speaker: the amplifier %s: 0x04 <- %#06x, reads %#06x\n", a->where, value, after);
+			/* (`started' stays set: the amplifier may still be up, and hakios_speaker_quiesce() tries again only for an
+			   amplifier that is not known to be off) */
+			continue;
 		}
+		say("speaker: the amplifier %s: 0x04 <- %#06x, reads %#06x\n", a->where, value, after);
 		a->started = false;
 	}
 }
@@ -892,6 +900,12 @@ hakios_speaker_volume(uint32_t below, uint32_t step_ms)
 {
 	uint16_t status;
 
+	/* Nothing is quieter than the driver's mute volume. Without this a huge `below' wraps volume_at + below to a level
+	   under volume_at, which the fade loop below can never reach (set_volume() never goes louder than Android), so it
+	   would spin forever with the amplifiers at their loudest. */
+	if (below > VOLUME_LOWEST) {
+		below = VOLUME_LOWEST;
+	}
 	for (unsigned i = 0; i < 2; i++) {
 		struct amplifier *a = &amplifiers[i];
 		uint32_t target = a->volume_at + below;
@@ -1029,6 +1043,19 @@ hakios_speaker_monitor(bool tell)
 	return wanted;
 }
 
+/*
+ * A step of the stop sequence failed. A failed write has already powered both down (put()), but a failed read in
+ * sysctrl() has not: without this the stop gave up half way, with this amplifier (and the other, not yet reached)
+ * still up and the caller about to stop the clock they run on. Both powered down at once, as for any fault.
+ */
+static void
+stop_failed(void)
+{
+	if (!broken) {
+		power_down_now("a step of the stop failed");
+	}
+}
+
 void
 hakios_speaker_stop(void)
 {
@@ -1043,20 +1070,24 @@ hakios_speaker_stop(void)
 		}
 		say("speaker: the amplifier %s is stopped as Android's driver stops it\n", a->where);
 		if (!sysctrl(a, SYSCTRL_ULS_HMUTE, true)) {
+			stop_failed();
 			return;
 		}
 		while (a->volume < VOLUME_LOWEST) {
 			if (!set_volume(a, (uint16_t)(a->volume + VOLUME_STEP > VOLUME_LOWEST ? VOLUME_LOWEST : a->volume +
 			    VOLUME_STEP))) {
+				stop_failed();
 				return;
 			}
 			wait_ms(1);
 		}
 		if (!sysctrl(a, SYSCTRL_HMUTE, true) || !put(a, AW_I2SCTRL3, (uint16_t)(a->i2sctrl3 & ~I2SCTRL3_TXEN))) {
+			stop_failed();
 			return;
 		}
 		wait_ms(1);
 		if (!sysctrl(a, SYSCTRL_AMPPD, true) || !sysctrl(a, SYSCTRL_PWDN, true)) {
+			stop_failed();
 			return;
 		}
 		a->started = false;
