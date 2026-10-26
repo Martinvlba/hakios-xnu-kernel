@@ -210,3 +210,21 @@ In `glink_pump()` lines 2600-2616, a complete DATA message is copied into a `kal
 - Whether TrustZone expects `PAS_SHUTDOWN` after a failed start (W9) and whether the DSP's SMP2P "restart" handshake in `dsp_listen()` matches Linux in every case.
 - Modem code (out of scope) and the audio loader beyond the shared-lock declarations.
 - No build, run, or runtime test was done.
+
+## Fix status
+
+All edits are in `drivers/wifi/hakios.wifi.c`; nothing was compiled or run. Line numbers are from the file after the edits.
+
+- W1 FIXED: `glink_pump()` (about 2505-2535) sums the message length in a `uint64_t` (`wide`), so OPEN, INTENT and DATA lengths can no longer wrap to 0; the existing `> theirs_size - 8` check now rejects them (queue marked broken), and `length` is narrowed only after that check. This also bounds the INTENT loop. Not done: a per-call iteration cap in the pump (design change).
+- W2 FIXED: `smem_items()` ends the walk for an entry with `padding_data > size` or one that reaches past `free_uncached` (bottom), or `padding_data > size` (top); `glink_find()` requires the descriptor and both queues to lie inside the 2 MB mapping; `smem_poke()` and `smem_word()` ignore/return 0 for an offset outside the mapping or while it is not mapped.
+- W3 FIXED: the mailbox check is now `box > aoss.size || size > aoss.size - box` in both `step_mailbox()` and `step_mailbox_open_locked()`.
+- W4 FIXED: `qrtr_input()` checks `header.size > length || at > length - header.size` instead of the wrapping sum.
+- W5 SKIPPED: the fix is a new "dead" state that stops the driver and changes what `glink_send()` and `hakios_wifi_dsp_is_up()` return; it is a design change, and what the radio does after err-fatal needs hardware.
+- W6 PARTLY FIXED: `link_thread_is` is cleared when the link thread ends. SKIPPED: the shared `static found[256]` in `smem_item()` (a mutex cannot be used, because the panic path calls it with no lock taken; a 3 KB stack array needs a decision on stack use), and the `dsp_words()` static `at` (idempotent).
+- W7 FIXED: step 16 requires `size <= 4 * RADIO_WINDOW` (2 MB) and `address + size <= 4 GB`, and returns false if the map result is 0.
+- W8 PARTLY FIXED: `step_image()` unmaps the 25 MB window on the misaligned-segment return and returns false if the map is 0; `glink_offer()` frees a kept intent buffer of another size before replacing it; `smem_peek()` and `step_registers()` check the map result. SKIPPED: the page of `step_header()` that is "never freed" on purpose (TrustZone may still use it; whether it can be freed needs hardware knowledge), and `need()` (it returns void and its callers cannot handle a failure; whether `ml_io_map` can return 0 is not known).
+- W9 SKIPPED: needs knowledge of what TrustZone expects after a failed start, and a new "starting" state (design change).
+- W10 SKIPPED: waiting without a bound or a "stop wanted" flag changes the shutdown flow (design change).
+- W11 SKIPPED: capping the list and delaying DONE_REUSE changes the protocol flow (design change); a plain cap would drop packets.
+- W12 SKIPPED: whether the WCOMB mapping reorders the loads is hardware behaviour, and a barrier there is a memory-ordering decision.
+- W13 SKIPPED: reading the MAC from somewhere other than a boot-arg is a new feature, and the logged lengths of the name and passphrase are deliberate and documented in the comments (they help to diagnose a bad `fw/network`); no secret reaches the log.
