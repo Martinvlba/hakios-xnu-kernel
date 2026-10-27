@@ -57,21 +57,28 @@ make kernel              # the kernel with the drivers that configuration builds
 make phone SECS=600      # a 10-minute session on the phone, in RAM
 ```
 
-## Repositories: common, SoC, device
+## Repositories: common, SoC, device, UEFI
 
-| Where | What |
+| Repository | What |
 |---|---|
-| this repository | **common**: the kernel port (`xnu/`), every common driver (`drivers/`), the loader (`xnuloader/`), user space (`userland/`), the tools, the documentation |
-| `socs/sc7280/` | the Qualcomm SC7280 family (Snapdragon 778G): its fragment, its drivers' choice |
-| `devices/redwood/` | POCO X5 Pro 5G: its defconfig, status, UEFI port, firmware script |
-| `devices/qemu/` | QEMU's `virt` machine, as a device: none of a phone's drivers built in |
-| `devices/manifest.conf` | every SoC and device repository, in this tree or a repository of its own at a revision |
+| [hakios](https://github.com/shimoku74/hakios) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
+| [hakios-sc7280-common](https://github.com/shimoku74/hakios-sc7280-common) | the Qualcomm SC7280 family (Snapdragon 778G): its configuration fragment and the drivers it builds |
+| [hakios-redwood](https://github.com/shimoku74/hakios-redwood) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script |
+| [hakios-uefi](https://github.com/shimoku74/hakios-uefi) | HakiOS's UEFI: Mu-Silicium with HakiOS's boot path, banner and name |
+| [hakios-web](https://github.com/shimoku74/hakios-web) | the website, with this documentation and the FAQ |
 
-A device is a repository of its own over the common one: `tools/hakios-device.py new` makes it from the phone's own device tree,
-with every phone driver left out until it is ported; `split` makes it a git repository; `sync` fetches the ones that live
-elsewhere. Each driver is an option of the kernel's own configuration (`CONFIG_HAKIOS_*`, XNU's `options` and `conf/files`), so a
-device's defconfig builds exactly the drivers it has. [How the repositories fit](docs/porting/repositories.md),
-[Drivers in the configuration](docs/drivers-config.md).
+`devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
+into `socs/`, `devices/` and `uefi/`. [How the repositories fit](docs/porting/repositories.md).
+
+```sh
+git clone https://github.com/shimoku74/hakios.git && cd hakios
+tools/hakios-device.py sync      # the SoC, device and UEFI repositories, at the revisions the manifest names
+```
+
+A device of your own is a repository over the common one: `tools/hakios-device.py new` makes it from the phone's own device tree,
+with every phone driver left out until it is ported. Each driver is an option of the kernel's own configuration (`CONFIG_HAKIOS_*`,
+XNU's `options` and `conf/files`), so a device's defconfig builds exactly the drivers it has.
+[Port a device](docs/porting/index.md), [Drivers in the configuration](docs/drivers-config.md).
 
 ## What is in the repository, and what never is
 

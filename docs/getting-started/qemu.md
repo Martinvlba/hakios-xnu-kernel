@@ -7,6 +7,7 @@ The kernel, a placeholder loader and a tiny raw-syscall user space: **nothing of
 ```sh
 git clone https://github.com/shimoku74/hakios.git hakios
 cd hakios
+tools/hakios-device.py sync    # the SoC, device and UEFI repositories (the open kernel needs none of them; the rest does)
 make doctor          # what this machine lacks, and what to do
 make qemu-open       # builds what is missing, then boots
 ```

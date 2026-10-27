@@ -10,8 +10,9 @@ hakios/              common: the kernel port, every common driver, the loader, u
 └── devices/manifest.conf        every SoC and device repository: kept in this tree, or a repository of its own at a revision
 ```
 
-A SoC or device directory is the same whether it is kept in this tree or is a git repository of its own cloned into place: the
-tools look for `socs/*/soc.conf` and `devices/*/device.conf`, whatever put them there.
+A SoC or device directory is the same whether it is kept in the common tree (`devices/qemu` is) or is a git repository of its own
+that `tools/hakios-device.py sync` cloned into place (the others are): the tools look for `socs/*/soc.conf` and
+`devices/*/device.conf`, whatever put them there. The common repository ignores what `sync` clones.
 
 ## A device repository
 
@@ -73,7 +74,11 @@ its own.
 
 ```
 soc sc7280
-	path        socs/sc7280                        kept in this tree
+	repository  https://github.com/shimoku74/hakios-sc7280-common.git
+	revision    977fc7181fc1eb984c4ebd4bb64c65a4d65f549a
+
+device qemu
+	path        devices/qemu                       kept in the common tree
 
 device sheng
 	repository  https://github.com/<you>/hakios-device-sheng.git

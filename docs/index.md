@@ -44,10 +44,11 @@ Android. What is and is not written to a phone: [Architecture](concepts/architec
 
 | Repository | What |
 |---|---|
-| [hakios](https://github.com/shimoku74/hakios) | **common**: the kernel port, the drivers, the loader, user space, the tools, this documentation |
-| `socs/sc7280` | the Qualcomm SC7280 family (Snapdragon 778G): its configuration fragment and drivers |
-| `devices/redwood` | POCO X5 Pro 5G: its defconfig, UEFI port, firmware script, status |
-| `devices/qemu` | QEMU's `virt` machine, as a device |
+| [hakios](https://github.com/shimoku74/hakios) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
+| [hakios-sc7280-common](https://github.com/shimoku74/hakios-sc7280-common) | the Qualcomm SC7280 family (Snapdragon 778G): its configuration fragment and the drivers it builds |
+| [hakios-redwood](https://github.com/shimoku74/hakios-redwood) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script |
+| [hakios-uefi](https://github.com/shimoku74/hakios-uefi) | HakiOS's UEFI: Mu-Silicium with HakiOS's boot path, banner and name |
+| [hakios-web](https://github.com/shimoku74/hakios-web) | the website, with this documentation and the FAQ |
 
-SoC and device repositories are kept in the common tree until they are split into their own; `devices/manifest.conf` lists them
-all, and `tools/hakios-device.py sync` fetches the ones that live elsewhere. [How the repositories fit](porting/repositories.md).
+`devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
+into `socs/`, `devices/` and `uefi/`. [How the repositories fit](porting/repositories.md).
