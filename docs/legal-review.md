@@ -95,6 +95,15 @@ the storefront `143469-2,8`, and notes that it fetched Apple's bag from `bag.itu
 `init.itunes.apple.com` "by hand". `inject_fairplay.c` studies Apple's **FairPlay** daemon. iOS itself,
 believing it is an iPhone X, also contacts Apple's servers on its own.
 
+**Status (27 October 2026).** The App Store and FairPlay experiments were removed from the tree earlier. The Apple data in the
+distributed loader is now gone too: `prebuilt/loader.efi` is built with the placeholder identity (`xnuloader/mkidentity.sh
+--placeholder`, no Apple device-tree data in it; checked by searching the binary for the iPhone model and board names), and
+`tools/update-prebuilt.sh` builds it that way in a temporary copy so that it cannot come back. The loader that starts iOS is built
+by the user (`make loader`), on their own machine, with the identity taken from **their** copy of the IPSW. **Still open:** the
+loader's own source writes two fixed device-tree values (`serial-number` "RDW00POCOX5P", `model-number` "MQAC2", in
+`xnuloader/loader.c`; the second is an Apple model code), and older commits of `prebuilt/loader.efi` in the git history still
+contain the earlier identity data (a history rewrite would be needed to remove them).
+
 Whether any of that is unlawful depends on law I have not verified (terms of service, computer-misuse
 statutes, DRM rules), but it plainly contradicts the stated promise, and touching FairPlay and the
 store is what draws attention. **Fix:** keep these experiments out of the public repository (a private

@@ -55,7 +55,10 @@ cd "$(dirname "$(readlink -f "$0")")" || exit 1
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 [ -f $K ] || K=prebuilt/mach.development.bcm2837
 L=xnuloader/loader.efi
-[ -f $L ] || L=prebuilt/loader.efi
+if [ ! -f $L ]; then
+	L=prebuilt/loader.efi
+	echo "xl: no xnuloader/loader.efi: using prebuilt/loader.efi, which has no iPhone identity in it (iOS will not start; make loader builds one from your own IPSW)" >&2
+fi
 mkdir -p logs
 # There is one phone, whichever working copy (tools/new-workspace.sh) talks to it: the locks are
 # outside all of them.

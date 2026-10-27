@@ -38,7 +38,7 @@ Only my code and my data:
   files (`xnu/files/`, `drivers/`), laid over a fresh clone by `xnu/apply.sh`;
 - the boot loader (`xnuloader/`), my programs and libraries (`userland/src/`), tools (`tools/`),
   build and run scripts;
-- `prebuilt/`: the kernel, loader and libraries built from this repository;
+- `prebuilt/`: the kernel, loader and libraries built from this repository (the loader is built **without** any Apple data: `make loader` makes the one that starts iOS, on your machine, from your own IPSW);
 - `devices/redwood/`: what one phone needs (its UEFI port, device tree, firmware script).
 
 Not in the repository, never:
@@ -79,6 +79,7 @@ cd hakios
 make doctor                   # what this machine lacks (QEMU's display device, UEFI firmware, memory), and what to do
 sysimage/fetch.sh             # the iOS 16.5 IPSW from Apple's servers, the needed parts unpacked (7.4 GB)
 REST=1 userland/build.sh      # the APFS images: userland/root.apfs and userland/system.apfs
+make loader                   # the boot loader, with the iPhone's identity taken from YOUR copy of the IPSW (needs clang and lld)
 mkdir -p logs
 qemu/run-ios.sh 1200 -display gtk > logs/qemu.log     # a 20-minute session
 ```
@@ -89,6 +90,8 @@ the machine. The mouse with the button held is a finger; `H` is Home, `L` is the
 
 **If it stays black** (check these in order):
 
+0. Did you run `make loader`? `prebuilt/loader.efi` has no Apple data in it on purpose (it boots the open kernel only), and with it
+   iOS does not start: `qemu/run-ios.sh` now refuses to run without your own `xnuloader/loader.efi` and says so.
 1. `tail -f logs/qemu.log` in another terminal. It should print `== XNULOADER v3 ==` within seconds and kernel and launchd
    lines after that. If it prints nothing, QEMU did not start the loader: run `make doctor`.
 2. `qemu/screendump.sh` saves what the guest's screen shows (`logs/qemu-screen.png`), whatever your window does.
@@ -106,6 +109,7 @@ A phone with a port (`devices/redwood/`, POCO X5 Pro 5G), its boot loader unlock
 
 ```sh
 devices/redwood/pull-firmware.sh    # GPU, Wi-Fi, audio/battery, haptics, modem, cameras -> fw-*/
+make loader                         # (once, the quick start's step) the loader with the identity from your own IPSW
 ./xl enter                          # Android -> fastboot -> our loader in RAM
 ./xl ramdisk userland/system.apfs   # the system image into the phone's RAM (~80 s), once per loader session
 XL_SB_DELAY=8 XL_SECS=600 \

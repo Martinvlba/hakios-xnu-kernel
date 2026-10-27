@@ -48,7 +48,7 @@ fi
 
 if have cc || have clang; then ok "C compiler ($(have cc && echo cc || echo clang)): builds unzbm for sysimage/fetch.sh"; else need "no C compiler" "install clang or gcc"; fi
 have git && ok "git" || bad "git not found" "install git"
-if have lld-link; then ok "lld-link: the boot loader can be built (xnuloader/build.sh)"; else warn "lld-link not found" "needed only to build the loader (apt: lld; brew: lld); prebuilt/loader.efi works without"; fi
+if have lld-link; then ok "lld-link: the boot loader can be built (xnuloader/build.sh)"; else warn "lld-link not found" "needed to build the boot loader with the iPhone identity from your own IPSW (make loader), which the iOS run needs (apt: lld; brew: lld); the open kernel (make qemu-open) runs with prebuilt/loader.efi, which has no Apple data"; fi
 have lz4 && ok "lz4" || warn "lz4 not found" "needed by some image steps (apt: lz4)"
 
 if have flock; then
