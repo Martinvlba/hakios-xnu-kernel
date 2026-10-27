@@ -6,7 +6,7 @@
 # xnu/export.sh copies them back, tools/drivers-check.py (and CI) checks that this list and the directories agree.
 # A new hakios.* file in bsd/dev/ or iokit/Kernel/ has to be listed here: export.sh refuses to guess.
 #
-# Subsystems: input storage gpu camera haptic audio power wifi modem net core
+# Subsystems: input storage gpu camera haptic audio power wifi bluetooth modem net core
 
 input    bsd/dev/hakios.goodix.c
 input    bsd/dev/hakios.focaltech_fw.h
@@ -63,3 +63,4 @@ core    bsd/dev/hakios.socinfo.c
 power   bsd/dev/hakios.thermal.c
 power   bsd/dev/hakios.pmic.c
 power   bsd/dev/hakios.battguard.c
+bluetooth bsd/dev/hakios.bt.c

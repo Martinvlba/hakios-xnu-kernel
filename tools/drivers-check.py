@@ -13,7 +13,7 @@ usage: tools/drivers-check.py [--root DIR]      exit 0 if all is well, 1 and the
 import os
 import sys
 
-SUBSYSTEMS = {"input", "storage", "gpu", "camera", "haptic", "audio", "power", "wifi", "modem", "net", "core"}
+SUBSYSTEMS = {"input", "storage", "gpu", "camera", "haptic", "audio", "power", "wifi", "bluetooth", "modem", "net", "core"}
 TREE_DIRS = ("bsd/dev/", "iokit/Kernel/")
 
 

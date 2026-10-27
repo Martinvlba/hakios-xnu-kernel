@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 313 symbols in 17 groups; 9 are set.
+# 313 symbols in 17 groups; 2 are set.
 #
 
 #
@@ -16,14 +16,14 @@
 # CONFIG_SOC is not set
 
 # "device": options may use firmware pulled from your own phone (fw-*/); "none": the open configuration, nothing of ...
-CONFIG_FIRMWARE="device"
+CONFIG_FIRMWARE="none"
 
 #
 # CPU, memory and boot (21)
 #
 
 # CPU cores the kernel uses, 1 to 8; one if not set
-# CONFIG_CPUS is not set
+CONFIG_CPUS=1
 
 # the core the kernel runs on, 0 to 7; 7 is the biggest core (the loader keeps core 0)
 # CONFIG_BOOTCPU is not set
@@ -90,7 +90,7 @@ CONFIG_FIRMWARE="device"
 #
 
 # the phone's storage: 1 a survey, read only; 2 the loader's block service, through which the kernel reads it (the ...
-CONFIG_UFS=2
+# CONFIG_UFS is not set
 
 # let the kernel write, to the partition `darwin` and nowhere else (writes to the phone's storage: it is the one ... [requires CONFIG_UFS=2]
 # CONFIG_UFS_WRITE is not set
@@ -226,7 +226,7 @@ CONFIG_UFS=2
 #
 
 # the touch screen, and the power and volume buttons
-CONFIG_TOUCHSCREEN=y
+# CONFIG_TOUCHSCREEN is not set
 
 # read by hakios.buttons.c (kernel)
 # CONFIG_BUTTONS is not set
@@ -254,7 +254,7 @@ CONFIG_TOUCHSCREEN=y
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
-CONFIG_GPU=y
+# CONFIG_GPU is not set
 
 # read by hakios.adreno.c (kernel)
 # CONFIG_ADRENO is not set
@@ -459,10 +459,10 @@ CONFIG_GPU=y
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
-CONFIG_ADSP=y
+# CONFIG_ADSP is not set
 
 # the speakers (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
-CONFIG_SOUND=4
+# CONFIG_SOUND is not set
 
 # the microphone (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
 # CONFIG_MIC is not set
@@ -559,7 +559,7 @@ CONFIG_SOUND=4
 #
 
 # Wi-Fi: the radio, its driver, a connection (also fw-wifi/mac and fw-wifi/network) [needs fw-wifi/ from the phone]
-CONFIG_WIFI=y
+# CONFIG_WIFI is not set
 
 # start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, ...
 # CONFIG_WIFI_AGAIN is not set
@@ -656,10 +656,10 @@ CONFIG_WIFI=y
 #
 
 # the modem beside the system: its firmware, file systems, IPA, SIM, NAS [needs fw-modem/ from the phone] [requires CONFIG_UFS=2]
-CONFIG_MODEM=y
+# CONFIG_MODEM is not set
 
 # start the modem although a kernel before this one left it shut down [requires CONFIG_MODEM]
-CONFIG_MODEM_AGAIN=y
+# CONFIG_MODEM_AGAIN is not set
 
 # the modem's RMTFS buffer, an address below 4 GB (0xa8000000 on the reference phone) [requires CONFIG_MODEM]
 # CONFIG_MODEM_BUFFER is not set
