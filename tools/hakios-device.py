@@ -164,7 +164,10 @@ def cmd_list(_a):
                                             "NOT CHECKED OUT (tools/hakios-device.py sync %s)" % name, where))
             continue
         fields = describe(kind, name)
-        where = one(named.get((kind, name), {}), "repository") or one(named.get((kind, name), {}), "path") or "(not in the manifest)"
+        where = one(named.get((kind, name), {}), "repository") or one(named.get((kind, name), {}), "path")
+        if not where and kind == "soc" and os.path.basename(home(kind, name)) == "soc":
+            where = "carried by %s" % os.path.relpath(os.path.dirname(home(kind, name)), ROOT)
+        where = where or "(not in the manifest)"
         if fields is None:
             print("%-6s %-10s NOT CHECKED OUT (tools/hakios-device.py sync %s)  %s" % (kind, name, name, where))
             continue
