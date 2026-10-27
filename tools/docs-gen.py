@@ -15,7 +15,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-REPO = "https://github.com/shimoku74/hakios/blob/main/"
+REPO = "https://github.com/oosexgang/hakios/blob/main/"
 MARK = {"works": "works", "partial": "partly", "missing": "no"}
 HEADER = "<!-- Made by tools/docs-gen.py from %s. Do not edit: change that, then run tools/docs-gen.py. -->\n\n"
 

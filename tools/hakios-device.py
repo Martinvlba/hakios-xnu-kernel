@@ -237,7 +237,7 @@ NEW_README = """# {title} ({name})
 
 A HakiOS device repository: what is true of this device and of no other. The kernel, the loader, the drivers and the tools are
 the common repository's; the {soc} family's facts are `socs/{soc}/`'s. How the three are put together:
-[docs/porting/repositories.md](https://github.com/shimoku74/hakios/blob/main/docs/porting/repositories.md).
+[docs/porting/repositories.md](https://github.com/oosexgang/hakios/blob/main/docs/porting/repositories.md).
 
 | File | What |
 |---|---|

@@ -42,7 +42,7 @@ back to its own Android. The one thing written by default is the loader's own lo
 ## Quick start
 
 ```sh
-git clone https://github.com/shimoku74/hakios.git hakios
+git clone https://github.com/oosexgang/hakios.git hakios
 cd hakios
 make doctor           # what this machine lacks, and what to do
 make qemu-open        # the open kernel in QEMU: nothing of Apple's, nothing of a phone's
@@ -61,17 +61,17 @@ make phone SECS=600      # a 10-minute session on the phone, in RAM
 
 | Repository | What |
 |---|---|
-| [hakios](https://github.com/shimoku74/hakios) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
-| [hakios-sc7280-common](https://github.com/shimoku74/hakios-sc7280-common) | the Qualcomm SC7280 family (Snapdragon 778G): its configuration fragment and the drivers it builds |
-| [hakios-redwood](https://github.com/shimoku74/hakios-redwood) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script |
-| [hakios-uefi](https://github.com/shimoku74/hakios-uefi) | HakiOS's UEFI: Mu-Silicium with HakiOS's boot path, banner and name |
-| [hakios-web](https://github.com/shimoku74/hakios-web) | the website, with this documentation and the FAQ |
+| [hakios](https://github.com/oosexgang/hakios) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
+| [hakios-sc7280-common](https://github.com/oosexgang/hakios-sc7280-common) | the Qualcomm SC7280 family (Snapdragon 778G): its configuration fragment and the drivers it builds |
+| [hakios-redwood](https://github.com/oosexgang/hakios-redwood) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script |
+| [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | HakiOS's UEFI: Mu-Silicium with HakiOS's boot path, banner and name |
+| [hakios-web](https://github.com/oosexgang/hakios-web) | the website, with this documentation and the FAQ |
 
 `devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
 into `socs/`, `devices/` and `uefi/`. [How the repositories fit](docs/porting/repositories.md).
 
 ```sh
-git clone https://github.com/shimoku74/hakios.git && cd hakios
+git clone https://github.com/oosexgang/hakios.git && cd hakios
 tools/hakios-device.py sync      # the SoC, device and UEFI repositories, at the revisions the manifest names
 ```
 

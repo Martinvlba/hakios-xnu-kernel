@@ -3,7 +3,7 @@
 # the UEFI. Each one keeps the history of its own files (a clone with git filter-branch --subdirectory-filter: git subtree, as
 # Xcode ships it, dies on a history this long). This repository is not changed: the results are new clones in OUT, ready to push.
 #
-#   tools/split-repos.sh OUT [OWNER]        OWNER: where they will live on GitHub (default shimoku74)
+#   tools/split-repos.sh OUT [OWNER]        OWNER: where they will live on GitHub (default oosexgang, the organization)
 #
 #   OUT/hakios                  common: everything but the parts below; devices/manifest.conf names those by repository
 #   OUT/hakios-sc7280-common    socs/sc7280
@@ -15,7 +15,7 @@
 set -e
 SRC=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 OUT=${1:?usage: tools/split-repos.sh OUT [OWNER]}
-OWNER=${2:-shimoku74}
+OWNER=${2:-oosexgang}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 [ -z "$(git -C "$SRC" status --porcelain)" ] || { echo "split-repos: commit first: the parts are made from what is committed" >&2; exit 1; }
