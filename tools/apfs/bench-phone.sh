@@ -18,7 +18,7 @@ EXTRA=${2:-}
 CPUS=${BENCH_CPUS:-8}
 FREQ=${BENCH_FREQ:-1}
 cd "$ROOT" || exit 1
-K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+K=hakios-kernel
 [ -n "${BENCH_KERNEL:-}" ] && cp -p "$BENCH_KERNEL" "$K"
 
 printf "%-7s %9s %8s %12s %12s %10s %8s %4s %s\n" readers wall_ms MB/s lock_wait_ms lock_held_ms inflate_ms hash_ms bad sums

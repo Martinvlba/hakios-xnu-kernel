@@ -48,12 +48,15 @@ fi
 log=${KERNEL_LOG:-xnu-build.log}
 ./xnu-build.sh -k "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
+# The kernel's name is HakiOS's: XNU's build calls its output mach.<config>.<machine>, and the copy every tool takes
+# (xl, make phone, make qemu-open, tools/update-prebuilt.sh) is ./hakios-kernel
+named() { cp -p "$KERNEL" hakios-kernel && echo "make-kernel: built: hakios-kernel ($KERNEL)"; }
 if [ "$status" -eq 0 ]; then
-	echo "make-kernel: built: $KERNEL"
+	named
 	exit 0
 fi
 if judge "$log"; then
-	echo "make-kernel: built: $KERNEL"
+	named
 	echo "make-kernel: (exit status $status is the kext symbol-set checks failing, as they do on this configuration; see $0)"
 	exit 0
 fi

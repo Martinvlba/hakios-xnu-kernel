@@ -97,7 +97,7 @@ hello:
 qemu-open: kernel loader-open hello
 	mkdir -p logs
 	xnuloader/mkpayload.py -o qemu/payload.bin \
-		kernel=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837 \
+		kernel=hakios-kernel \
 		ramdisk=userland/hello --cmdline "$(ARGS_OPEN)"
 	qemu/run.sh $(SECS) | tee logs/qemu-open.log
 

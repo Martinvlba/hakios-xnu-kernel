@@ -52,8 +52,8 @@ cd "$(dirname "$(readlink -f "$0")")" || exit 1
 # On a Mac: flock, GNU timeout and stat, and Android's platform-tools, from tools/macos-bin (see its README)
 [ "$(uname)" = Darwin ] && PATH=$PWD/tools/macos-bin:$PWD/tools/macos-bin/platform-tools:$PATH
 # the kernel and the loader built here, or else the ones that come with the repository
-K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
-[ -f $K ] || K=prebuilt/mach.development.bcm2837
+K=hakios-kernel                 # make kernel makes it
+[ -f $K ] || K=prebuilt/hakios-kernel
 L=xnuloader/loader.efi
 if [ ! -f $L ]; then
 	L=prebuilt/loader.efi

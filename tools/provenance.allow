@@ -7,7 +7,7 @@
 # The first line that matches a path decides. A file that no line explains fails the check.
 
 # --- built from this repository -----------------------------------------------------------------------
-open     prebuilt/mach.development.bcm2837        the kernel, built from Apple's open xnu-8796.121.2 plus xnu/hakios.patch and xnu/files: APSL-2.0, corresponding source here and at Apple
+open     prebuilt/hakios-kernel                   the kernel, built from Apple's open xnu-8796.121.2 plus xnu/hakios.patch and xnu/files: APSL-2.0, corresponding source here and at Apple
 open     prebuilt/loader.efi                      the boot loader, built from xnuloader/loader.c: MIT
 open     prebuilt/userland/*                      our programs and libraries, built from userland/src: MIT
 open     devices/redwood/prebuilt/BootShim.bin   built from the shim of Mu-Silicium with our change (uefi/hakios.patch): BSD-2-Clause-Patent

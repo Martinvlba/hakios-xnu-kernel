@@ -34,8 +34,8 @@
 # file that holds the image at the right offset (reflinked, so it costs neither disk space nor
 # host RAM).
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
-K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
-[ -f $K ] || { K=prebuilt/mach.development.bcm2837; echo "run-ios.sh: no kernel built here, using $K" >&2; }
+K=hakios-kernel
+[ -f $K ] || { K=prebuilt/hakios-kernel; echo "run-ios.sh: no kernel built here, using $K" >&2; }
 # iOS has to be told which iPhone it runs on, and that comes from the user's own IPSW, into the loader at build time
 # (xnuloader/mkidentity.sh). The loader in prebuilt/ has no Apple data, so with it iOS does not start, and the window stays black.
 if [ ! -f xnuloader/loader.efi ] && [ -z "$QEMU_PREBUILT_LOADER" ]; then

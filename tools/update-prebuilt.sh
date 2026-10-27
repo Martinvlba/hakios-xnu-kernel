@@ -5,10 +5,10 @@
 set -e
 cd "$(dirname "$(readlink -f "$0")")/.."
 # KERNEL=... to take the kernel from a tree built elsewhere (xnu/apply.sh makes one anywhere)
-K=${KERNEL:-xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837}
+K=${KERNEL:-hakios-kernel}
 MU=Mu-Silicium
 mkdir -p prebuilt/userland devices/redwood/prebuilt
-cp $K prebuilt/mach.development.bcm2837
+cp $K prebuilt/hakios-kernel
 # The loader in prebuilt/ is built with the PLACEHOLDER identity (xnuloader/mkidentity.sh --placeholder: no Apple data), in a
 # temporary copy so that the real xnuloader/identity.h of this tree, made from your own IPSW, is left alone and never copied
 # here. It boots the open kernel (make qemu-open); to start iOS, build the loader yourself (make loader).
@@ -34,6 +34,6 @@ fi
 {
 	echo "Built $(date '+%Y-%m-%d %H:%M') from this tree."
 	echo
-	sha256sum prebuilt/mach.development.bcm2837 prebuilt/loader.efi prebuilt/userland/* devices/redwood/prebuilt/* 2>/dev/null
+	sha256sum prebuilt/hakios-kernel prebuilt/loader.efi prebuilt/userland/* devices/redwood/prebuilt/* 2>/dev/null
 } > prebuilt/SHA256SUMS
 ls -la prebuilt prebuilt/userland devices/redwood/prebuilt

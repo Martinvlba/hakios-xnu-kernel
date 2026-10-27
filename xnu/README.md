@@ -23,7 +23,7 @@ xnu-deps/setup.sh        # dependencies, mig/unifdef/tcsh, the SDK overlay, two 
 ./xnu-build.sh -j8 -k    # about a minute on 12 threads
 ```
 
-The kernel: `xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837`.
+The kernel: `hakios-kernel` at the top of the repository (`make kernel` copies it there from XNU's `xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837`).
 `./xl run` and `qemu/run-ios.sh` take it from there (`prebuilt/` only when it is missing).
 
 Things to know:
