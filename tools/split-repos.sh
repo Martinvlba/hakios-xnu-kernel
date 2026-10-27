@@ -10,7 +10,7 @@
 #   OUT/hakios-redwood          devices/redwood
 #   OUT/hakios-uefi             uefi
 #
-# Commit messages lose their "Co-Authored-By: Claude ..." lines (the project's contributors are its people); authors and dates
+# Commit messages lose their "Co-Authored-By: Claude ..." and "Claude-Session: ..." lines (the project's contributors are its people); authors and dates
 # are kept as they are. Pushing is tools/publish-repos.sh's, with your own GitHub login.
 set -e
 SRC=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
@@ -22,7 +22,7 @@ OUT=$(cd "$OUT" && pwd)
 
 PARTS="socs/sc7280:hakios-sc7280-common:soc:sc7280 devices/redwood:hakios-redwood:device:redwood uefi:hakios-uefi:uefi:hakios-uefi"
 
-MSG="sed -E '/^[Cc]o-[Aa]uthored-[Bb]y: Claude/d' | sed -e :a -e '/^\n*\$/{\$d;N;ba' -e '}'"
+MSG="sed -E '/^[Cc]o-[Aa]uthored-[Bb]y: Claude/d; /^Claude-Session: /d' | sed -e :a -e '/^\n*\$/{\$d;N;ba' -e '}'"
 
 # a clone of this repository's current branch as main, with nothing else in it
 fresh_clone() {
