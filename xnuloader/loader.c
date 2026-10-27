@@ -4040,7 +4040,13 @@ ramfb_phone_screen(void)
 		uint64_t addr;
 		uint32_t fourcc, flags, width, height, stride;
 	} __attribute__((packed)) cfg;
-	static struct {
+	/*
+	 * volatile: QEMU writes `control' back (to 0) when it has done the request, behind the compiler's back. Without the
+	 * qualifier a build is free to keep the value written a few lines below and never look again, and the loader then
+	 * says the request failed, leaves ramfb at the firmware's 800x600 and iOS draws its 1125x2436 into a corner: a black window
+	 * (it did, with a newer build of this very file; the older one happened to reload).
+	 */
+	static volatile struct {
 		uint32_t control, length;
 		uint64_t address;
 	} dma;
@@ -4074,7 +4080,12 @@ ramfb_phone_screen(void)
 	dma.control = be32(select << 16 | FW_CFG_DMA_SELECT | FW_CFG_DMA_WRITE);
 	dma.length = be32(sizeof(cfg));
 	dma.address = __builtin_bswap64((uint64_t)(uintptr_t)&cfg);
+	__asm__ volatile ("dsb sy" ::: "memory");       /* (cfg and dma are in memory before the device is told to read them) */
 	*(volatile uint64_t *)(FW_CFG_BASE + 16) = __builtin_bswap64((uint64_t)(uintptr_t)&dma);
+	/* the device does it at once; allow it some time all the same instead of reading once */
+	for (uint32_t spin = 0; dma.control != 0 && spin < 1000000; spin++) {
+		__asm__ volatile ("" ::: "memory");
+	}
 	if (dma.control != 0) {
 		print("ramfb: control %x after the request\n", (uint64_t)be32(dma.control));
 		return;

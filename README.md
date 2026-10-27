@@ -85,8 +85,8 @@ qemu/run-ios.sh 1200 -display gtk > logs/qemu.log     # a 20-minute session
 ```
 
 **What you will see.** The CPU is emulated, so it is slow, and the window is **black at first**: that is normal.
-Black for the first minute or two, then the Apple logo, then the lock screen after about 3 to 10 minutes, depending on
-the machine. The mouse with the button held is a finger; `H` is Home, `L` is the power button, `↑`/`↓` are volume.
+Black for the first minute, then the Apple logo, then the home screen after about 5 minutes on a fast desktop (measured on
+one: the logo at 1 minute, the home screen at 5), longer on a slower machine. The mouse with the button held is a finger; `H` is Home, `L` is the power button, `↑`/`↓` are volume.
 
 **If it stays black** (check these in order):
 
@@ -94,6 +94,9 @@ the machine. The mouse with the button held is a finger; `H` is Home, `L` is the
    iOS does not start: `qemu/run-ios.sh` now refuses to run without your own `xnuloader/loader.efi` and says so.
 1. `tail -f logs/qemu.log` in another terminal. It should print `== XNULOADER v3 ==` within seconds and kernel and launchd
    lines after that. If it prints nothing, QEMU did not start the loader: run `make doctor`.
+   A log that runs, with the line `ramfb: control ... after the request` near its top, is a loader built before 27 October 2026
+   (a compiler could skip the check of the display request): the window stays at 800x600 and iOS draws outside it. `make loader`
+   again.
 2. `qemu/screendump.sh` saves what the guest's screen shows (`logs/qemu-screen.png`), whatever your window does.
 3. No window or a black one although the log runs: your QEMU may have no GTK window (a headless package, WSL without WSLg).
    Use `qemu/run-ios.sh 1200 -display vnc=127.0.0.1:0 > logs/qemu.log` and connect a VNC viewer to `127.0.0.1:5900`.
