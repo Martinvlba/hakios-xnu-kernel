@@ -78,7 +78,26 @@ elif [ -d "$theos/sdks/iPhoneOS16.5.sdk" ]; then
 else
 	warn "no theos SDK ($theos/sdks/iPhoneOS16.5.sdk)" "optional, only to rebuild the kernel or userland (theos + xnu-deps/setup.sh); PREBUILT=1 and prebuilt/ work without"
 fi
-have qemu-system-aarch64 && ok "qemu-system-aarch64: make qemu-open works" || warn "no qemu-system-aarch64" "optional: only for the QEMU targets"
+if have qemu-system-aarch64; then
+	ok "qemu-system-aarch64: make qemu-open works"
+	# what the iOS run (qemu/run-ios.sh) needs on top: a display device, the UEFI firmware, memory. Without the display
+	# SpringBoard does not start, and the window stays black, which is what people reported first.
+	if qemu-system-aarch64 -device help 2>/dev/null | grep -q '"ramfb"'; then ok "qemu has the ramfb display device (the screen of qemu/run-ios.sh)"
+	else bad "this qemu-system-aarch64 has no ramfb display device" "the screen stays black without it: install a QEMU of 7.0 or newer (the full package, e.g. qemu-system-arm on Debian/Ubuntu)"; fi
+	fw=""; for f in "${QEMU_EFI:-}" /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd; do [ -n "$f" ] && [ -f "$f" ] && { fw=$f; break; }; done
+	if [ -n "$fw" ]; then ok "UEFI firmware for the guest: $fw"
+	else bad "no UEFI firmware for aarch64 guests" "install edk2-aarch64 (Arch) or qemu-efi-aarch64 (Debian/Ubuntu), or set QEMU_EFI and QEMU_VARS"; fi
+	# the guest has 7 GB of RAM by default (QEMU_RAM_GB, never below 6: the system image sits in it, 3 GB up)
+	mem_mb=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)
+	if [ -n "$mem_mb" ]; then
+		if [ "$mem_mb" -ge 7200 ]; then ok "memory: ${mem_mb} MB available (the iOS run wants about 7 GB)"
+		else warn "memory: only ${mem_mb} MB available; the iOS run asks QEMU for 7 GB" "close other programs, or on a small machine give WSL/the VM more memory; below that the host swaps and the window stays black for a long time"; fi
+	fi
+	note "this is an emulated CPU, so the run is slow: the window is black for the first minute or two, then the Apple logo,"
+	note "then the lock screen after about 3 to 10 minutes. 'tail -f logs/qemu.log' shows it is alive; qemu/screendump.sh saves the screen."
+else
+	warn "no qemu-system-aarch64" "optional: only for the QEMU targets"
+fi
 
 head1 "What is already built here"
 if [ -f fw-modem/modem.mdt ]; then ok "phone firmware pulled (fw-*/)"; else warn "no fw-modem/ yet" "with the phone on adb: devices/redwood/pull-firmware.sh, or pull-firmware-root.sh if that gets nothing"; fi

@@ -74,7 +74,7 @@ HakiOS — це адаптація ядра Darwin (відкритий XNU ві�
 Linux x86-64, близько 12 ГБ на диску, 7-Zip 23 або новіший, `lz4`, `qemu-system-aarch64`, `edk2-aarch64`.
 
 ```sh
-git clone https://github.com/oosexgang/hakios-os.git hakios
+git clone https://github.com/oosexgang/hackios-xnu-kernel.git hakios
 cd hakios
 make fetch        # IPSW iOS 16.5 із серверів Apple, потрібне розпаковується (7,4 ГБ)
 make images       # образи APFS: userland/root.apfs і userland/system.apfs
