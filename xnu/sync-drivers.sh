@@ -21,4 +21,17 @@ while read -r sub tree _; do
 		copied=$((copied + 1))
 	fi
 done < "$HERE/../drivers/map"
+# ... and the drivers of the SoC and device repositories checked out (socs/*/drivers/, devices/*/drivers/: docs/porting/repositories.md)
+while IFS="$(printf '\t')" read -r src tree; do
+	[ -n "$src" ] || continue
+	[ -f "$src" ] || { echo "sync-drivers: $src is named by its repository's conf but missing" >&2; exit 1; }
+	if [ ! -e "$TREE/$tree" ] || { [ "$src" -nt "$TREE/$tree" ] && ! cmp -s "$src" "$TREE/$tree"; }; then
+		mkdir -p "$(dirname "$TREE/$tree")"
+		cp -p "$src" "$TREE/$tree"
+		echo "sync-drivers: ${src#$HERE/../} -> $tree"
+		copied=$((copied + 1))
+	fi
+done <<EOF2
+$(python3 "$HERE/../tools/hakios-config.py" external-files)
+EOF2
 [ "$copied" -gt 0 ] || echo "sync-drivers: drivers in step with the kernel tree"

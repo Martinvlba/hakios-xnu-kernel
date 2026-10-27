@@ -1,0 +1,7 @@
+# drivers/bluetooth/conf: Bluetooth.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+driver BT
+	file    bsd/dev/hakios.bt.c
+	help    the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1)

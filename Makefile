@@ -18,8 +18,10 @@
 #                        to copy to a FAT32 volume (UEFI-native boot, no fastboot; docs/uefi-boot.md)
 #
 # Configuration, the way Linux's make does it (configs/, tools/hakios-config.py; docs/configs.md):
-#   make redwood_defconfig   .config from configs/defconfig + redwood_defconfig, which is common_defconfig + sc7280.config + redwood.config
+#   make redwood_defconfig   .config from configs/defconfig + redwood_defconfig (devices/redwood/configs/), which is
+#                            common_defconfig + sc7280.config (socs/sc7280/) + redwood.config
 #                            (any NAME_defconfig; make common_defconfig is the common kernel alone; docs/configs.md)
+#   make devices             the device and SoC repositories (tools/hakios-device.py list; docs/porting/repositories.md)
 #   make virt.config         lay a fragment (configs/virt.config) over the .config there is
 #   make config              show the .config: its symbols, the kernel's arguments, the firmware it wants
 #   make savedefconfig       the .config as a minimal defconfig
@@ -48,7 +50,7 @@ IMAGE_OPTS ?= REST=1
 ESP_DIR ?= build/esp
 PAYLOAD ?= qemu/payload.bin
 
-.PHONY: help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig esp
+.PHONY: devices help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig esp
 
 help:
 	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
@@ -112,6 +114,9 @@ esp:
 # ---- configuration (configs/, tools/hakios-config.py) ---------------------------------------------------------
 defconfig:
 	tools/hakios-config.py defconfig defconfig $(FRAGMENTS)
+
+devices:
+	@tools/hakios-device.py list
 
 %_defconfig:
 	tools/hakios-config.py defconfig $* $(FRAGMENTS)

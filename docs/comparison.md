@@ -34,7 +34,7 @@ These are things that exist in this repository and that a reader can check:
   "what exactly does this write to my phone?" is a file you can read ([legal-review.md](legal-review.md),
   [LEGAL.md](../LEGAL.md)).
 - **Its own loader, its own drivers**: GPU (Mesa over a Darwin driver), Wi-Fi, audio, haptics, cameras, touch, storage,
-  modem bring-up. [driver-review/](driver-review) says what each is, and what has and has not been verified.
+  modem bring-up. [driver-review/](driver-review/README.md) says what each is, and what has and has not been verified.
 
 ## What the others have that this one does not
 

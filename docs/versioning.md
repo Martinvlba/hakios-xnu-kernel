@@ -16,7 +16,7 @@ commit. This kernel says the same kind of thing about itself:
 
 ## Where it is shown
 
-1. **The loader's banner** (`xnuloader/`), under `HAKIOS`: `hello hackios-kernel!` and `kernel.ver=<the string>`.
+1. **The loader's banner** (`xnuloader/`), under `HAKIOS`: `hello hakios-kernel!` and `kernel.ver=<the string>`.
 2. **The kernel**: a line in the boot log, and `sysctl kern.hakios.version` (`userland/src/hello.c` prints it).
 3. **The payload**: `xnuloader/mkpayload.py` puts it in as the entry `kernel.ver`; the loader hands it to the kernel on
    its command line as `hakios_kver=`. A kernel started some other way (no loader) says `unknown`: it does not guess.

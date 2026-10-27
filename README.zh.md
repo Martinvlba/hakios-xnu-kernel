@@ -2,6 +2,8 @@
 
 [English](README.md) · 中文 · [Українська](README.uk.md)
 
+> **注意：** 本译文对应英文 README 的旧版本。最新内容见 [README.md](README.md) 和 [docs/](docs/index.md) 中的文档：设备仓库（`devices/<name>`、`socs/<soc>`）、配置中的驱动（`CONFIG_HAKIOS_*`）以及 Metal。
+
 HakiOS 是把 Darwin 内核（Apple 开源的 XNU，xnu-8796.121.2）适配到搭载高通 SoC 的 Android 手机上，就像 Android 是
 Linux 在手机上的适配：我自己的引导程序、驱动、配置系统（`configs/`）和独立的内核版本号（`VERSION`）。同样的东西也能在
 Linux 电脑上的 QEMU（`virt`，aarch64）里运行，不需要任何 Apple 的东西，也不需要任何手机的东西（`make qemu-open`）。
@@ -66,7 +68,7 @@ Linux 电脑上的 QEMU（`virt`，aarch64）里运行，不需要任何 Apple �
 Linux x86-64，约 12 GB 磁盘，7-Zip 23 或更新，`lz4`，`qemu-system-aarch64`，`edk2-aarch64`。
 
 ```sh
-git clone https://github.com/oosexgang/hackios-xnu-kernel.git hakios
+git clone https://github.com/shimoku74/hakios.git hakios
 cd hakios
 make doctor       # 检查本机缺什么（QEMU 显示设备、UEFI 固件、内存）以及怎么办
 make fetch        # 从 Apple 服务器取 iOS 16.5 IPSW，解包所需部分（7.4 GB）

@@ -4238,7 +4238,7 @@ print_banner(void)
 	print("   #   #  #   #  #  #     #    #   #      #\n");
 	print("   #   #  #   #  #   #  #####   ###   ####\n");
 	print("\n");
-	print("   hello hackios-kernel!\n");
+	print("   hello hakios-kernel!\n");
 	print("   kernel.ver=%s\n", version ? version : "unknown");
 	print("\n");
 }

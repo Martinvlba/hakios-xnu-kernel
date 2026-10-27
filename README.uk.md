@@ -2,6 +2,8 @@
 
 [English](README.md) · [中文](README.zh.md) · Українська
 
+> **Зверніть увагу:** цей переклад відповідає попередній версії англійського README. Актуальні: [README.md](README.md) і документація в [docs/](docs/index.md): репозиторії пристроїв (`devices/<name>`, `socs/<soc>`), драйвери в конфігурації (`CONFIG_HAKIOS_*`), Metal.
+
 HakiOS — це адаптація ядра Darwin (відкритий XNU від Apple, xnu-8796.121.2) до Android-телефонів із Qualcomm, так
 само як Android — адаптація Linux до телефонів: власний завантажувач, власні драйвери, система конфігурацій
 (`configs/`) і власна версія ядра (`VERSION`). Те саме працює в QEMU (`virt`, aarch64) на комп'ютері з Linux, без
@@ -74,7 +76,7 @@ HakiOS — це адаптація ядра Darwin (відкритий XNU ві�
 Linux x86-64, близько 12 ГБ на диску, 7-Zip 23 або новіший, `lz4`, `qemu-system-aarch64`, `edk2-aarch64`.
 
 ```sh
-git clone https://github.com/oosexgang/hackios-xnu-kernel.git hakios
+git clone https://github.com/shimoku74/hakios.git hakios
 cd hakios
 make doctor       # чого бракує цьому комп'ютеру (дисплей QEMU, UEFI, пам'ять) і що робити
 make fetch        # IPSW iOS 16.5 із серверів Apple, потрібне розпаковується (7,4 ГБ)

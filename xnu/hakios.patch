@@ -36,7 +36,7 @@ index e78d8476c346..03fc3ff646b8 100644
  
  TOP_TARGETS = \
 diff --git a/SETUP/config/doconf b/SETUP/config/doconf
-index 222158a93918..68bb0f3e56bf 100755
+index 222158a93918..030e55b82ac1 100755
 --- a/SETUP/config/doconf
 +++ b/SETUP/config/doconf
 @@ -1,4 +1,4 @@
@@ -45,6 +45,45 @@ index 222158a93918..68bb0f3e56bf 100755
  set path = ($path .)
  ######################################################################
  # HISTORY
+@@ -184,6 +184,13 @@ if ($?beverbose) then
+     echo MASTER_CPU=$MASTER_CPU
+ endif
+ 
++# HakiOS: the drivers a configuration builds (CONFIG_HAKIOS_*), as tools/hakios-config.py kernel writes them: a list
++# HAKIOS_DRIVERS of attributes, which the configurations of MASTER.arm64.bcm2837 include, and an `options` line for each
++set MASTER_HAKIOS = /dev/null
++if (-f ${MASTER_DIR}/MASTER.hakios) then
++    set MASTER_HAKIOS = ${MASTER_DIR}/MASTER.hakios
++endif
++
+ foreach SYS ($argv)
+     set SYSID=${SYS}_${ID}
+     set SYSCONF=$OBJDIR/config.$SYSID
+@@ -193,8 +200,8 @@ foreach SYS ($argv)
+     endif
+     echo +$SYS \
+     | \
+-    cat $MASTER $MASTER_CPU - \
+-        $MASTER $MASTER_CPU \
++    cat $MASTER $MASTER_CPU $MASTER_HAKIOS - \
++        $MASTER $MASTER_CPU $MASTER_HAKIOS \
+     | \
+     unifdef -t -DPLATFORM_${PLATFORM} -DCPU_$cpu -DSOC_CONFIG_${SOC_CONFIG} -DSYS_${SYS} $DEF_AVP $DEF_SEED - \
+     | \
+diff --git a/bsd/conf/Makefile b/bsd/conf/Makefile
+index 050f34a53c49..c58ff62cd419 100644
+--- a/bsd/conf/Makefile
++++ b/bsd/conf/Makefile
+@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
+ 
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
 diff --git a/bsd/conf/Makefile.arm64 b/bsd/conf/Makefile.arm64
 index a4d25040f38f..aad72993d139 100644
 --- a/bsd/conf/Makefile.arm64
@@ -62,58 +101,62 @@ index a4d25040f38f..aad72993d139 100644
  kern_debug.o_INCFLAGS += -I$(SRCROOT)/osfmk
  
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..5f815c4379c0 100644
+index 44274016a4cf..086752d95378 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,47 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,51 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
-+bsd/dev/hakios.input.c		standard
-+bsd/dev/hakios.virtio_input.c	standard
-+bsd/dev/hakios.goodix.c	standard
-+bsd/dev/hakios.buttons.c	standard
-+bsd/dev/hakios.battery.c	standard
-+bsd/dev/hakios.ufs.c	standard
-+bsd/dev/hakios.ufshc.c	standard
-+bsd/dev/hakios.net.c		standard
-+bsd/dev/hakios.ipa.c		standard
-+bsd/dev/hakios.cell.c		standard
-+bsd/dev/hakios.virtio_net.c	standard
-+bsd/dev/hakios.apple80211.c	standard
-+bsd/dev/hakios.cpufreq.c	standard
-+bsd/dev/hakios.adreno.c	standard
-+bsd/dev/hakios.audio.c		standard
-+bsd/dev/hakios.virtio_sound.c	standard
-+bsd/dev/hakios.speaker.c	standard
-+bsd/dev/hakios.guard.c		standard
-+bsd/dev/hakios.version.c	standard
-+bsd/dev/hakios.haptic.c		standard
-+bsd/dev/hakios.torch.c		standard
-+bsd/dev/hakios.camera.c	standard
-+bsd/dev/hakios.mic.c		standard
-+bsd/dev/hakios.wifi.c		standard
-+bsd/dev/hakios.adsp.c		standard
-+bsd/dev/hakios.mpss.c		standard
-+bsd/dev/hakios.image.c		standard
-+bsd/dev/hakios.virtio_blk.c	standard
-+bsd/dev/hakios.sparse.c	standard
-+bsd/dev/hakios.apfs_check.c	optional apfs
-+bsd/dev/hakios.sound.c		standard
-+bsd/dev/hakios.qmi.c		standard
-+bsd/dev/hakios.nas.c		standard
-+bsd/dev/hakios.wlfw.c		standard
-+bsd/dev/hakios.lx.c		standard
-+bsd/dev/hakios.sta.c		standard
-+bsd/dev/hakios.battguard.c		standard
-+bsd/dev/hakios.pmic.c		standard
-+bsd/dev/hakios.thermal.c		standard
-+bsd/dev/hakios.bt.c		standard
-+bsd/dev/hakios.socinfo.c		standard
++# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
++bsd/dev/hakios.audio.c                   standard
++bsd/dev/hakios.version.c                 standard
++bsd/dev/hakios.platform.c                standard
++bsd/dev/hakios.stubs.c                   standard
++bsd/dev/hakios.input.c                   standard
++bsd/dev/hakios.net.c                     standard
++bsd/dev/hakios.image.c                   standard
++bsd/dev/hakios.sparse.c                  standard
++bsd/dev/hakios.apfs_check.c              optional apfs
++bsd/dev/hakios.adsp.c                    optional hakios_adsp
++bsd/dev/hakios.speaker.c                 optional hakios_speaker
++bsd/dev/hakios.sound.c                   optional hakios_sound
++bsd/dev/hakios.guard.c                   optional hakios_sound
++bsd/dev/hakios.mic.c                     optional hakios_mic
++bsd/dev/hakios.virtio_sound.c            optional hakios_virtio_sound
++bsd/dev/hakios.bt.c                      optional hakios_bt
++bsd/dev/hakios.camera.c                  optional hakios_camera
++bsd/dev/hakios.torch.c                   optional hakios_torch
++bsd/dev/hakios.socinfo.c                 optional hakios_socinfo
++bsd/dev/hakios.adreno.c                  optional hakios_adreno
++bsd/dev/hakios.haptic.c                  optional hakios_haptic
++bsd/dev/hakios.virtio_input.c            optional hakios_virtio_input
++bsd/dev/hakios.goodix.c                  optional hakios_goodix
++bsd/dev/hakios.buttons.c                 optional hakios_buttons
++bsd/dev/hakios.qmi.c                     optional hakios_qmi
++bsd/dev/hakios.mpss.c                    optional hakios_modem
++bsd/dev/hakios.cell.c                    optional hakios_modem
++bsd/dev/hakios.nas.c                     optional hakios_modem
++bsd/dev/hakios.ipa.c                     optional hakios_modem
++bsd/dev/hakios.virtio_net.c              optional hakios_virtio_net
++bsd/dev/hakios.battery.c                 optional hakios_battery
++bsd/dev/hakios.cpufreq.c                 optional hakios_cpufreq
++bsd/dev/hakios.thermal.c                 optional hakios_thermal
++bsd/dev/hakios.pmic.c                    optional hakios_pmic
++bsd/dev/hakios.battguard.c               optional hakios_battguard
++bsd/dev/hakios.ufs.c                     optional hakios_ufs
++bsd/dev/hakios.ufshc.c                   optional hakios_ufs
++bsd/dev/hakios.virtio_blk.c              optional hakios_virtio_blk
++bsd/dev/hakios.wifi.c                    optional hakios_wifi
++bsd/dev/hakios.wlfw.c                    optional hakios_wifi
++bsd/dev/hakios.lx.c                      optional hakios_wifi
++bsd/dev/hakios.sta.c                     optional hakios_wifi
++bsd/dev/hakios.apple80211.c              optional hakios_wifi
++# end of the HakiOS drivers
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +196,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +200,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -128,7 +171,7 @@ index 44274016a4cf..5f815c4379c0 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +410,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +414,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -136,7 +179,7 @@ index 44274016a4cf..5f815c4379c0 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +433,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +437,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -1479,7 +1522,7 @@ index 07147cb3188b..e937e62bf4c3 100644
  options		FDESC		# fdesc_fs support		# <fdesc>
  options		DEVFS		# devfs support			# <devfs>
 diff --git a/config/MASTER.arm64.bcm2837 b/config/MASTER.arm64.bcm2837
-index 1ed75eea2052..54c5e12d2271 100644
+index 1ed75eea2052..117891784c1a 100644
 --- a/config/MASTER.arm64.bcm2837
 +++ b/config/MASTER.arm64.bcm2837
 @@ -16,15 +16,15 @@
@@ -1513,6 +1556,21 @@ index 1ed75eea2052..54c5e12d2271 100644
  #  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_library_validation config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_service_port_info ]
  #  MACH_RELEASE =   [ MACH_BASE config_skip_precise_user_kernel_time debugger_for_zone_info ]
  #  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
+@@ -70,10 +70,10 @@
+ #  SECURITY_DEV =     [ SECURITY_BASE config_setuid config_kas_info ]
+ #  SECURITY_DEBUG =   [ SECURITY_BASE config_setuid config_kas_info ]
+ #  BASE =           [ MULTIPATH PF VPN ]
+-#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE             SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
+-#  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
+-#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG               SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
+-#  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
++#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE             SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE HAKIOS_DRIVERS ]
++#  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV HAKIOS_DRIVERS     ]
++#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG               SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG   PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG HAKIOS_DRIVERS   ]
++#  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     NFS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV     PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV HAKIOS_DRIVERS     ]
+ #
+ ######################################################################
+ #
 diff --git a/iokit/Kernel/IOPMrootDomain.cpp b/iokit/Kernel/IOPMrootDomain.cpp
 index 4a06407aea5f..2d2383953f7f 100644
 --- a/iokit/Kernel/IOPMrootDomain.cpp
@@ -1729,25 +1787,56 @@ index 5219fb0d9ed6..29978e9cff43 100644
  			regEntry->release();                                                            /* Toss the entry */
  		}
  	}
+diff --git a/iokit/conf/Makefile b/iokit/conf/Makefile
+index 83259ebf9835..8864e5c7cc41 100644
+--- a/iokit/conf/Makefile
++++ b/iokit/conf/Makefile
+@@ -16,6 +16,9 @@ endif
+ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
 diff --git a/iokit/conf/files b/iokit/conf/files
-index 5fb0a52062e0..c07be8d9e0b0 100644
+index 5fb0a52062e0..7cfee3142b5b 100644
 --- a/iokit/conf/files
 +++ b/iokit/conf/files
-@@ -79,6 +79,14 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+@@ -79,6 +79,17 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
  iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
  
  iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
 +iokit/Kernel/GenericARMPE.cpp			optional iokitcpp
 +iokit/Kernel/MiniIOSurface.cpp			optional iokitcpp
 +iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
-+iokit/Kernel/hakios.gpu.cpp				optional iokitcpp
-+iokit/Kernel/hakios.wlan.cpp			optional iokitcpp
-+iokit/Kernel/hakios.battery.cpp			optional iokitcpp
++# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
++iokit/Kernel/hakios.stubs.cpp            optional iokitcpp
++iokit/Kernel/hakios.gpu.cpp              optional hakios_adreno iokitcpp
++iokit/Kernel/hakios.battery.cpp          optional hakios_battery iokitcpp
++iokit/Kernel/hakios.wlan.cpp             optional hakios_wifi iokitcpp
++# end of the HakiOS drivers
 +iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
 +iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp
  iokit/Kernel/IOPlatformIO.cpp				optional iokitcpp
  
  iokit/Kernel/IOCPU.cpp					optional iokitcpp
+diff --git a/libkern/conf/Makefile b/libkern/conf/Makefile
+index 050f34a53c49..c58ff62cd419 100644
+--- a/libkern/conf/Makefile
++++ b/libkern/conf/Makefile
+@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
+ 
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
 diff --git a/libkern/conf/files b/libkern/conf/files
 index ece14c7d41d3..4a903f73a9ef 100644
 --- a/libkern/conf/files
@@ -1774,6 +1863,20 @@ index 28ea44c2ae9d..9c7a1fe9e23e 100644
  		    "only plain data types can be contained (consider using OSValueObject)");
  		return 0; // C++11 does not support void-returning constexpr functions
  	}
+diff --git a/libsa/conf/Makefile b/libsa/conf/Makefile
+index 050f34a53c49..c58ff62cd419 100644
+--- a/libsa/conf/Makefile
++++ b/libsa/conf/Makefile
+@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
+ 
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
 diff --git a/makedefs/MakeInc.cmd b/makedefs/MakeInc.cmd
 index bc39e19b3b8e..0a72a2d43908 100644
 --- a/makedefs/MakeInc.cmd
@@ -2730,6 +2833,20 @@ index e5336e5a1cce..a54e35035cde 100644
  
  #if !VMAPPLE
  	MOV64   x1, SCTLR_EL1_DEFAULT
+diff --git a/osfmk/conf/Makefile b/osfmk/conf/Makefile
+index 050f34a53c49..c58ff62cd419 100644
+--- a/osfmk/conf/Makefile
++++ b/osfmk/conf/Makefile
+@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
+ 
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
 diff --git a/osfmk/conf/files b/osfmk/conf/files
 index 9d98c50094a0..9e3476124e54 100644
 --- a/osfmk/conf/files
@@ -3148,6 +3265,20 @@ index 65144c74239c..ab6260d52d84 100644
  	uart_putc(c);
  }
  
+diff --git a/pexpert/conf/Makefile b/pexpert/conf/Makefile
+index 050f34a53c49..c58ff62cd419 100644
+--- a/pexpert/conf/Makefile
++++ b/pexpert/conf/Makefile
+@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
+ 
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
 diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
 index d9f0723244e5..53fe4f371d7f 100644
 --- a/pexpert/pexpert/arm64/BCM2837.h
@@ -3203,6 +3334,34 @@ index c84b2100bc19..aaad5cd2e8c6 100644
  #define MAX_CPU_CLUSTERS               1
  
  #define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
+diff --git a/san/conf/Makefile b/san/conf/Makefile
+index 050f34a53c49..c58ff62cd419 100644
+--- a/san/conf/Makefile
++++ b/san/conf/Makefile
+@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
+ 
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
+diff --git a/security/conf/Makefile b/security/conf/Makefile
+index 2efc18a7a9d6..04fc48e02ccb 100644
+--- a/security/conf/Makefile
++++ b/security/conf/Makefile
+@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
+ DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
+ 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
+ 
++# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
++DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
++
+ ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
+ DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
+ endif
 diff --git a/security/mac_vfs_subr.c b/security/mac_vfs_subr.c
 index 97028c06bb92..0daad830d0c0 100644
 --- a/security/mac_vfs_subr.c

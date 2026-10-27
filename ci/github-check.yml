@@ -44,8 +44,18 @@ jobs:
         run: |
           python3 tools/boot-args-test.py
           python3 tools/boot-args.py --check
-      - name: The drivers are kept by subsystem and every one is in drivers/map
+      - name: The drivers are kept by subsystem, every one is in drivers/map, and drivers/*/conf builds each exactly once
         run: python3 tools/drivers-check.py
+      - name: The device and SoC repositories hold together, and a device's own drivers reach the kernel
+        run: |
+          python3 tools/hakios-device.py check
+          python3 tools/hakios-device-test.py
+      - name: The documentation pages made from the source are current
+        run: |
+          python3 tools/docs-gen.py --check
+          python3 tools/docs-check.py
+      - name: The Metal plug-in's reading of a .metallib refuses every file cut short or bent (sanitizers)
+        run: sh tools/metallib-test.sh
       - name: The kernel patch applies to Apple's tree
         run: |
           git clone -q --depth 1 --branch xnu-8796.121.2 https://github.com/apple-oss-distributions/xnu.git /tmp/xnu

@@ -27,6 +27,7 @@ Where this differs from Linux's, on purpose:
 import argparse
 import collections
 import difflib
+import importlib.util
 import os
 import re
 import subprocess
@@ -36,6 +37,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 KERNEL_LINE = 607                   # BOOT_LINE_LENGTH 608 less the terminator: what the kernel's boot_args can hold
 RUN_OVERHEAD = 260                  # what a run adds itself: the loader's own arguments, xl's, the runner's (measured: ~190-250)
+
+class ConfigError(Exception):
+    pass
+
 
 # name, kind, boot-arg, one-line help, firmware directory it needs, what it requires
 # kinds: bool (y/n, becomes arg=1), int, hex, str, and meta (a fact about the build, not an argument)
@@ -121,13 +126,153 @@ def load_generated():
 
 GENERATED = load_generated()
 SYMBOLS += GENERATED
+
+
+# ---- the drivers: what the kernel is built with -----------------------------------------------------------------
+#
+# Every other symbol is a boot-argument. These are not: CONFIG_HAKIOS_<NAME>=y decides whether a driver is compiled into
+# the kernel at all, the way XNU decides it for its own parts -- an `options HAKIOS_<NAME>` line in config/MASTER, the
+# driver's files `optional hakios_<name>` in bsd/conf/files and iokit/conf/files, and -DHAKIOS_<NAME> for the code that
+# calls into it. What a driver is, which files it is and what it needs is written once, in drivers/<subsystem>/conf.
+
+def layers(root):
+    """[(kind, name, directory)] of the repositories a build is put together from, common first: this one ("common"), then each
+    SoC's (socs/<name>/, with a soc.conf) and each device's (devices/<name>/, with a device.conf) that is checked out here. They
+    are the layers of docs/porting/repositories.md: a SoC or device repository is a directory of the same shape (configs/,
+    drivers/<subsystem>/conf) that `tools/hakios-device.py sync` clones into place, or that lives in this tree until it has a
+    repository of its own."""
+    out = [("common", "common", root)]
+    for kind, top, marker in (("soc", "socs", "soc.conf"), ("device", "devices", "device.conf")):
+        base = os.path.join(root, top)
+        for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+            if os.path.isfile(os.path.join(base, name, marker)):
+                out.append((kind, name, os.path.join(base, name)))
+    return out
+
+
+class Driver:
+    def __init__(self, name, sub, where, origin=None):
+        self.name, self.sub, self.where = name, sub, where
+        self.origin = origin                # the SoC or device repository it comes from; None: this one's drivers/
+        self.files, self.requires, self.default, self.help = [], [], "y", ""
+
+    def source(self, path):
+        """Where a file of it is kept: drivers/<subsystem>/<name>, in this repository or in its own."""
+        return os.path.join(self.origin or "", "drivers", self.sub, os.path.basename(path))
+
+    @property
+    def symbol(self):
+        return "HAKIOS_" + self.name
+
+    @property
+    def tag(self):
+        return "hakios_" + self.name.lower()
+
+
+def load_drivers(root):
+    """([Driver], [(path, tags, subsystem, help)]) from drivers/*/conf: the drivers that can be left out, and the "standard"
+    files every kernel has. The format (docs/drivers-config.md):
+
+        standard <path in the XNU tree> [<XNU option>...]     always built (with the XNU options given, if any)
+        driver <NAME>                                           CONFIG_HAKIOS_<NAME>; the lines under it, indented:
+            file <path in the XNU tree> [<XNU option>...]       one of its files (an iokit .cpp also wants iokitcpp)
+            requires <NAME>...                                  drivers it cannot be built without
+            default y|n                                         what a configuration that does not name it gets (y)
+            help <text>                                         what it is; more lines of help go on
+    """
+    drivers, standard, seen_files = [], [], {}
+    confs = []
+    for kind, _name, top in layers(root):
+        base = os.path.join(top, "drivers")
+        for sub in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+            if os.path.isfile(os.path.join(base, sub, "conf")):
+                confs.append((kind, top, sub, os.path.join(base, sub, "conf")))
+    for kind, top, sub, path in confs:
+        origin = None if kind == "common" else top
+        shown = os.path.relpath(path, root).replace(os.sep, "/")
+        block = None
+        for n, raw in enumerate(open(path, encoding="utf-8"), 1):
+            where = "%s:%d" % (shown, n)
+            line = raw.split("#", 1)[0].rstrip()
+            if not line.strip():
+                continue
+            words = line.split()
+            if not raw[0].isspace():
+                if words[0] == "driver" and len(words) == 2 and re.fullmatch(r"[A-Z][A-Z0-9_]*", words[1]):
+                    block = Driver(words[1], sub, where, origin)
+                    drivers.append(block)
+                elif words[0] == "standard" and len(words) >= 2:
+                    if origin is not None:
+                        raise ConfigError("%s: a SoC or device repository has drivers, not `standard` files (every kernel would have "
+                                          "them, which only the common repository decides)" % where)
+                    block = [words[1], words[2:], sub, ""]
+                    standard.append(block)
+                    files = [words[1]]
+                else:
+                    raise ConfigError("%s: want `driver NAME` (NAME in capitals) or `standard PATH`, got %r" % (where, line.strip()))
+                if isinstance(block, Driver):
+                    continue
+            else:
+                if block is None:
+                    raise ConfigError("%s: an indented line before any `driver` or `standard`" % where)
+                key, rest = words[0], line.strip()[len(words[0]):].strip()
+                if key == "help":
+                    if isinstance(block, Driver):
+                        block.help = (block.help + " " + rest).strip()
+                    else:
+                        block[3] = (block[3] + " " + rest).strip()
+                    continue
+                if not isinstance(block, Driver):
+                    raise ConfigError("%s: a `standard` file takes only `help` lines, got %r" % (where, key))
+                if key == "file" and len(words) >= 2:
+                    block.files.append((words[1], words[2:]))
+                    files = [words[1]]
+                elif key == "requires" and len(words) >= 2:
+                    block.requires += words[1:]
+                    continue
+                elif key == "default" and len(words) == 2 and words[1] in ("y", "n"):
+                    block.default = words[1]
+                    continue
+                else:
+                    raise ConfigError("%s: want file PATH, requires NAME..., default y|n or help TEXT, got %r" % (where, line.strip()))
+            for f in files:
+                if not f.startswith(("bsd/dev/hakios.", "iokit/Kernel/hakios.")) or not f.endswith((".c", ".cpp")):
+                    raise ConfigError("%s: %s is not a hakios.*.c or .cpp of bsd/dev/ or iokit/Kernel/" % (where, f))
+                if f in seen_files:
+                    raise ConfigError("%s: %s is already built by %s" % (where, f, seen_files[f]))
+                seen_files[f] = where
+    names = {d.name: d for d in drivers}
+    if len(names) != len(drivers):
+        dup = [n for n, c in collections.Counter(d.name for d in drivers).items() if c > 1]
+        raise ConfigError("drivers/*/conf: the driver %s is declared twice" % ", ".join(dup))
+    for d in drivers:
+        if not d.files:
+            raise ConfigError("%s: the driver %s has no file" % (d.where, d.name))
+        for r in d.requires:
+            if r not in names:
+                close = difflib.get_close_matches(r, names, n=1)
+                raise ConfigError("%s: %s requires %s, which no drivers/*/conf declares%s" % (
+                    d.where, d.name, r, " (did you mean %s?)" % close[0] if close else ""))
+    return drivers, [tuple(s) for s in standard]
+
+
+def driver_symbols(drivers):
+    return [(d.symbol, "driver", None, d.help or "the driver %s (%s)" % (d.name, d.where), None, None) for d in drivers]
+
+
+try:
+    DRIVERS, STANDARD = load_drivers(ROOT)
+except ConfigError as e:                # said again by every command, with the rest of what it does
+    DRIVERS, STANDARD, DRIVERS_ERROR = [], [], str(e)
+else:
+    DRIVERS_ERROR = None
+DRIVER_BY_SYMBOL = {d.symbol: d for d in DRIVERS}
+for _d in DRIVERS:
+    GROUP_OF[_d.symbol] = "Drivers built in"
+SYMBOLS[3:3] = driver_symbols(DRIVERS)      # after the build facts: they are facts about the build as well
 BY_NAME = {s[0]: s for s in SYMBOLS}
 FIRMWARE_VALUES = ("device", "none")
 RANGES = {"CPUS": (1, 8), "BOOTCPU": (0, 7), "UFS": (1, 2), "THERMAL_POLL": (200, 60000), "THERMAL_STOP": (0, 160), "BATTERY_STOP": (0, 99), "BATTERY_STOP_POLL": (5, 600)}
-
-
-class ConfigError(Exception):
-    pass
 
 
 # ---- reading and writing --------------------------------------------------------------------------------------
@@ -141,6 +286,10 @@ def parse(path):
     for n, raw in enumerate(open(path, encoding="utf-8"), 1):
         line = raw.strip()
         m = re.fullmatch(r"#\s*CONFIG_([A-Z0-9_]+) is not set", line)
+        if m and m.group(1) in DRIVER_BY_SYMBOL:
+            values[m.group(1)] = "n"        # a driver left out: not "the kernel's default", which for a driver is to build it
+            unset.discard(m.group(1))
+            continue
         if m:
             unset.add(m.group(1))
             values.pop(m.group(1), None)
@@ -166,6 +315,10 @@ def parse(path):
 def typed(name, value):
     """The value of a symbol as Python has it, or a ConfigError that says what is wrong."""
     kind = BY_NAME[name][1]
+    if kind == "driver":
+        if value not in ("y", "n"):
+            raise ConfigError("CONFIG_%s is a driver: y (built in), or not set (left out) (got %s)" % (name, value))
+        return value == "y"
     if kind == "bool":
         if value != "y":
             raise ConfigError("CONFIG_%s is a bool: y, or not set (got %s)" % (name, value))
@@ -224,15 +377,23 @@ def config_dir(root):
     return os.path.join(root, "configs")
 
 
+def config_dirs(root):
+    """configs/ of this repository, then of every SoC and device repository there is (layers())."""
+    return [os.path.join(top, "configs") for _kind, _name, top in layers(root) if os.path.isdir(os.path.join(top, "configs"))]
+
+
 def find_config(root, name):
-    """configs/<name>, configs/<name>_defconfig or configs/<name>.config: the file for NAME."""
+    """<name>, <name>_defconfig or <name>.config in configs/ here or in a SoC's or device's repository: the file for NAME. A name
+    two repositories both have is an error, not a guess: which one a build took would depend on what is checked out."""
     base = os.path.basename(name)
     for candidate in (base, base + "_defconfig", base + ".config"):
-        path = os.path.join(config_dir(root), candidate)
-        if os.path.isfile(path):
-            return path
-    available = sorted(os.listdir(config_dir(root))) if os.path.isdir(config_dir(root)) else []
-    raise ConfigError("no configs/%s, configs/%s_defconfig or configs/%s.config (there is: %s)" %
+        found = [os.path.join(d, candidate) for d in config_dirs(root) if os.path.isfile(os.path.join(d, candidate))]
+        if len(found) > 1:
+            raise ConfigError("%s is in more than one repository: %s" % (candidate, ", ".join(rel(root, f) for f in found)))
+        if found:
+            return found[0]
+    available = sorted({n for d in config_dirs(root) for n in os.listdir(d)})
+    raise ConfigError("no %s, %s_defconfig or %s.config in configs/, socs/*/configs/ or devices/*/configs/ (there is: %s)" %
                       (base, base, base, ", ".join(available) or "nothing"))
 
 
@@ -288,12 +449,21 @@ def write_config(config, path, sources):
              "# Made by tools/hakios-config.py from %s." % ", ".join(sources),
              "# Do not edit it: change a defconfig or a fragment in configs/, and make the .config again.",
              "#"]
+    built = drivers_built(config)
     for name, kind, _arg, _help, _needs, _requires in SYMBOLS:
-        if name in config:
+        if kind == "driver":
+            lines.append("CONFIG_%s=y" % name if built[name] else "# CONFIG_%s is not set" % name)
+        elif name in config:
             lines.append("CONFIG_%s=%s" % (name, config[name]))
         elif kind != "meta":
             lines.append("# CONFIG_%s is not set" % name)
     open(path, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
+
+
+def drivers_built(config):
+    """{CONFIG name: True if built in} for every driver: its value in `config`, or its default where the configuration does
+    not name it (a .config made before there were driver symbols builds every driver, as the kernel was built then)."""
+    return {d.symbol: config.get(d.symbol, d.default) == "y" for d in DRIVERS}
 
 
 def kernel_ver(root, config_path):
@@ -315,8 +485,11 @@ def check(config):
         except ConfigError as e:
             problems.append(str(e))
     firmware = parsed.get("FIRMWARE", "device")
+    problems += check_drivers(config, parsed)
     for name in parsed:
         _n, _kind, _arg, _help, needs, requires = BY_NAME[name]
+        if _kind == "driver":
+            continue
         if needs and firmware == "none":
             problems.append('CONFIG_%s needs the phone\'s own firmware (%s/), and this configuration says CONFIG_FIRMWARE="none": '
                             "it loads nothing from the device" % (name, needs))
@@ -346,6 +519,55 @@ def check(config):
         problems.append("the boot-arguments take %d characters; a run adds about %d of its own and the kernel's command line holds %d: "
                         "the end of it would be lost" % (length, RUN_OVERHEAD, KERNEL_LINE))
     return problems, args
+
+
+def check_drivers(config, parsed):
+    """The problems of the drivers' choice: a driver built without one it requires, and a boot-argument set for a driver that
+    is not built (it would be read by nothing: the kernel does not say so, the argument is just never looked at)."""
+    problems = []
+    if DRIVERS_ERROR:
+        return [DRIVERS_ERROR]
+    built = drivers_built(config)
+    for d in DRIVERS:
+        if built[d.symbol]:
+            for r in d.requires:
+                if not built["HAKIOS_" + r]:
+                    problems.append("CONFIG_%s requires CONFIG_HAKIOS_%s (%s)" % (d.symbol, r, d.where))
+    left_out = {os.path.basename(f) for d in DRIVERS if not built[d.symbol] for f, _tags in d.files}
+    if not left_out:
+        return problems
+    readers = arg_readers()
+    if readers is None:
+        return problems
+    owner = {os.path.basename(f): d.symbol for d in DRIVERS for f, _tags in d.files}
+    wanted = [(name, BY_NAME[name][2]) for name in parsed if BY_NAME[name][2]]
+    wanted += [("BOOTARGS", w.partition("=")[0]) for w in parsed.get("BOOTARGS", [])]
+    for name, arg in wanted:
+        read_by = readers.get(arg)
+        if read_by and read_by <= left_out:
+            problems.append("CONFIG_%s gives %s=, which only %s read%s, and %s not built (%s)" % (
+                name, arg, ", ".join(sorted(read_by)), "s" if len(read_by) == 1 else "", "it is" if len(read_by) == 1 else "they are",
+                ", ".join(sorted({"CONFIG_%s" % owner[f] for f in read_by}))))
+    return problems
+
+
+_READERS = []
+
+
+def arg_readers():
+    """{argument: {file names}} of the arguments only the kernel reads (tools/boot-args.py's scan of the source); None when
+    the source cannot be scanned (not a git checkout)."""
+    if not _READERS:
+        try:
+            spec = importlib.util.spec_from_file_location("boot_args", os.path.join(HERE, "boot-args.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            found = module.scan(ROOT)
+            _READERS.append({arg: set(where["kernel"]) for arg, where in found.items()
+                             if where["kernel"] and not where["loader"] and not where["user"]})
+        except (OSError, subprocess.CalledProcessError, AttributeError):
+            _READERS.append(None)
+    return _READERS[0]
 
 
 def boot_args(parsed):
@@ -434,8 +656,13 @@ def cmd_show(a):
     problems, args = check(config)
     given = {x.split("=", 1)[0]: x for x in args}
     print("HakiOS configuration %s, kernel.ver=%s" % (rel(os.getcwd(), a.config), kernel_ver(a.root, a.config)))
+    built = drivers_built(config)
+    print("drivers built in: %s" % (" ".join(d.name.lower() for d in DRIVERS if built[d.symbol]) or "none"))
+    left_out = [d.name.lower() for d in DRIVERS if not built[d.symbol]]
+    if left_out:
+        print("drivers left out: %s" % " ".join(left_out))
     for name, _kind, arg, _help, _needs, _requires in SYMBOLS:
-        if name in config:
+        if name in config and _kind != "driver":
             print("  CONFIG_%-13s = %-14s %s" % (name, config[name], "-> " + given[arg] if arg in given else "(a fact about the build)"))
     print("boot-arguments: %s" % " ".join(args))
     print("firmware wanted from the phone: %s" % (", ".join(sorted({BY_NAME[n][4] for n in config if BY_NAME[n][4]})) or "none"))
@@ -466,7 +693,12 @@ def cmd_savedefconfig(a):
     config = load(a.config)
     base = parse(find_config(a.root, "defconfig"))[0]
     lines = ["# A minimal defconfig: what this configuration sets that configs/defconfig does not, or sets differently."]
-    for name, *_ in SYMBOLS:
+    built, base_built = drivers_built(config), drivers_built(base)
+    for name, kind, *_ in SYMBOLS:
+        if kind == "driver":
+            if built[name] != base_built[name]:
+                lines.append("CONFIG_%s=y" % name if built[name] else "# CONFIG_%s is not set" % name)
+            continue
         if name in config and base.get(name) != config[name]:
             lines.append("CONFIG_%s=%s" % (name, config[name]))
         elif name not in config and name in base:
@@ -484,20 +716,20 @@ def first_comment(path):
 
 
 def cmd_list(a):
-    d = config_dir(a.root)
-    names = sorted(os.listdir(d)) if os.path.isdir(d) else []
+    files = sorted((n, os.path.join(d, n)) for d in config_dirs(a.root) for n in os.listdir(d))
+    where = lambda path: "" if os.path.dirname(path) == config_dir(a.root) else "  [%s]" % rel(a.root, os.path.dirname(os.path.dirname(path)))
     print("defconfigs (tools/hakios-config.py defconfig NAME, or make NAME_defconfig):")
-    for n in names:
+    for n, path in files:
         if n == "defconfig" or n.endswith("_defconfig"):
-            print("  %-16s %s" % (n[:-len("_defconfig")] if n.endswith("_defconfig") else n, first_comment(os.path.join(d, n))))
+            print("  %-16s %s%s" % (n[:-len("_defconfig")] if n.endswith("_defconfig") else n, first_comment(path), where(path)))
     print("fragments (put over a configuration: tools/hakios-config.py merge NAME, or defconfig NAME FRAGMENT):")
-    for n in names:
+    for n, path in files:
         if n.endswith(".config"):
-            print("  %-16s %s" % (n[:-len(".config")], first_comment(os.path.join(d, n))))
+            print("  %-16s %s%s" % (n[:-len(".config")], first_comment(path), where(path)))
     return 0
 
 
-GROUP_ORDER = ["Build facts", "CPU, memory and boot", "Storage and APFS", "Touch and buttons", "GPU and display", "Audio and battery",
+GROUP_ORDER = ["Build facts", "Drivers built in", "CPU, memory and boot", "Storage and APFS", "Touch and buttons", "GPU and display", "Audio and battery",
                "Wi-Fi", "Cellular", "Cameras", "Haptics and torch", "Chip, thermal and PMIC", "Network", "Security stand-ins",
                "Debugging", "Loader", "User space", "Version", "Extra arguments"]
 
@@ -509,8 +741,12 @@ def listing(config, title_lines):
     by_group = collections.defaultdict(list)
     for sym in SYMBOLS:
         by_group[GROUP_OF.get(sym[0], "User space")].append(sym)
+    built = drivers_built(config)
+    config = {k: v for k, v in config.items() if k not in built}
+    config.update({k: "y" for k, on in built.items() if on})
     out = list(title_lines)
-    out += ["# %d symbols in %d groups; %d are set." % (len(SYMBOLS), len([g for g in by_group if by_group[g]]), len(config)), "#", ""]
+    out += ["# %d symbols in %d groups; %d are set, %d of them drivers built in." % (
+        len(SYMBOLS), len([g for g in by_group if by_group[g]]), len(config), sum(built.values())), "#", ""]
     for group in GROUP_ORDER + sorted(g for g in by_group if g not in GROUP_ORDER):
         syms = by_group.get(group)
         if not syms:
@@ -519,6 +755,10 @@ def listing(config, title_lines):
         for name, kind, arg, help_, needs, requires in syms:
             text = help_ if len(help_) <= 118 else help_[:117].rsplit(" ", 1)[0] + " ..."
             note = ""
+            if kind == "driver":
+                d = DRIVER_BY_SYMBOL[name]
+                note += " [%s%s]" % (", ".join(os.path.basename(f) for f, _t in d.files),
+                                     "; requires " + ", ".join("CONFIG_HAKIOS_" + r for r in d.requires) if d.requires else "")
             if needs:
                 note += " [needs %s/ from the phone]" % needs
             if requires:
@@ -534,9 +774,18 @@ def cmd_listing(a):
     files = resolve(a.root, [a.name] + a.fragments)
     config = overlay({}, files)
     title = ["#", "# HakiOS %s defconfig: every setting there is, with what it does." % a.name,
-             "# Made by tools/hakios-config.py listing %s; the values are the ones that file sets, and tests/CI check that it names every symbol." % a.name,
+             "# Made by tools/hakios-config.py listing %s -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol." % a.name,
              "#"]
-    sys.stdout.write(listing(config, title))
+    text = listing(config, title)
+    if a.output_listing:
+        # read first, written after: `listing common > configs/common_defconfig` has the shell empty the file before it is read,
+        # and the configuration written is then the base one's alone (which is how common_defconfig once lost its values)
+        with open(a.output_listing + ".new", "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(a.output_listing + ".new", a.output_listing)
+        print("hakios-config: %s written" % rel(os.getcwd(), a.output_listing))
+    else:
+        sys.stdout.write(text)
     return 0
 
 
@@ -568,12 +817,181 @@ def cmd_help(a):
     _n, kind, arg, help_, needs, requires = BY_NAME[name]
     print("CONFIG_%s  (%s)" % (name, kind))
     print("  " + help_)
+    if kind == "driver":
+        d = DRIVER_BY_SYMBOL[name]
+        print("  compiled into the kernel, not a boot-argument: XNU's option %s (%s)" % (d.symbol, d.where))
+        print("  files: %s" % ", ".join(f for f, _t in d.files))
+        print("  requires: %s" % (", ".join("CONFIG_HAKIOS_" + r for r in d.requires) or "nothing"))
+        needed_by = [o.symbol for o in DRIVERS if d.name in o.requires]
+        if needed_by:
+            print("  required by: %s" % ", ".join("CONFIG_" + n for n in needed_by))
+        print("  default: %s" % ("y (built in)" if d.default == "y" else "not set (left out)"))
     if arg:
         print("  boot-argument: %s=%s" % (arg, {"bool": "1", "hex": "0x...", "int": "N", "str": "...", "arg": "1, N or text", "args": "..."}[kind]))
     if needs:
         print("  needs firmware pulled from your phone: %s/" % needs)
     if requires:
         print("  requires: CONFIG_%s" % requires)
+    return 0
+
+
+# ---- the kernel tree: the drivers' choice where XNU's own build reads it ----------------------------------------------
+
+FILES_BEGIN = "# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines."
+FILES_END = "# end of the HakiOS drivers"
+GENERATED_IN_TREE = ("config/MASTER.hakios", "bsd/dev/hakios.drivers.h")     # made per configuration; never exported (xnu/export.sh)
+USES_OPTION = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b.*\bHAKIOS_[A-Z][A-Z0-9_]*", re.M)
+
+
+def files_block(component):
+    """The lines of bsd/conf/files or iokit/conf/files for every hakios file of that component: `standard`, or
+    `optional hakios_<driver>` (and the file's own XNU options; config(8) builds a file whose options are all on)."""
+    lines = [FILES_BEGIN]
+    for path, tags, _sub, _help in STANDARD:
+        if path.startswith(component + "/"):
+            lines.append("%-40s %s" % (path, "optional " + " ".join(tags) if tags else "standard"))
+    for d in DRIVERS:
+        for path, tags in d.files:
+            if path.startswith(component + "/"):
+                lines.append("%-40s optional %s" % (path, " ".join([d.tag] + tags)))
+    return lines + [FILES_END]
+
+
+def put_block(text, block):
+    """`text` (a conf/files) with its HakiOS block replaced by `block`; a tree from before there was a block has its loose
+    hakios lines taken out and the block put where the first of them was."""
+    lines = text.split("\n")
+    if FILES_BEGIN in lines:
+        start = lines.index(FILES_BEGIN)
+        end = lines.index(FILES_END, start)
+        return "\n".join(lines[:start] + block + lines[end + 1:])
+    loose = [i for i, l in enumerate(lines) if re.match(r"(bsd/dev|iokit/Kernel)/hakios\.", l)]
+    if not loose:
+        raise ConfigError("no HakiOS lines in it to replace")
+    kept = [l for i, l in enumerate(lines) if i not in set(loose)]
+    at = loose[0]
+    return "\n".join(kept[:at] + block + kept[at:])
+
+
+def master_hakios(built, sources):
+    """config/MASTER.hakios: the configuration's choice, in doconf's terms. HAKIOS_DRIVERS is a list of attributes that the
+    kernel configurations of MASTER.arm64.bcm2837 include; an `options` line is taken when its attribute is in the list."""
+    on = [d.tag for d in DRIVERS if built[d.symbol]]
+    lines = ["#", "# The HakiOS drivers of this build, made by tools/hakios-config.py kernel from %s." % sources,
+             "# Not part of the patch: xnu/export.sh leaves it out, and every `make kernel` makes it again.", "#",
+             "#  HAKIOS_DRIVERS = [ %s ]" % " ".join(on), "#"]
+    for d in DRIVERS:
+        what = re.sub(r"[#<>]", "", d.help)        # doconf reads the last `# <attribute>` of a line: nothing in the comment may look like it
+        lines.append("options\t\t%-24s # %-48s # <%s>" % (d.symbol, what[:48].rsplit(" ", 1)[0] if len(what) > 48 else what, d.tag))
+    return "\n".join(lines) + "\n"
+
+
+def drivers_header(built, sources):
+    on = [d.name.lower() for d in DRIVERS if built[d.symbol]]
+    return ("/* The drivers this kernel is built with: made by tools/hakios-config.py kernel from %s. Not part of the patch. */\n"
+            "#define HAKIOS_DRIVERS_LIST     \"%s\"\n#define HAKIOS_DRIVERS_COUNT    %d\n#define HAKIOS_DRIVERS_CONFIG   \"%s\"\n" %
+            (sources, " ".join(on), len(on), sources))
+
+
+def write_if_changed(path, text):
+    old = open(path, encoding="utf-8").read() if os.path.isfile(path) else None
+    if old == text:
+        return False
+    with open(path + ".new", "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(path + ".new", path)
+    return True
+
+
+def stale_objects(tree):
+    """The objects of the files whose code asks about a driver (#if HAKIOS_*): XNU's build sees the option in the compiler's
+    command line, not as a file the object depends on, so a changed choice would leave them as they were built."""
+    stems = set()
+    for top in ("bsd", "iokit", "osfmk", "libkern", "pexpert"):
+        for d, _dirs, files in os.walk(os.path.join(tree, top)):
+            for name in files:
+                if name.endswith((".c", ".cpp", ".h")):
+                    try:
+                        text = open(os.path.join(d, name), encoding="utf-8", errors="replace").read()
+                    except OSError:
+                        continue
+                    if "HAKIOS_" in text and USES_OPTION.search(text):
+                        stems.add(os.path.splitext(name)[0])
+    removed = 0
+    headers = {s for s in stems if os.path.isfile(os.path.join(tree, "bsd", "sys", s + ".h"))}
+    obj = os.path.join(tree, "BUILD", "obj")
+    for d, _dirs, files in os.walk(obj):
+        for name in files:
+            stem, ext = os.path.splitext(name)
+            if ext in (".o", ".cpo") and stem in stems:     # XNU names a C++ object .cpo
+                os.remove(os.path.join(d, name))
+                removed += 1
+    if headers:
+        # a header that tests an option (a stand-in for a driver left out) changes every object that includes it: those are
+        # found by the dependency files the compiler wrote, which name the headers each object was built from
+        for d, _dirs, files in os.walk(obj):
+            for name in files:
+                if name.endswith((".d", ".cpd")):
+                    text = open(os.path.join(d, name), encoding="utf-8", errors="replace").read()
+                    if any("/" + h + ".h" in text for h in headers):
+                        o = os.path.join(d, name[:-2] + ".o" if name.endswith(".d") else name[:-4] + ".cpo")
+                        if os.path.isfile(o):
+                            os.remove(o)
+                            removed += 1
+    return removed
+
+
+def cmd_kernel(a):
+    """kernel [--tree DIR]: put the drivers' choice of the .config (every driver's default if there is no .config) into the
+    kernel tree, where XNU's build reads it: config/MASTER.hakios, the HakiOS block of bsd/conf/files and iokit/conf/files,
+    bsd/dev/hakios.drivers.h. Files are written only when they change, so an unchanged choice rebuilds nothing."""
+    if DRIVERS_ERROR:
+        raise ConfigError(DRIVERS_ERROR)
+    tree = a.tree or os.environ.get("XNU_SRC") or os.path.join(a.root, "xnu-src", "xnu-8796.121.2")
+    if not os.path.isfile(os.path.join(tree, "bsd", "conf", "files")):
+        raise ConfigError("no kernel tree at %s (xnu/apply.sh makes it)" % tree)
+    if os.path.isfile(a.config):
+        config, sources = load(a.config), rel(a.root, a.config)
+    else:
+        config, sources = {}, "the drivers' defaults (no .config)"
+    problems = check_drivers(config, {})
+    if problems:
+        report(problems)
+        return 1
+    built = drivers_built(config)
+    changed = []
+    for component in ("bsd", "iokit"):
+        path = os.path.join(tree, component, "conf", "files")
+        try:
+            text = put_block(open(path, encoding="utf-8").read(), files_block(component))
+        except ConfigError as e:
+            raise ConfigError("%s/conf/files: %s" % (component, e))
+        if write_if_changed(path, text):
+            changed.append(component + "/conf/files")
+    choice_changed = write_if_changed(os.path.join(tree, "config", "MASTER.hakios"), master_hakios(built, sources))
+    if choice_changed:
+        changed.append("config/MASTER.hakios")
+    if write_if_changed(os.path.join(tree, "bsd", "dev", "hakios.drivers.h"), drivers_header(built, sources)):
+        changed.append("bsd/dev/hakios.drivers.h")
+    removed = stale_objects(tree) if choice_changed and os.path.isdir(os.path.join(tree, "BUILD", "obj")) else 0
+    on = [d.name.lower() for d in DRIVERS if built[d.symbol]]
+    off = [d.name.lower() for d in DRIVERS if not built[d.symbol]]
+    print("hakios-config: kernel: %d of %d drivers built in, from %s%s" % (len(on), len(DRIVERS), sources,
+          "; left out: " + " ".join(off) if off else ""))
+    if changed:
+        print("hakios-config: kernel: %s written%s" % (", ".join(changed), "; %d objects to be built again" % removed if removed else ""))
+    return 0
+
+
+def cmd_external(a):
+    """external-files: "<file in a SoC's or device's repository>\t<path in the kernel tree>" for each file of their drivers, for
+    xnu/apply.sh and xnu/sync-drivers.sh to copy into the tree and xnu/export.sh to leave where it is (it is not this repository's)."""
+    if DRIVERS_ERROR:
+        raise ConfigError(DRIVERS_ERROR)
+    for d in DRIVERS:
+        if d.origin:
+            for path, _tags in d.files:
+                print("%s\t%s" % (d.source(path), path))
     return 0
 
 
@@ -602,13 +1020,18 @@ def main():
                            ("savedefconfig", cmd_savedefconfig, "the .config as a minimal defconfig"),
                            ("list", cmd_list, "the defconfigs and fragments in configs/")):
         sub.add_parser(name, parents=[common], help=text).set_defaults(fn=fn)
-    p = sub.add_parser("listing", parents=[common], help="the documented defconfig of NAME, every symbol, on stdout")
+    p = sub.add_parser("listing", parents=[common], help="the documented defconfig of NAME, every symbol, on stdout or into -o FILE")
     p.add_argument("name")
     p.add_argument("fragments", nargs="*")
+    p.add_argument("-o", dest="output_listing", help="write it here (safe for the file it is made from, as `>` is not)")
     p.set_defaults(fn=cmd_listing)
     p = sub.add_parser("complete", parents=[common], help="a defconfig must name every symbol")
     p.add_argument("name")
     p.set_defaults(fn=cmd_complete)
+    p = sub.add_parser("kernel", parents=[common], help="put the .config's choice of drivers into the kernel tree (make kernel runs it)")
+    p.add_argument("--tree", help="the kernel tree (default: $XNU_SRC, else xnu-src/xnu-8796.121.2)")
+    p.set_defaults(fn=cmd_kernel)
+    sub.add_parser("external-files", parents=[common], help="the driver files of SoC and device repositories, and their place in the tree").set_defaults(fn=cmd_external)
     p = sub.add_parser("help", parents=[common], help="what a symbol means")
     p.add_argument("symbol")
     p.set_defaults(fn=cmd_help)
@@ -617,6 +1040,10 @@ def main():
     a.config = os.path.abspath(getattr(a, "config", os.path.join(a.root, ".config")))
     if getattr(a, "output", None) is None:
         a.output = a.config
+    if DRIVERS_ERROR:
+        # a conf file that does not read leaves the drivers unknown, and every answer about a configuration would be wrong
+        print("hakios-config: %s" % DRIVERS_ERROR, file=sys.stderr)
+        sys.exit(1)
     try:
         sys.exit(a.fn(a))
     except ConfigError as e:

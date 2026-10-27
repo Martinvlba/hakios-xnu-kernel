@@ -6,6 +6,9 @@
                       writes to `darwin`; virt and trace do what they say; kernel.ver carries -sc7280
   refusals            an unknown symbol (with a suggestion), a firmware option in the open profile, a dependency that is
                       missing, a number out of range, a bad hex or string, a command line that cannot fit
+  drivers             CONFIG_HAKIOS_* from drivers/*/conf: built in unless a configuration says otherwise; `is not set` leaves one
+                      out; a driver without one it requires, and an argument only a left-out driver reads, are refused; `kernel`
+                      writes the choice into a kernel tree where XNU's config reads it, and writes nothing when nothing changed
   workflow            merge over an existing .config; `is not set` in a fragment switches off; savedefconfig round-trips;
                       --config and --root work after the command as well as before it
 """
@@ -183,10 +186,10 @@ try:
     listed = run("listing", "common").stdout
     with open(os.path.join(ROOT, "configs", "common_defconfig"), encoding="utf-8", newline="") as f:
         check("common_defconfig is what `listing common` makes of it (nothing edited by hand drifted)",
-              f.read().replace("\r\n", "\n") == listed, "run: tools/hakios-config.py listing common > configs/common_defconfig")
+              f.read().replace("\r\n", "\n") == listed, "run: tools/hakios-config.py listing common -o configs/common_defconfig")
     check("the listing has hundreds of symbols, each with a comment above it",
           listed.count("\nCONFIG_") + listed.count("\n# CONFIG_") >= 300 and listed.count("\n# ") > 600, listed.count("\n"))
-    with open(os.path.join(ROOT, "configs", "redwood_defconfig"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "devices", "redwood", "configs", "redwood_defconfig"), encoding="utf-8") as f:
         includes = [l.split()[1] for l in f if l.startswith("#include ")]
     check("redwood_defconfig is the common one, the SoC's and the phone's, put together", includes == ["common_defconfig", "sc7280.config", "redwood.config"], includes)
     check("the common configuration does not say which phone: no device, no SoC",
@@ -218,6 +221,70 @@ try:
     check("THERMAL_STOP is at most 160 degrees", any("THERMAL_STOP" in p for p in problems), problems)
     check("there are as many symbols as arguments the source reads, less the ones the tools set",
           len(hc.SYMBOLS) >= 300 and len({s[0] for s in hc.SYMBOLS}) == len(hc.SYMBOLS), len(hc.SYMBOLS))
+
+    # the drivers: compiled in, not arguments
+    check("redwood builds every driver, and they give no argument",
+          all("CONFIG_%s=y" % d.symbol in open(cfg).read() for d in hc.DRIVERS) and len(hc.DRIVERS) >= 20 and
+          not any(x.startswith("hakios_") for x in args_of(run("args", "--config", cfg))), len(hc.DRIVERS))
+    built = hc.drivers_built({})
+    check("a configuration that names no driver builds them all (their default)", all(built.values()), built)
+    off = dict(hc.parse(cfg)[0])
+    problems, _ = hc.check(dict(off, HAKIOS_ADSP="n"))
+    check("a driver without one it requires is refused (SOUND without ADSP)", any("CONFIG_HAKIOS_SOUND requires CONFIG_HAKIOS_ADSP" in p for p in problems), problems)
+    problems, _ = hc.check(dict(off, HAKIOS_GOODIX="n"))
+    check("an argument another built driver still reads is fine (touchscreen= is the buttons' too)", not problems, problems)
+    problems, _ = hc.check(dict(off, HAKIOS_GOODIX="n", HAKIOS_BUTTONS="n"))
+    check("an argument only left-out drivers read is refused (touchscreen= without GOODIX and BUTTONS)",
+          any("CONFIG_TOUCHSCREEN gives touchscreen=" in p and "CONFIG_HAKIOS_GOODIX" in p and "CONFIG_HAKIOS_BUTTONS" in p for p in problems), problems)
+    problems, _ = hc.check(dict(off, HAKIOS_GOODIX="n", HAKIOS_BUTTONS="n", TOUCHSCREEN="n"))
+    check("... and with that argument gone too, the choice passes", not [p for p in problems if "GOODIX" in p or "touchscreen" in p], problems)
+    problems, _ = hc.check(dict(off, HAKIOS_GOODIX="maybe"))
+    check("a driver is y or not set", any("CONFIG_HAKIOS_GOODIX is a driver" in p for p in problems), problems)
+    # a phone without that touch controller: a fragment in a root of its own (merge takes fragments of configs/)
+    fake4 = os.path.join(work, "fake4")
+    shutil.copytree(os.path.join(ROOT, "configs"), os.path.join(fake4, "configs"))
+    with open(os.path.join(fake4, "configs", "nogoodix.config"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("# no Goodix here\n# CONFIG_HAKIOS_GOODIX is not set\n")
+    nog = os.path.join(work, "nogoodix")
+    shutil.copyfile(cfg, nog)
+    r = run("merge", "nogoodix", "--config", nog, root=fake4)
+    check("`# CONFIG_HAKIOS_GOODIX is not set` in a fragment leaves the driver out", r.returncode == 0 and
+          "# CONFIG_HAKIOS_GOODIX is not set" in open(nog).read() and "CONFIG_HAKIOS_BUTTONS=y" in open(nog).read(), r.stdout + r.stderr)
+    r = run("savedefconfig", "--config", nog, root=fake4)
+    check("savedefconfig keeps a driver that is left out", "# CONFIG_HAKIOS_GOODIX is not set" in r.stdout and "CONFIG_HAKIOS_BUTTONS" not in r.stdout, r.stdout)
+    r = run("help", "HAKIOS_SOUND")
+    check("help on a driver: its files, what it requires, what requires it",
+          "hakios.sound.c" in r.stdout and "requires: CONFIG_HAKIOS_ADSP, CONFIG_HAKIOS_SPEAKER" in r.stdout and "CONFIG_HAKIOS_MIC" in r.stdout, r.stdout)
+    # `kernel`: into a tree that has what XNU's config reads, as apply.sh leaves it before the first run (loose hakios lines)
+    tree = os.path.join(work, "tree")
+    for d in ("bsd/conf", "iokit/conf", "config", "bsd/dev"):
+        os.makedirs(os.path.join(tree, d))
+    with open(os.path.join(tree, "bsd/conf/files"), "w") as f:
+        f.write("bsd/dev/a.c standard\nbsd/dev/hakios.input.c\t\tstandard\nbsd/dev/hakios.goodix.c\tstandard\nbsd/dev/z.c standard\n")
+    with open(os.path.join(tree, "iokit/conf/files"), "w") as f:
+        f.write("iokit/Kernel/A.cpp optional iokitcpp\niokit/Kernel/hakios.gpu.cpp optional iokitcpp\n")
+    r = run("kernel", "--tree", tree, "--config", nog)
+    master = open(os.path.join(tree, "config/MASTER.hakios")).read()
+    files = open(os.path.join(tree, "bsd/conf/files")).read()
+    check("kernel: the choice is a list of attributes doconf expands, and an `options` line for every driver",
+          r.returncode == 0 and "#  HAKIOS_DRIVERS = [ " in master and " hakios_buttons " in master and " hakios_goodix " not in master and
+          "options\t\tHAKIOS_GOODIX" in master and "# <hakios_goodix>" in master, r.stdout + r.stderr + master)
+    check("kernel: conf/files has one block, a driver's files `optional hakios_<name>`, the rest of the file as it was",
+          files.startswith("bsd/dev/a.c standard\n" + hc.FILES_BEGIN) and files.rstrip().endswith("bsd/dev/z.c standard") and
+          "bsd/dev/hakios.goodix.c                  optional hakios_goodix" in files and "bsd/dev/hakios.input.c                   standard" in files and
+          "iokit/Kernel/hakios.gpu.cpp              optional hakios_adreno iokitcpp" in open(os.path.join(tree, "iokit/conf/files")).read(), files)
+    listed_line = [l for l in open(os.path.join(tree, "bsd/dev/hakios.drivers.h")) if l.startswith("#define HAKIOS_DRIVERS_LIST")]
+    check("kernel: the header kern.hakios.drivers comes from", listed_line and " buttons " in listed_line[0] and "goodix" not in listed_line[0], listed_line)
+    r = run("kernel", "--tree", tree, "--config", nog)
+    check("kernel: run again, it writes nothing (an unchanged choice rebuilds nothing)", r.returncode == 0 and "written" not in r.stdout, r.stdout)
+    r = run("kernel", "--tree", tree, "--config", os.path.join(work, "nosuch"))
+    check("kernel: without a .config every driver is built", " hakios_goodix " in open(os.path.join(tree, "config/MASTER.hakios")).read(), r.stdout + r.stderr)
+    bad = os.path.join(work, "badchoice")
+    shutil.copyfile(nog, bad)
+    with open(bad, "a") as f:
+        f.write("# CONFIG_HAKIOS_ADSP is not set\n")
+    r = run("kernel", "--tree", tree, "--config", bad)
+    check("kernel: refuses a choice a driver's requires breaks", r.returncode != 0 and "requires CONFIG_HAKIOS_ADSP" in r.stdout, r.stdout + r.stderr)
 
     # help, show, list
     r = run("help", "gpu")

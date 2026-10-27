@@ -20,6 +20,8 @@
 !/COMPLIANCE.md
 !/THIRD_PARTY_LICENSES.md
 !/devices/
+!/socs/
+!/uefi/
 !/drivers/
 !/docs/
 !/xl
@@ -102,7 +104,7 @@ __pycache__/
 !/xnuloader/mkidentity.sh
 
 # the phone vendor's UEFI drivers, and the UEFI image built with them: proprietary, so never tracked. They
-# stay on the disk of whoever extracted them from their own phone (devices/redwood/uefi/README.md).
+# stay on the disk of whoever extracted them from their own phone (uefi/README.md).
 /devices/*/uefi/files/Binaries/*/*
 !/devices/*/uefi/files/Binaries/*/README.md
 /devices/*/prebuilt/SILICIUM_UEFI.fd

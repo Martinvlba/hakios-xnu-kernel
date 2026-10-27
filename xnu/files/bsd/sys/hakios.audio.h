@@ -74,7 +74,7 @@ void hakios_speaker_quiesce(void);     /* powered down at once, without sleeping
 uint32_t hakios_speaker_monitor(bool tell);
 
 /*
- * The speakers' guard (drivers/storage/hakios.guard.c): what the samples go through in the feeder on their
+ * The speakers' guard (drivers/audio/hakios.guard.c): what the samples go through in the feeder on their
  * way to the amplifiers, for want of the DSP's speaker protection. Levels in eighths of a dB.
  */
 #define HAKIOS_GUARD_SILENT    0xffffffffu     /* the amplifiers are off: nothing reaches the speakers */

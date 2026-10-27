@@ -38,4 +38,13 @@ while read -r sub tree _; do
 	cp -p "$HERE/../drivers/$sub/$(basename "$tree")" "$tree"
 	NDRIVERS=$((NDRIVERS + 1))
 done < "$HERE/../drivers/map"
+# the drivers of the SoC and device repositories checked out (socs/*/drivers/, devices/*/drivers/)
+python3 "$HERE/../tools/hakios-config.py" external-files | while IFS="$(printf '\t')" read -r src tree; do
+	mkdir -p "$(dirname "$tree")"
+	cp -p "$src" "$tree"
+done
+# which of them are built is the configuration's (drivers/*/conf, CONFIG_HAKIOS_*): put into the tree as XNU reads it.
+# What that writes is made again for every build, so it is kept out of the work that xnu/export.sh saves.
+printf '%s\n' config/MASTER.hakios bsd/dev/hakios.drivers.h >> .git/info/exclude
+python3 "$HERE/../tools/hakios-config.py" kernel --tree "$DIR"
 echo "apply.sh: $DIR: $TAG + $(grep -c '^diff --git' "$HERE/hakios.patch") changed and $(find "$HERE/files" -type f | wc -l) new files + $NDRIVERS drivers"

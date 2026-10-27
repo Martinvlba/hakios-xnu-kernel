@@ -1,0 +1,8 @@
+# drivers/haptic/conf: the vibration motor.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+driver HAPTIC
+	file    bsd/dev/hakios.haptic.c
+	help    the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms
+	help    from fw-haptic/

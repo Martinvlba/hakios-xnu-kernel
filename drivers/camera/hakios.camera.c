@@ -1107,7 +1107,7 @@ ctab_load(void)
 {
 	const uint8_t *at, *end;
 
-	ctab = (const struct ctab_head *)hakios_wifi_file(hw->tab, &ctab_size);
+	ctab = (const struct ctab_head *)hakios_image_file("fw", hw->tab, &ctab_size, NULL);
 	if (ctab == NULL || ctab_size < sizeof(*ctab) || memcmp(ctab->magic, "RWCTAB02", 8) != 0 || ctab->modes == 0 ||
 	    ctab->modes > 16) {
 		say("camera: no %s (RWCTAB02) in fw/ of the small image (made from fw-camera/ when it is built)\n", hw->tab);

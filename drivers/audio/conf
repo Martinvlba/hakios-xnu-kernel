@@ -1,0 +1,32 @@
+# drivers/audio/conf: the audio DSP, the speakers, the microphones, and /dev/hakios-audio.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+standard bsd/dev/hakios.audio.c
+	help    /dev/hakios-audio, the sound iOS plays, to whatever plays it; and where the camera, flashlight, motor
+	help    and speaker drivers are started from
+
+driver ADSP
+	file    bsd/dev/hakios.adsp.c
+	help    the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too.
+	help    Needs the DSP's firmware from the phone (fw-audio/)
+
+driver SPEAKER
+	file    bsd/dev/hakios.speaker.c
+	help    the two speaker amplifiers on I2C, and their watch of temperature and battery
+
+driver SOUND
+	file    bsd/dev/hakios.sound.c
+	file    bsd/dev/hakios.guard.c
+	requires ADSP SPEAKER
+	help    the speakers playing (sound=N): what the DSP's services are told, the feeder, and the speakers' guard
+	help    that limits what the amplifiers get
+
+driver MIC
+	file    bsd/dev/hakios.mic.c
+	requires ADSP SOUND
+	help    the microphones, through the audio DSP (mic=N)
+
+driver VIRTIO_SOUND
+	file    bsd/dev/hakios.virtio_sound.c
+	help    QEMU's virtio sound device as the player of /dev/hakios-audio (virtio_sound=1). QEMU only

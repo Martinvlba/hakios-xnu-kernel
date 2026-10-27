@@ -2,8 +2,10 @@
 
 A Linux kernel is configured with a `.config` made from a defconfig, and an Android kernel is put together from layers: the
 common kernel's `gki_defconfig`, the SoC vendor's fragment, the device's. This kernel does the same, with one difference that
-is the whole design: **its options are not compiled in.** XNU takes them from the boot-arguments, so a configuration here is
-a file of `CONFIG_*` symbols that `tools/hakios-config.py` turns into the kernel's command line.
+is most of the design: **most of its options are not compiled in.** XNU takes them from the boot-arguments, so most of a
+configuration here is `CONFIG_*` symbols that `tools/hakios-config.py` turns into the kernel's command line. The exception is
+the drivers themselves: `CONFIG_HAKIOS_<NAME>` decides whether a driver is compiled into the kernel at all, through XNU's own
+`options` and `conf/files` ([drivers-config.md](drivers-config.md)), so that a device's defconfig builds the drivers that phone has.
 
 ```
 configs/defconfig             what every configuration starts from: the OPEN one (nothing of a phone's own, one core)
@@ -11,6 +13,7 @@ configs/common_defconfig      THE COMMON KERNEL: every setting there is, each wi
 configs/sc7280.config         the Qualcomm SC7280 family (SM7325, QCM6490): eight cores, the sensors, the chip's identity
 configs/redwood.config        the POCO X5 Pro 5G: its vibration motor, where its modem's buffer is
 configs/redwood_defconfig     a phone: #include common_defconfig, sc7280.config, redwood.config (three lines)
+configs/qemu_defconfig        QEMU's virt machine: the phone's drivers left out of the kernel (CONFIG_HAKIOS_*)
 configs/open.config           fragment: the open profile (CONFIG_FIRMWARE="none")
 configs/virt.config           fragment: QEMU's virt machine (virtio network)
 configs/trace.config          fragment: log a line for each of the first frames on the network interfaces
@@ -38,7 +41,8 @@ The same without make: `tools/hakios-config.py defconfig|merge|args|check|show|n
 
 ## What a symbol is
 
-`CONFIG_GPU=y` is the argument `gpu=1`; `CONFIG_CPUS=8` is `cpus=8`; `CONFIG_MODEM_BUFFER=0xa8000000` is
+`CONFIG_HAKIOS_GOODIX=y` is not an argument: it builds the touch driver into the kernel ([drivers-config.md](drivers-config.md)).
+Every other symbol is one: `CONFIG_GPU=y` is the argument `gpu=1`; `CONFIG_CPUS=8` is `cpus=8`; `CONFIG_MODEM_BUFFER=0xa8000000` is
 `modem_buffer=0xa8000000`. A symbol that is `# CONFIG_X is not set` is left out, and the kernel's own default applies.
 Three symbols are facts about the build, not arguments: `CONFIG_DEVICE`, `CONFIG_SOC` (it goes into the kernel's version
 string, see [versioning.md](versioning.md)) and `CONFIG_FIRMWARE`.
@@ -63,11 +67,14 @@ each under a comment that says what it does, in groups (GPU and display, Wi-Fi, 
 thousand lines long, and why a reader of one file can see every setting the kernel has. It is made, not written:
 
 ```bash
-tools/hakios-config.py listing common > configs/common_defconfig     # after changing a value or adding a driver
+tools/hakios-config.py listing common -o configs/common_defconfig    # after changing a value or adding a driver
 tools/hakios-config.py complete common                               # it must name every symbol (CI runs this, in the tests)
 ```
 
-Change a value by editing the line and running `listing common` again: the file reads back the same.
+Change a value by editing the line and running `listing common -o configs/common_defconfig` again: the file reads back the
+same. Not `listing common > configs/common_defconfig`: the shell empties the file before the tool reads it, and what is written is
+then `configs/defconfig` alone. That is how `common_defconfig` once lost the values of the phone line (the GPU, Wi-Fi, audio and
+modem switches, `CONFIG_FIRMWARE="device"`), and why `-o` exists.
 
 ## `#include`: putting a device together
 
@@ -102,24 +109,27 @@ word is `name=value` with no space, quote or backslash in it; and the words coun
 | the common kernel | `gki_defconfig` | `common_defconfig` |
 | a SoC, a device | vendor and device fragments, `build.config` | `sc7280.config`, `redwood.config`, `#include` |
 | a fragment | `kernel/configs/*.config`, `merge_config.sh` | `configs/*.config`, `make NAME.config` |
-| the result | `.config`, compiled in | `.config`, becomes the boot-arguments |
+| the result | `.config`, compiled in | `.config`: the drivers compiled in (`CONFIG_HAKIOS_*`), the rest becomes the boot-arguments |
+| a driver's options | `Kconfig` + `obj-$(CONFIG_X) += x.o` | `drivers/<subsystem>/conf`, XNU's `options` and `optional` in `conf/files` |
 | a minimal config | `make savedefconfig` | `make savedefconfig` |
 | a command line baked in | `CONFIG_CMDLINE` | `CONFIG_BOOTARGS` (names checked) |
 | an option that needs a blob | `CONFIG_EXTRA_FIRMWARE` | `CONFIG_FIRMWARE="device"` / `"none"`, and `needs` |
 | the version | `uname -r` | `kern.hakios.version`, `kernel.ver=` |
 | how many options | thousands, in Kconfig | about 310, one for each argument the source reads |
 
-The last row is the honest one. This is not Kconfig and has no thousand options: the kernel is not built from its options. The number
-of symbols is the number of arguments the code reads, and it grows when a driver adds one.
+The last row is the honest one. This is not Kconfig and has no thousand options: apart from which drivers it has, the kernel is not
+built from its options. The number of symbols is the number of arguments the code reads, plus one for each driver.
 
 ## A new device
 
 `tools/new-device.py` makes `devices/<name>/` from a phone's own device tree. Its configuration is a fragment and a defconfig of a few
 lines: `configs/<name>.config` with what is true of that phone only, and `configs/<name>_defconfig` that includes the common kernel, the
-SoC's fragment and that one, and nothing more until the phone has been shown to do it.
+SoC's fragment and that one, and nothing more until the phone has been shown to do it. The fragment is also where the phone leaves out
+the drivers of hardware it does not have or that has not been ported to it (`# CONFIG_HAKIOS_GOODIX is not set`: see
+[drivers-config.md](drivers-config.md)).
 
 ## What a configuration does not do
 
-It does not make a driver exist, and it does not make a driver work on a phone it was not written for. A symbol turns
-on a part of the kernel that is already there; whether it works on a given phone is what [the device's page](../devices)
+It does not make a driver exist, and it does not make a driver work on a phone it was not written for. A symbol builds
+in, or turns on, a part of the kernel that is already there; whether it works on a given phone is what [the device's page](../devices)
 and the tests say, and the project does not claim a result it has not seen.

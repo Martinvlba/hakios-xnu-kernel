@@ -1,8 +1,8 @@
 #
 # HakiOS common defconfig: every setting there is, with what it does.
-# Made by tools/hakios-config.py listing common; the values are the ones that file sets, and tests/CI check that it names every symbol.
+# Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 313 symbols in 17 groups; 2 are set.
+# 341 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -16,14 +16,93 @@
 # CONFIG_SOC is not set
 
 # "device": options may use firmware pulled from your own phone (fw-*/); "none": the open configuration, nothing of ...
-CONFIG_FIRMWARE="none"
+CONFIG_FIRMWARE="device"
+
+#
+# Drivers built in (25)
+#
+
+# the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
+CONFIG_HAKIOS_ADSP=y
+
+# the two speaker amplifiers on I2C, and their watch of temperature and battery [hakios.speaker.c]
+CONFIG_HAKIOS_SPEAKER=y
+
+# the speakers playing (sound=N): what the DSP's services are told, the feeder, and the speakers' guard that limits ... [hakios.sound.c, hakios.guard.c; requires CONFIG_HAKIOS_ADSP, CONFIG_HAKIOS_SPEAKER]
+CONFIG_HAKIOS_SOUND=y
+
+# the microphones, through the audio DSP (mic=N) [hakios.mic.c; requires CONFIG_HAKIOS_ADSP, CONFIG_HAKIOS_SOUND]
+CONFIG_HAKIOS_MIC=y
+
+# QEMU's virtio sound device as the player of /dev/hakios-audio (virtio_sound=1). QEMU only [hakios.virtio_sound.c]
+CONFIG_HAKIOS_VIRTIO_SOUND=y
+
+# the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1) [hakios.bt.c]
+CONFIG_HAKIOS_BT=y
+
+# the cameras (cam=N): the sensors on the CCI bus and the ISP's interface. The sensors, their tables (fw-camera/) and ... [hakios.camera.c]
+CONFIG_HAKIOS_CAMERA=y
+
+# the flashlight: the flash LED module of the PM8350C (torch=1); it stays off while the battery is too warm [hakios.torch.c]
+CONFIG_HAKIOS_TORCH=y
+
+# the chip's identity from the firmware's shared memory: kern.hakios.soc_* (socinfo=1). Any Qualcomm SoC that keeps ... [hakios.socinfo.c]
+CONFIG_HAKIOS_SOCINFO=y
+
+# the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa and the window ... [hakios.adreno.c, hakios.gpu.cpp]
+CONFIG_HAKIOS_ADRENO=y
+
+# the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms from fw-haptic/ [hakios.haptic.c]
+CONFIG_HAKIOS_HAPTIC=y
+
+# QEMU's virtio tablet and keyboard as the touch screen and the buttons (virtio_input=1). QEMU only [hakios.virtio_input.c]
+CONFIG_HAKIOS_VIRTIO_INPUT=y
+
+# the touch screen: a Goodix GT9916 ("Berlin-D") or a FocalTech FT3680 on SPI (touchscreen=1). The bus, pins and ... [hakios.goodix.c]
+CONFIG_HAKIOS_GOODIX=y
+
+# the power and volume keys, read from the PMIC through the SPMI arbiter (buttons=1) [hakios.buttons.c]
+CONFIG_HAKIOS_BUTTONS=y
+
+# QMI messages over the IPC router: how the Wi-Fi firmware's service and the modem's are spoken to [hakios.qmi.c]
+CONFIG_HAKIOS_QMI=y
+
+# the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the ... [hakios.mpss.c, hakios.cell.c, hakios.nas.c, hakios.ipa.c; requires CONFIG_HAKIOS_QMI, CONFIG_HAKIOS_UFS]
+CONFIG_HAKIOS_MODEM=y
+
+# QEMU's virtio network device as the link behind en0 (virtio_net=1). QEMU only [hakios.virtio_net.c]
+CONFIG_HAKIOS_VIRTIO_NET=y
+
+# the battery: kern.hakios.battery_*, and HakiosBattery, the IOPMPowerSource iOS reads the charge from (the state ... [hakios.battery.c, hakios.battery.cpp]
+CONFIG_HAKIOS_BATTERY=y
+
+# the clock of the cores the kernel runs on (cpufreq=1), and the memory bus's votes (ddr=) [hakios.cpufreq.c]
+CONFIG_HAKIOS_CPUFREQ=y
+
+# the SoC's temperature sensors (thermal=1): kern.hakios.thermal_*, and the run handed back to the loader when the ... [hakios.thermal.c]
+CONFIG_HAKIOS_THERMAL=y
+
+# the blocks of the power-management chips the SPMI arbiter shows, and the PMIC's clock (pmic=1); read only [hakios.pmic.c]
+CONFIG_HAKIOS_PMIC=y
+
+# the run handed back to the loader before the battery is flat (battery_stop=<percent>) [hakios.battguard.c]
+CONFIG_HAKIOS_BATTGUARD=y
+
+# the phone's UFS flash: a block device for each GPT partition (ufs=1, ufs=2), and the UFS host controller driven from ... [hakios.ufs.c, hakios.ufshc.c]
+CONFIG_HAKIOS_UFS=y
+
+# a disk image of the host as /dev/rvblk0 (virtio_blk=1). QEMU only [hakios.virtio_blk.c]
+CONFIG_HAKIOS_VIRTIO_BLK=y
+
+# Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c, hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp; requires CONFIG_HAKIOS_QMI]
+CONFIG_HAKIOS_WIFI=y
 
 #
 # CPU, memory and boot (21)
 #
 
 # CPU cores the kernel uses, 1 to 8; one if not set
-CONFIG_CPUS=1
+# CONFIG_CPUS is not set
 
 # the core the kernel runs on, 0 to 7; 7 is the biggest core (the loader keeps core 0)
 # CONFIG_BOOTCPU is not set
@@ -90,7 +169,7 @@ CONFIG_CPUS=1
 #
 
 # the phone's storage: 1 a survey, read only; 2 the loader's block service, through which the kernel reads it (the ...
-# CONFIG_UFS is not set
+CONFIG_UFS=2
 
 # let the kernel write, to the partition `darwin` and nowhere else (writes to the phone's storage: it is the one ... [requires CONFIG_UFS=2]
 # CONFIG_UFS_WRITE is not set
@@ -226,7 +305,7 @@ CONFIG_CPUS=1
 #
 
 # the touch screen, and the power and volume buttons
-# CONFIG_TOUCHSCREEN is not set
+CONFIG_TOUCHSCREEN=y
 
 # read by hakios.buttons.c (kernel)
 # CONFIG_BUTTONS is not set
@@ -250,11 +329,11 @@ CONFIG_CPUS=1
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (67)
+# GPU and display (68)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
-# CONFIG_GPU is not set
+CONFIG_GPU=y
 
 # read by hakios.adreno.c (kernel)
 # CONFIG_ADRENO is not set
@@ -424,6 +503,9 @@ CONFIG_CPUS=1
 # read by hakios.adreno.c (kernel)
 # CONFIG_GPU_LOG is not set
 
+# only the program metal_test (userland/src/metal_test.m): the safe level, for seeing what Metal does with the device
+# CONFIG_METAL is not set
+
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_REC_MB is not set
 
@@ -459,10 +541,10 @@ CONFIG_CPUS=1
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
-# CONFIG_ADSP is not set
+CONFIG_ADSP=y
 
 # the speakers (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
-# CONFIG_SOUND is not set
+CONFIG_SOUND=4
 
 # the microphone (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
 # CONFIG_MIC is not set
@@ -559,7 +641,7 @@ CONFIG_CPUS=1
 #
 
 # Wi-Fi: the radio, its driver, a connection (also fw-wifi/mac and fw-wifi/network) [needs fw-wifi/ from the phone]
-# CONFIG_WIFI is not set
+CONFIG_WIFI=y
 
 # start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, ...
 # CONFIG_WIFI_AGAIN is not set
@@ -656,10 +738,10 @@ CONFIG_CPUS=1
 #
 
 # the modem beside the system: its firmware, file systems, IPA, SIM, NAS [needs fw-modem/ from the phone] [requires CONFIG_UFS=2]
-# CONFIG_MODEM is not set
+CONFIG_MODEM=y
 
 # start the modem although a kernel before this one left it shut down [requires CONFIG_MODEM]
-# CONFIG_MODEM_AGAIN is not set
+CONFIG_MODEM_AGAIN=y
 
 # the modem's RMTFS buffer, an address below 4 GB (0xa8000000 on the reference phone) [requires CONFIG_MODEM]
 # CONFIG_MODEM_BUFFER is not set
@@ -969,11 +1051,17 @@ CONFIG_CPUS=1
 # CONFIG_UFS_PROBE is not set
 
 #
-# User space (11)
+# User space (13)
 #
 
 # read by inject_sb.c (user space)
 # CONFIG_AUTOUNLOCK is not set
+
+# read by hakios.bt.c (kernel)
+# CONFIG_BT is not set
+
+# the second look this many seconds later (0: no second look; 30)
+# CONFIG_BT_AGAIN is not set
 
 # CoreAnimation's frame clock from the display driver's refresh notifications
 # CONFIG_CA_VBL is not set

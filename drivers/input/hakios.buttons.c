@@ -123,25 +123,7 @@ wr(vm_offset_t address, uint32_t value)
 
 static vm_offset_t arb_core, arb_cnfg, arb_observer;
 
-/*
- * One transfer at a time through the arbiter for this system, whoever asks (the flashlight's
- * driver, drivers/camera/hakios.torch.c, as well): with two at once the arbiter drops one ("the transfer
- * was dropped"), as Linux never lets happen (one lock for the bus).
- */
-static LCK_GRP_DECLARE(spmi_lck_grp, "hakios-spmi");
-static LCK_SPIN_DECLARE(spmi_lock, &spmi_lck_grp);
-
-void
-hakios_spmi_lock(void)
-{
-	lck_spin_lock(&spmi_lock);
-}
-
-void
-hakios_spmi_unlock(void)
-{
-	lck_spin_unlock(&spmi_lock);
-}
+/* one transfer at a time through the arbiter: hakios_spmi_lock() (drivers/core/hakios.platform.c) */
 
 struct peripheral {
 	const char *    name;

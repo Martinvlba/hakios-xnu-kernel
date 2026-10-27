@@ -1,6 +1,6 @@
 # HakiOS defconfig for the POCO X5 Pro 5G (redwood, SM7325, devices/redwood): the common kernel's configuration, the SC7280 family's
 # facts and this phone's own, put together the way Android puts a device's kernel configuration together.
-# What the project's own phone line uses, with the sensors read (and the run stopped at 105 degrees) as the only addition.
+# What the project's own phone line uses, with the chip's identity and the sensors read as the only additions (stopping a hot run, CONFIG_THERMAL_STOP, is not set).
 # Needs the phone's own firmware pulled from your phone (devices/redwood/pull-firmware.sh): `tools/hakios-config.py needs`.
 #include common_defconfig
 #include sc7280.config

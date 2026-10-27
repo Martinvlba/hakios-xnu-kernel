@@ -206,6 +206,11 @@ The kernel's settings are layered the way an Android kernel's are: the common ke
 Then `make {name}_defconfig`. Turn on only what this phone has been shown to do; `tools/hakios-config.py check` says what the
 choice needs.
 
+The drivers are part of the configuration too (`docs/drivers-config.md`): every one is built unless a configuration leaves it out,
+and the addresses, pins and rails in each are the reference phone's. Leave out in `configs/{name}.config` what has not been
+ported to this phone yet (`# CONFIG_HAKIOS_GOODIX is not set`, ...; `configs/qemu_defconfig` leaves out all of them), and put
+each one back when it has been made to work here. `tools/hakios-config.py show` lists what is built in.
+
 ## Firmware
 
 Pulled from your own phone, never committed: `devices/{reference}/pull-firmware.sh`, or

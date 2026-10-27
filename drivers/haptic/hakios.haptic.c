@@ -563,7 +563,7 @@ static bool
 load_waveforms(void)
 {
 	uint64_t size = 0;
-	const uint8_t *file = hakios_wifi_file("aw8697_haptic.bin", &size);
+	const uint8_t *file = hakios_image_file("fw", "aw8697_haptic.bin", &size, NULL);
 	uint32_t sum = 0, base, length;
 	uint8_t address[2], back[64];
 

@@ -1,0 +1,21 @@
+# drivers/core/conf: what is part of every kernel of this port, and the chip's identity.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+standard bsd/dev/hakios.version.c
+	help    kern.hakios.version, and the version in the boot log
+
+standard bsd/dev/hakios.platform.c
+	help    what the drivers share (the locks of the PMIC arbiter, the always-on processor, RPMh and the SMMU), and
+	help    kern.hakios.drivers, the list of the drivers built in
+
+standard bsd/dev/hakios.stubs.c
+	help    what the rest of the kernel calls in a driver that is left out: nothing, and "not there"
+
+standard iokit/Kernel/hakios.stubs.cpp iokitcpp
+	help    the same, for the calls that are C++ (the display asking whether the GPU is done with a surface)
+
+driver SOCINFO
+	file    bsd/dev/hakios.socinfo.c
+	help    the chip's identity from the firmware's shared memory: kern.hakios.soc_* (socinfo=1). Any Qualcomm SoC
+	help    that keeps SMEM item 137; where the shared memory is comes from soc_smem=

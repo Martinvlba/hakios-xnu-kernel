@@ -256,7 +256,7 @@ userland/src/audio_plugin.c
 
 ## Fix status
 
-Edits only in drivers/audio/hakios.{audio,sound,speaker,mic,virtio_sound}.c and drivers/storage/hakios.guard.c. Nothing was compiled or run.
+Edits only in drivers/audio/hakios.{audio,sound,speaker,mic,virtio_sound}.c and drivers/audio/hakios.guard.c (then in drivers/storage/). Nothing was compiled or run.
 
 - S-01 FIXED. Three layers: audio.c audio_ioctl clamps the user's `below` to HAKIOS_AUDIO_BELOW_MAX (90 * 8 = speaker.c VOLUME_LOWEST, the documented "sound_below=720" floor); sound.c watch() now uses a saturating below_with(extra) instead of `below + extra` (three places), and guard_level() never passes a level equal to the HAKIOS_GUARD_SILENT sentinel; speaker.c hakios_speaker_volume() clamps `below` to VOLUME_LOWEST before `volume_at + below`, so the fade loop's target can no longer wrap under volume_at and the loop always ends. guard.c block(): `2 * attenuation` no longer wraps in 32 bits (the blind-guard range from item 5). Not done: an iteration limit on the fade loop (not needed once the target is in range) and a guard_level() clamp beyond the sentinel one.
 - S-02 FIXED with S-01 (clamp of `extra` in audio.c, saturating sum in sound.c).

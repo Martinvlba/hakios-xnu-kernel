@@ -10,7 +10,7 @@
 open     prebuilt/mach.development.bcm2837        the kernel, built from Apple's open xnu-8796.121.2 plus xnu/hakios.patch and xnu/files: APSL-2.0, corresponding source here and at Apple
 open     prebuilt/loader.efi                      the boot loader, built from xnuloader/loader.c: MIT
 open     prebuilt/userland/*                      our programs and libraries, built from userland/src: MIT
-open     devices/redwood/prebuilt/BootShim.bin   built from the shim of Mu-Silicium with our change (devices/redwood/uefi/mu-silicium.patch): BSD-2-Clause-Patent
+open     devices/redwood/prebuilt/BootShim.bin   built from the shim of Mu-Silicium with our change (uefi/hakios.patch): BSD-2-Clause-Patent
 
 # --- a description of the hardware ------------------------------------------------------------------------
 pending  devices/redwood/prebuilt/device-tree.dtb          the phone's device tree, compiled from Linux sources that are GPL-2.0; confirm the headers, or have each user pull it from their own phone as tools/soc-args.py already does

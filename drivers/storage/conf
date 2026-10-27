@@ -1,0 +1,23 @@
+# drivers/storage/conf: the phone's flash, and the block devices of the images the port boots from.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+standard bsd/dev/hakios.image.c
+	help    a file of one of the RAM disks by path, for the drivers that load firmware before there is a root
+
+standard bsd/dev/hakios.sparse.c
+	help    /dev/rsp0, a block device over an image that holds only some of its blocks (apfs_sparse=)
+
+standard bsd/dev/hakios.apfs_check.c apfs
+	help    a walk of the APFS volume on /dev/rvblk0 through VFS, to compare with tools/apfs/apfs.py
+
+driver UFS
+	file    bsd/dev/hakios.ufs.c
+	file    bsd/dev/hakios.ufshc.c
+	help    the phone's UFS flash: a block device for each GPT partition (ufs=1, ufs=2), and the UFS host controller
+	help    driven from the kernel (ufs_native=). THE ONLY CODE OF THE KERNEL THAT MAY WRITE TO THE PHONE
+	help    (ufs_write=1, the partition `darwin` only): see tools/provenance.allow
+
+driver VIRTIO_BLK
+	file    bsd/dev/hakios.virtio_blk.c
+	help    a disk image of the host as /dev/rvblk0 (virtio_blk=1). QEMU only

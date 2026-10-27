@@ -182,16 +182,11 @@ extern kern_return_t thread_terminate(thread_t thread);
 static LCK_GRP_DECLARE(wifi_lock_group, "hakios-wifi");
 
 /*
- * What the audio DSP's start (hakios.adsp.c) uses as well, while this may be at work beside it:
- * the mailbox to the always-on processor, one message at a time, and the allocation of items in
- * the shared memory (whose hardware lock both take under the same number, so it does not keep
- * the two apart).
+ * What the audio DSP's start (hakios.adsp.c), the modem's and the sound's use as well, while this may be at work beside
+ * them: the always-on processor's mailbox, the shared memory's allocation, RPMh's sequencer and the SMMU's free match
+ * registers. They are drivers/core/hakios.platform.c's, so that each of those drivers can be built without this one.
  */
-LCK_MTX_DECLARE(hakios_aop_mailbox_lock, &wifi_lock_group);
-LCK_MTX_DECLARE(hakios_smem_alloc_lock, &wifi_lock_group);
-LCK_MTX_DECLARE(hakios_rsc_lock, &wifi_lock_group);      /* RPMh's sequencer (TCS 0 of the RSC): the audio DSP's and the modem's drivers both ask through it */
-/* ... and the sound's (hakios.sound.c): a free match register and context of the SMMU, found and taken */
-LCK_MTX_DECLARE(hakios_smmu_lock, &wifi_lock_group);
+extern lck_mtx_t hakios_aop_mailbox_lock, hakios_smem_alloc_lock, hakios_rsc_lock, hakios_smmu_lock;
 
 static uint32_t last_step, pause_ms = 2200, fine, watch_seconds = 3;
 static uint32_t step;                   /* the one being performed */

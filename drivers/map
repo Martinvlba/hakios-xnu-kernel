@@ -19,7 +19,6 @@ storage  bsd/dev/hakios.ufshc.c
 storage  bsd/dev/hakios.ufshc.h
 storage  bsd/dev/hakios.sparse.c
 storage  bsd/dev/hakios.image.c
-storage  bsd/dev/hakios.guard.c
 storage  bsd/dev/hakios.apfs_check.c
 storage  bsd/dev/hakios.virtio_blk.c
 
@@ -37,6 +36,7 @@ audio    bsd/dev/hakios.sound.c
 audio    bsd/dev/hakios.speaker.c
 audio    bsd/dev/hakios.mic.c
 audio    bsd/dev/hakios.virtio_sound.c
+audio    bsd/dev/hakios.guard.c
 
 power    bsd/dev/hakios.battery.c
 power    iokit/Kernel/hakios.battery.cpp
@@ -59,6 +59,9 @@ net      bsd/dev/hakios.net.c
 net      bsd/dev/hakios.virtio_net.c
 
 core     bsd/dev/hakios.version.c
+core     bsd/dev/hakios.platform.c
+core     bsd/dev/hakios.stubs.c
+core     iokit/Kernel/hakios.stubs.cpp
 core    bsd/dev/hakios.socinfo.c
 power   bsd/dev/hakios.thermal.c
 power   bsd/dev/hakios.pmic.c

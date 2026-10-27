@@ -58,6 +58,8 @@ battery_stop	k
 battery_stop_poll	k
 battmgr	k
 bootcpu	kl
+bt	k
+bt_again	k
 buttons	k
 buttons_steps	k
 ca_vbl	u
@@ -142,6 +144,7 @@ hv_wdt_pet	k
 loader_return_after	kl
 machine_name	k
 membench	k
+metal	ku
 mic	k
 mic_adc	k
 mic_input	k

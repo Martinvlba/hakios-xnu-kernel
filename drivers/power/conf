@@ -1,0 +1,26 @@
+# drivers/power/conf: the battery, the processor's clock, temperatures, the PMICs, the guards of a run left alone.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+driver BATTERY
+	file    bsd/dev/hakios.battery.c
+	file    iokit/Kernel/hakios.battery.cpp iokitcpp
+	help    the battery: kern.hakios.battery_*, and HakiosBattery, the IOPMPowerSource iOS reads the charge from
+	help    (the state comes from the audio DSP's battery manager, with adsp=1)
+
+driver CPUFREQ
+	file    bsd/dev/hakios.cpufreq.c
+	help    the clock of the cores the kernel runs on (cpufreq=1), and the memory bus's votes (ddr=)
+
+driver THERMAL
+	file    bsd/dev/hakios.thermal.c
+	help    the SoC's temperature sensors (thermal=1): kern.hakios.thermal_*, and the run handed back to the
+	help    loader when the phone gets too hot (thermal_stop=)
+
+driver PMIC
+	file    bsd/dev/hakios.pmic.c
+	help    the blocks of the power-management chips the SPMI arbiter shows, and the PMIC's clock (pmic=1); read only
+
+driver BATTGUARD
+	file    bsd/dev/hakios.battguard.c
+	help    the run handed back to the loader before the battery is flat (battery_stop=<percent>)

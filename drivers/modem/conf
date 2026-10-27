@@ -1,0 +1,16 @@
+# drivers/modem/conf: QMI, and the cellular modem.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+driver QMI
+	file    bsd/dev/hakios.qmi.c
+	help    QMI messages over the IPC router: how the Wi-Fi firmware's service and the modem's are spoken to
+
+driver MODEM
+	file    bsd/dev/hakios.mpss.c
+	file    bsd/dev/hakios.cell.c
+	file    bsd/dev/hakios.nas.c
+	file    bsd/dev/hakios.ipa.c
+	requires QMI UFS
+	help    the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1,
+	help    the SIM and the network registration. Research; needs fw-modem/ from the phone

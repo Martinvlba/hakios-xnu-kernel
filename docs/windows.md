@@ -43,7 +43,7 @@ from Git Bash.
 # WSL, in ~/hakios (a clone in WSL's own filesystem, with fw-*/ copied in):
 sysimage/fetch.sh                                        # iOS 16.5 from Apple's servers, ~9 min
 PREBUILT=1 REST=1 MODEM=1 SYSTEM=1 userland/build.sh     # root.apfs + system.apfs, ~4 min, no theos needed
-cp userland/root.apfs userland/system.apfs /mnt/d/.../hackios-xnu-kernel/userland/
+cp userland/root.apfs userland/system.apfs /mnt/d/.../hakios/userland/
 
 # Git Bash, in the Windows checkout:
 ./xl enter                  # Android -> fastboot -> the loader in RAM (also the unlock test)

@@ -7,9 +7,13 @@ Rules (each one is a way the layout went wrong while it was being made):
   - no file is listed twice, and no two files share a name (they would sit in one directory under it);
   - every listed file exists as drivers/<subsystem>/<name>;
   - every file under drivers/<subsystem>/ is listed (README.md excepted): an unlisted file would not reach the kernel;
-  - xnu/files/ holds no driver any more (a copy there would be applied over the one in drivers/ or the other way round).
+  - xnu/files/ holds no driver any more (a copy there would be applied over the one in drivers/ or the other way round);
+  - drivers/<subsystem>/conf (what the kernel is built with: docs/drivers-config.md) reads, names only files of its own
+    subsystem, and every .c and .cpp of drivers/map is built by exactly one `standard` line or `driver` of it: a file in
+    none would be in the tree and never compiled.
 usage: tools/drivers-check.py [--root DIR]      exit 0 if all is well, 1 and the list of problems if not
 """
+import importlib.util
 import os
 import sys
 
@@ -63,13 +67,46 @@ def check(root):
         if sub not in SUBSYSTEMS:
             problems.append("drivers/%s is not a known subsystem directory" % sub)
         for name in sorted(os.listdir(sub_dir)):
-            if name != "README.md" and (sub, name) not in listed:
+            if name not in ("README.md", "conf") and (sub, name) not in listed:
                 problems.append("drivers/%s/%s is not in drivers/map, so it would never reach the kernel" % (sub, name))
     for tree in seen_tree:
         stale = os.path.join(root, "xnu", "files", tree)
         if os.path.exists(stale):
             problems.append("xnu/files/%s: a driver must not also be kept here" % tree)
+    problems += check_conf(root, entries)
     return entries, problems
+
+
+def check_conf(root, entries):
+    """The conf files against the map: each compiled file built by one block, of the conf of its own subsystem."""
+    spec = importlib.util.spec_from_file_location("hakios_config", os.path.join(os.path.dirname(os.path.abspath(__file__)), "hakios-config.py"))
+    config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(config)
+    try:
+        drivers, standard = config.load_drivers(root)
+    except config.ConfigError as e:
+        return [str(e)]
+    built = {}
+    for path, _tags, sub, _help in standard:
+        built[path] = (sub, "standard")
+    for d in drivers:
+        if d.origin:                    # a SoC's or device's own: its repository's, not drivers/map's (hakios-device.py check)
+            continue
+        for path, _tags in d.files:
+            built[path] = (d.sub, "driver " + d.name)
+    problems = []
+    for sub, tree in entries:
+        if not tree.endswith((".c", ".cpp")):
+            continue
+        if tree not in built:
+            problems.append("%s is in drivers/map but no drivers/*/conf builds it (add it to drivers/%s/conf)" % (tree, sub))
+        elif built[tree][0] != sub:
+            problems.append("%s is drivers/%s's, but drivers/%s/conf builds it (%s)" % (tree, sub, built[tree][0], built[tree][1]))
+    mapped = {tree for _sub, tree in entries}
+    for path, (sub, what) in sorted(built.items()):
+        if path not in mapped:
+            problems.append("drivers/%s/conf builds %s (%s), which drivers/map does not list" % (sub, path, what))
+    return problems
 
 
 def main(argv):
@@ -82,7 +119,7 @@ def main(argv):
             print("drivers-check: " + p)
         print("drivers-check: %d problem(s)" % len(problems))
         return 1
-    print("drivers-check: %d drivers in %d subsystems, all listed, all present" % (
+    print("drivers-check: %d files in %d subsystems, all listed, all present, each built by one drivers/*/conf block" % (
         len(entries), len({s for s, _ in entries})))
     return 0
 

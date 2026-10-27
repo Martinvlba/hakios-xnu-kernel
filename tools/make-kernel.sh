@@ -19,7 +19,7 @@ KERNEL=${KERNEL:-xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach
 # stand above them (config_all and the recursion into config/, and the top-level `all`)
 unexpected_failures() {
 	grep -E '^make(\[[0-9]+\])?: \*\*\* ' "$1" |
-		grep -vE '\.symbolset\]|check_all_exports|config_all|_recurse_into_config|\[Makefile:[0-9]+: all\]'
+		grep -vE '\.symbolset\]|check_all_exports|config_all|_recurse_into_config|\[Makefile:[0-9]+: all\]|^make: \*\*\* \[all\] Error'
 }
 
 judge() { # judge LOG: 0 if the kernel is built and only the symbol-set steps failed
@@ -39,8 +39,12 @@ if [ "$1" = --judge ]; then
 	exit
 fi
 
-# what was edited in drivers/ goes into the kernel tree first (only what is newer than the tree's copy)
-[ ! -d xnu-src/xnu-8796.121.2 ] || xnu/sync-drivers.sh xnu-src/xnu-8796.121.2 || exit 1
+# what was edited in drivers/ goes into the kernel tree first (only what is newer than the tree's copy), and then the
+# drivers the .config builds (CONFIG_HAKIOS_*; every driver when there is no .config): docs/drivers-config.md
+if [ -d xnu-src/xnu-8796.121.2 ]; then
+	xnu/sync-drivers.sh xnu-src/xnu-8796.121.2 || exit 1
+	python3 tools/hakios-config.py kernel --tree xnu-src/xnu-8796.121.2 || exit 1
+fi
 log=${KERNEL_LOG:-xnu-build.log}
 ./xnu-build.sh -k "$@" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}

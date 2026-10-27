@@ -1,0 +1,12 @@
+# drivers/camera/conf: the cameras and the flashlight.
+# CONFIG_HAKIOS_<NAME>=y in a defconfig builds a driver into the kernel; "standard" files are always built.
+# tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
+
+driver CAMERA
+	file    bsd/dev/hakios.camera.c
+	help    the cameras (cam=N): the sensors on the CCI bus and the ISP's interface. The sensors, their tables
+	help    (fw-camera/) and the pins are the POCO X5 Pro's
+
+driver TORCH
+	file    bsd/dev/hakios.torch.c
+	help    the flashlight: the flash LED module of the PM8350C (torch=1); it stays off while the battery is too warm
