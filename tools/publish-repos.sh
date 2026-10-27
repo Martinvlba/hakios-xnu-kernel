@@ -9,7 +9,7 @@
 set -e
 DIR=${1:?usage: tools/publish-repos.sh DIR [OWNER]}
 OWNER=${2:-oosexgang}
-REPOS=${REPOS:-"hakios hakios-redwood hakios-uefi hakios-web"}
+REPOS=${REPOS:-"hakios hakios-sm7325 hakios-uefi hakios-web"}
 for r in $REPOS; do
 	[ -d "$DIR/$r/.git" ] || { echo "publish-repos: no $DIR/$r (tools/split-repos.sh makes the first four; the website is hakios-web)"; continue; }
 	url="https://github.com/$OWNER/$r.git"
