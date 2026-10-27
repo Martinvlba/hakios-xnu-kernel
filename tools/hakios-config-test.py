@@ -45,6 +45,13 @@ def args_of(out):
     return out.stdout.split()
 
 
+# The reference phone's configuration is what most of this checks against: its repositories (devices/redwood, socs/sc7280) are
+# their own, and a checkout of the common repository alone does not have them until `tools/hakios-device.py sync` clones them.
+if not (os.path.isdir(os.path.join(ROOT, "devices", "redwood", "configs")) and os.path.isdir(os.path.join(ROOT, "socs", "sc7280", "configs"))):
+    print("hakios-config-test: SKIPPED: it checks the reference phone's configuration, and devices/redwood and socs/sc7280 are not "
+          "checked out (tools/hakios-device.py sync redwood sc7280)")
+    sys.exit(0)
+
 work = tempfile.mkdtemp(prefix="hakios-config-test-")
 try:
     cfg = os.path.join(work, "cfg")

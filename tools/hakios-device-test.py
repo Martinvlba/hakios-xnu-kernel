@@ -39,22 +39,23 @@ try:
     for t in ("hakios-config.py", "hakios-device.py", "boot-args.py", "kernel-version.py"):
         shutil.copy(os.path.join(HERE, t), os.path.join(root, "tools", t))
     shutil.copytree(os.path.join(ROOT, "configs"), os.path.join(root, "configs"))
-    shutil.copytree(os.path.join(ROOT, "socs"), os.path.join(root, "socs"))
+    # a SoC of the test's own, so that the test needs no SoC or device repository checked out (the common one alone runs it)
+    os.makedirs(os.path.join(root, "socs", "fakesoc", "configs"))
+    open(os.path.join(root, "socs", "fakesoc", "soc.conf"), "w").write("soc fakesoc\n\ttitle       a SoC made for the test\n")
+    open(os.path.join(root, "socs", "fakesoc", "configs", "fakesoc.config"), "w").write(
+        "# HakiOS fragment: the test's SoC.\nCONFIG_SOC=\"fakesoc\"\nCONFIG_CPUS=8\nCONFIG_THERMAL=y\nCONFIG_HAKIOS_THERMAL=y\n")
     for sub in os.listdir(os.path.join(ROOT, "drivers")):
         if os.path.isfile(os.path.join(ROOT, "drivers", sub, "conf")):
             os.makedirs(os.path.join(root, "drivers", sub))
             shutil.copy(os.path.join(ROOT, "drivers", sub, "conf"), os.path.join(root, "drivers", sub, "conf"))
-    shutil.copytree(os.path.join(ROOT, "devices", "redwood", "configs"), os.path.join(root, "devices", "redwood", "configs"))
-    shutil.copy(os.path.join(ROOT, "devices", "redwood", "device.conf"), os.path.join(root, "devices", "redwood"))
-    open(os.path.join(root, "devices", "redwood", "pull-firmware.sh"), "w").close()
-    shutil.copy(os.path.join(ROOT, "devices", "manifest.conf"), os.path.join(root, "devices"))
+    shutil.copytree(os.path.join(ROOT, "devices", "qemu"), os.path.join(root, "devices", "qemu"))
 
-    r = tool(root, "hakios-device.py", "new", "fakephone", "--soc", "sc7280", "--title", "Fake Phone")
+    r = tool(root, "hakios-device.py", "new", "fakephone", "--soc", "fakesoc", "--title", "Fake Phone")
     check("new: a device repository that check passes", r.returncode == 0 and "all hold together" in r.stdout, r.stdout + r.stderr)
     conf = open(os.path.join(root, "devices", "fakephone", "configs", "fakephone.config")).read()
     check("new: the phone drivers left out, the SoC's kept, QEMU's untouched",
           "# CONFIG_HAKIOS_GOODIX is not set" in conf and "HAKIOS_THERMAL" not in conf and "HAKIOS_VIRTIO" not in conf, conf)
-    r = tool(root, "hakios-device.py", "new", "fakephone", "--soc", "sc7280", "--title", "x")
+    r = tool(root, "hakios-device.py", "new", "fakephone", "--soc", "fakesoc", "--title", "x")
     check("new: refuses a device that exists", r.returncode != 0 and "already exists" in r.stderr, r.stderr)
     r = tool(root, "hakios-device.py", "new", "other", "--soc", "nosuchsoc", "--title", "x")
     check("new: refuses a SoC with no repository", r.returncode != 0 and "no socs/nosuchsoc" in r.stderr, r.stderr)
@@ -96,8 +97,8 @@ try:
     check("a device repository cannot declare `standard` files", "a SoC or device repository has drivers, not `standard`" in r.stdout + r.stderr,
           r.stdout + r.stderr)
     os.remove(os.path.join(d, "conf"))
-    shutil.copy(os.path.join(root, "socs", "sc7280", "configs", "sc7280.config"),
-                os.path.join(root, "devices", "fakephone", "configs", "sc7280.config"))
+    shutil.copy(os.path.join(root, "socs", "fakesoc", "configs", "fakesoc.config"),
+                os.path.join(root, "devices", "fakephone", "configs", "fakesoc.config"))
     r = tool(root, "hakios-config.py", "defconfig", "fakephone")
     check("the same configuration name in two repositories is refused", r.returncode != 0 and "more than one repository" in r.stderr, r.stderr)
 
@@ -105,7 +106,7 @@ try:
     r = tool(ROOT, "hakios-device.py", "check")
     check("the devices and SoCs of this tree hold together", r.returncode == 0, r.stdout + r.stderr)
     r = tool(ROOT, "hakios-device.py", "list")
-    check("list names redwood, qemu and sc7280", all(n in r.stdout for n in ("redwood", "qemu", "sc7280")), r.stdout)
+    check("list names the QEMU device, which the common repository always has", "qemu" in r.stdout, r.stdout)
 finally:
     shutil.rmtree(work, ignore_errors=True)
 

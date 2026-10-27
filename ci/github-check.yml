@@ -7,6 +7,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: The SoC, device and UEFI repositories devices/manifest.conf names
+        # they are private repositories of their own: a token that can read them, in the secret HAKIOS_SYNC_TOKEN; without it the
+        # checks of the reference phone's configuration and the made device pages are skipped, and say so
+        env:
+          TOKEN: ${{ secrets.HAKIOS_SYNC_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+            python3 tools/hakios-device.py sync
+          else
+            echo "no HAKIOS_SYNC_TOKEN: only the common repository is checked"
+          fi
       - name: Python compiles
         run: |
           git ls-files '*.py' | xargs -r python3 -m py_compile
@@ -52,7 +64,7 @@ jobs:
           python3 tools/hakios-device-test.py
       - name: The documentation pages made from the source are current
         run: |
-          python3 tools/docs-gen.py --check
+          [ ! -d devices/redwood ] || python3 tools/docs-gen.py --check
           python3 tools/docs-check.py
       - name: The Metal plug-in's reading of a .metallib refuses every file cut short or bent (sanitizers)
         run: sh tools/metallib-test.sh

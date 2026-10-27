@@ -85,10 +85,12 @@ def manifest():
     path = os.path.join(ROOT, "devices", "manifest.conf")
     if not os.path.isfile(path):
         return []
-    return read_blocks(path, ("device", "soc"), {"device": DEVICE_KEYS, "soc": SOC_KEYS})
+    return read_blocks(path, ("device", "soc", "uefi"), {"device": DEVICE_KEYS, "soc": SOC_KEYS, "uefi": {"path", "repository", "revision"}})
 
 
 def home(kind, name):
+    if kind == "uefi":
+        return os.path.join(ROOT, "uefi")         # one UEFI for every device: Mu-Silicium with HakiOS's changes (uefi/README.md)
     return os.path.join(ROOT, "devices" if kind == "device" else "socs", name)
 
 
@@ -132,6 +134,12 @@ def cmd_list(_a):
     named = {(k, n): f for k, n, f, _l in manifest()}
     every = sorted(set(named) | set(present()), key=lambda x: (x[0] != "soc", x[1]))
     for kind, name in every:
+        if kind == "uefi":
+            where = one(named[(kind, name)], "repository") or one(named[(kind, name)], "path")
+            there = os.path.isfile(os.path.join(home(kind, name), "apply.sh"))
+            print("%-6s %-10s %-44s %s" % (kind, name, "HakiOS UEFI (Mu-Silicium)" if there else
+                                            "NOT CHECKED OUT (tools/hakios-device.py sync %s)" % name, where))
+            continue
         fields = describe(kind, name)
         where = one(named.get((kind, name), {}), "repository") or one(named.get((kind, name), {}), "path") or "(not in the manifest)"
         if fields is None:
