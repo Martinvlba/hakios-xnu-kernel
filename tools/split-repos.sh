@@ -78,6 +78,7 @@ text += ("\n# The SoC, device and UEFI repositories that tools/hakios-device.py 
          "/socs/*\n!/socs/README.md\n/devices/*\n!/devices/manifest.conf\n!/devices/README.md\n!/devices/qemu/\n")
 open(path, "w").write(text)
 PY
+mkdir -p "$C/socs"
 cat > "$C/socs/README.md" <<'EOF'
 # SoC repositories
 
