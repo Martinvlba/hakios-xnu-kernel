@@ -232,6 +232,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			-o obj/libhakios.media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
 		# the output device of the audio server: a plug-in for CoreAudio's HAL
 		$DYN -bundle -framework CoreFoundation -o obj/HakiosAudio src/audio_plugin.c
+		# the plug-in Metal loads when the kernel names it (boot-arg metal=1): a device that exists, src/HakiosMetal.m
+		$DYN -bundle -framework Foundation -framework Metal -lobjc -o obj/HakiosMetal src/HakiosMetal.m
 		if [ -n "$GL" ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
 			# (Mesa says beside the library what it was built from: one from other patches is built again)
@@ -286,6 +288,11 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		mkdir -p root/lib/HakiosAudio.driver
 		cp obj/HakiosAudio root/lib/HakiosAudio.driver/
 		cp src/audio_plugin.plist root/lib/HakiosAudio.driver/Info.plist
+	fi
+	if [ -f obj/HakiosMetal ]; then
+		mkdir -p root/lib/HakiosMetal.bundle
+		cp obj/HakiosMetal root/lib/HakiosMetal.bundle/
+		cp src/HakiosMetal.plist root/lib/HakiosMetal.bundle/Info.plist
 	fi
 	if [ -n "$GL" ]; then
 		cp obj/libOSMesa.8.dylib root/lib/
@@ -605,6 +612,9 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)
 	mkdir -p sysroot/System/Library/Audio/Plug-Ins/HAL
 	ln -s /redwood/lib/HakiosAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/HakiosAudio.driver
+	# the plug-in Metal opens when the accelerator names it (boot-arg metal=1; without it nothing names this bundle)
+	mkdir -p sysroot/System/Library/Extensions
+	[ -d root/lib/HakiosMetal.bundle ] && ln -sfn /redwood/lib/HakiosMetal.bundle sysroot/System/Library/Extensions/HakiosMetal.bundle
 	# the OS cryptex: on a device a separate volume grafted at /System/Cryptexes/OS. It holds the dyld
 	# shared cache (dyld looks there first) and a few libraries and resources outside the cache.
 	mkdir -p sysroot/System/Cryptexes
