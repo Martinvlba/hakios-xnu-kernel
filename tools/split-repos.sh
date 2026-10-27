@@ -1,7 +1,7 @@
 #!/bin/bash
 # Make the HakiOS repositories out of this one, the way UniXNU keeps its parts apart: the common repository, a SoC's, a device's,
-# the UEFI. Each one keeps the history of its own files (git subtree split). This repository is not changed: the results are new
-# clones in OUT, ready to push.
+# the UEFI. Each one keeps the history of its own files (a clone with git filter-branch --subdirectory-filter: git subtree, as
+# Xcode ships it, dies on a history this long). This repository is not changed: the results are new clones in OUT, ready to push.
 #
 #   tools/split-repos.sh OUT [OWNER]        OWNER: where they will live on GitHub (default shimoku74)
 #
@@ -22,11 +22,19 @@ OUT=$(cd "$OUT" && pwd)
 
 PARTS="socs/sc7280:hakios-sc7280-common:soc:sc7280 devices/redwood:hakios-redwood:device:redwood uefi:hakios-uefi:uefi:hakios-uefi"
 
-# the messages without Claude's trailer lines (and no blank line left hanging at the end)
-clean_messages() {
-	git -C "$1" -c advice.detachedHead=false filter-branch -f --msg-filter \
-		"sed -E '/^[Cc]o-[Aa]uthored-[Bb]y: Claude/d' | sed -e :a -e '/^\n*\$/{\$d;N;ba' -e '}'" -- --all >/dev/null 2>&1
-	git -C "$1" update-ref -d refs/original/refs/heads/main 2>/dev/null || true
+MSG="sed -E '/^[Cc]o-[Aa]uthored-[Bb]y: Claude/d' | sed -e :a -e '/^\n*\$/{\$d;N;ba' -e '}'"
+
+# a clone of this repository's current branch as main, with nothing else in it
+fresh_clone() {
+	git clone -q --no-local --single-branch --branch "$(git -C "$SRC" rev-parse --abbrev-ref HEAD)" "$SRC" "$1"
+	git -C "$1" branch -q -m main
+	git -C "$1" remote remove origin
+	for t in $(git -C "$1" tag); do git -C "$1" tag -d "$t" >/dev/null; done
+}
+
+# the messages without Claude's trailer lines (and no blank line left at the end); with a directory, only its history, at the top
+rewrite() {
+	FILTER_BRANCH_SQUELCH_WARNING=1 git -C "$1" filter-branch -f --msg-filter "$MSG" ${2:+--subdirectory-filter "$2"} -- main >/dev/null
 	for ref in $(git -C "$1" for-each-ref --format='%(refname)' refs/original); do git -C "$1" update-ref -d "$ref"; done
 	git -C "$1" reflog expire --expire=now --all
 	git -C "$1" gc -q --prune=now
@@ -36,22 +44,15 @@ for part in $PARTS; do
 	IFS=: read -r prefix name _kind _id <<<"$part"
 	[ -e "$OUT/$name" ] && { echo "split-repos: $OUT/$name exists" >&2; exit 1; }
 	echo "split-repos: $prefix -> $name"
-	git -C "$SRC" subtree split -q --prefix="$prefix" -b "split/$name" >/dev/null
-	git clone -q --no-local --branch "split/$name" "$SRC" "$OUT/$name"
-	git -C "$SRC" branch -q -D "split/$name"
-	git -C "$OUT/$name" branch -q -m main
-	git -C "$OUT/$name" remote remove origin
-	clean_messages "$OUT/$name"
+	fresh_clone "$OUT/$name"
+	rewrite "$OUT/$name" "$prefix"
 done
 
 echo "split-repos: the common repository -> hakios"
 [ -e "$OUT/hakios" ] && { echo "split-repos: $OUT/hakios exists" >&2; exit 1; }
-git clone -q --no-local "$SRC" "$OUT/hakios"
 C=$OUT/hakios
-git -C "$C" checkout -q -B main
-git -C "$C" remote remove origin
-for b in $(git -C "$C" for-each-ref --format='%(refname:short)' refs/heads); do [ "$b" = main ] || git -C "$C" branch -q -D "$b"; done
-clean_messages "$C"
+fresh_clone "$C"
+rewrite "$C"
 for part in $PARTS; do
 	IFS=: read -r prefix name kind id <<<"$part"
 	git -C "$C" rm -q -r "$prefix"
