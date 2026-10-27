@@ -68,12 +68,20 @@ Linux x86-64，约 12 GB 磁盘，7-Zip 23 或更新，`lz4`，`qemu-system-aarc
 ```sh
 git clone https://github.com/oosexgang/hackios-xnu-kernel.git hakios
 cd hakios
+make doctor       # 检查本机缺什么（QEMU 显示设备、UEFI 固件、内存）以及怎么办
 make fetch        # 从 Apple 服务器取 iOS 16.5 IPSW，解包所需部分（7.4 GB）
 make images       # APFS 镜像：userland/root.apfs 和 userland/system.apfs
 make qemu         # 20 分钟的会话
 ```
 
-两三分钟后出现锁屏。按住鼠标键就是手指；`H` 是主屏键，`L` 是电源键，`↑`/`↓` 是音量。
+**你会看到什么。** CPU 是模拟的，所以很慢，窗口一开始是**黑的**，这是正常的：先黑一两分钟，然后出现 Apple 标志，
+再过大约 3 到 10 分钟（取决于机器）出现锁屏。按住鼠标键就是手指；`H` 是主屏键，`L` 是电源键，`↑`/`↓` 是音量。
+
+**如果一直是黑屏：** (1) 在另一个终端运行 `tail -f logs/qemu.log`，几秒内应出现 `== XNULOADER v3 ==`，之后是内核和 launchd 的输出；
+没有输出就运行 `make doctor`。(2) `qemu/screendump.sh` 会保存虚拟机屏幕当前的内容（`logs/qemu-screen.png`）。
+(3) 日志在走但没有窗口或窗口全黑：你的 QEMU 可能没有 GTK（例如没有 WSLg 的 WSL），用
+`qemu/run-ios.sh 1200 -display vnc=127.0.0.1:0`，再用 VNC 客户端连接 `127.0.0.1:5900`。
+(4) 虚拟机向 QEMU 要 7 GB 内存（至少 6 GB），内存不足时会非常慢。
 
 ## 在手机上
 

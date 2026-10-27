@@ -76,14 +76,28 @@ Linux x86-64, about 12 GB of disk, 7-Zip 23 or newer, `lz4`, `qemu-system-aarch6
 ```sh
 git clone https://github.com/oosexgang/hackios-xnu-kernel.git hakios
 cd hakios
+make doctor                   # what this machine lacks (QEMU's display device, UEFI firmware, memory), and what to do
 sysimage/fetch.sh             # the iOS 16.5 IPSW from Apple's servers, the needed parts unpacked (7.4 GB)
 REST=1 userland/build.sh      # the APFS images: userland/root.apfs and userland/system.apfs
 mkdir -p logs
 qemu/run-ios.sh 1200 -display gtk > logs/qemu.log     # a 20-minute session
 ```
 
-The lock screen appears after two or three minutes. The mouse with the button held is a finger;
-`H` is Home, `L` is the power button, `↑`/`↓` are volume.
+**What you will see.** The CPU is emulated, so it is slow, and the window is **black at first**: that is normal.
+Black for the first minute or two, then the Apple logo, then the lock screen after about 3 to 10 minutes, depending on
+the machine. The mouse with the button held is a finger; `H` is Home, `L` is the power button, `↑`/`↓` are volume.
+
+**If it stays black** (check these in order):
+
+1. `tail -f logs/qemu.log` in another terminal. It should print `== XNULOADER v3 ==` within seconds and kernel and launchd
+   lines after that. If it prints nothing, QEMU did not start the loader: run `make doctor`.
+2. `qemu/screendump.sh` saves what the guest's screen shows (`logs/qemu-screen.png`), whatever your window does.
+3. No window or a black one although the log runs: your QEMU may have no GTK window (a headless package, WSL without WSLg).
+   Use `qemu/run-ios.sh 1200 -display vnc=127.0.0.1:0 > logs/qemu.log` and connect a VNC viewer to `127.0.0.1:5900`.
+4. The guest asks QEMU for 7 GB of memory (`QEMU_RAM_GB`; 6 at the very least, the system image sits 3 GB into it and is 2.5 GB). On a machine without that, the host swaps and
+   everything is very slow; close other programs or give the VM or WSL more memory.
+5. `qemu/run-ios.sh` needs the images from the two steps above (`userland/system.apfs` and `userland/root.apfs`): a
+   missing one is reported at once, not as a black window.
 
 ## On the phone
 
