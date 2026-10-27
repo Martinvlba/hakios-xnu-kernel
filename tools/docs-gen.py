@@ -104,7 +104,10 @@ def devices_page(hd):
                                                    " | ".join(short.get(states.get(a), "") for a in areas)))
     out += ["", "An empty cell is a part nobody has looked at on that device yet.", "", "## SoC families", "", "| SoC | What | |", "|---|---|---|"]
     for name, fields in socs:
-        out.append("| `%s` | %s | [`socs/%s/`](%ssocs/%s) |" % (name, hd.one(fields, "title"), name, REPO.replace("/blob/", "/tree/"), name))
+        carried = [d for k, d in hd.present() if k == "device" and os.path.isdir(os.path.join(ROOT, "devices", d, "soc"))
+                   and hd.config_tool().soc_name(os.path.join(ROOT, "devices", d, "soc")) == name]
+        where = "carried by %s (`devices/%s/soc/`)" % (", ".join(carried), carried[0]) if carried else "`socs/%s/`" % name
+        out.append("| `%s` | %s | %s |" % (name, hd.one(fields, "title"), where))
     out.append("")
     return "\n".join(out)
 

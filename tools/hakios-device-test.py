@@ -57,8 +57,24 @@ try:
           "# CONFIG_HAKIOS_GOODIX is not set" in conf and "HAKIOS_THERMAL" not in conf and "HAKIOS_VIRTIO" not in conf, conf)
     r = tool(root, "hakios-device.py", "new", "fakephone", "--soc", "fakesoc", "--title", "x")
     check("new: refuses a device that exists", r.returncode != 0 and "already exists" in r.stderr, r.stderr)
-    r = tool(root, "hakios-device.py", "new", "other", "--soc", "nosuchsoc", "--title", "x")
-    check("new: refuses a SoC with no repository", r.returncode != 0 and "no socs/nosuchsoc" in r.stderr, r.stderr)
+    check("new: the device carries its SoC's layer, a copy of the one there is",
+          open(os.path.join(root, "devices", "fakephone", "soc", "soc.conf")).read() == open(os.path.join(root, "socs", "fakesoc", "soc.conf")).read())
+    r = tool(root, "hakios-device.py", "new", "otherphone", "--soc", "newsoc", "--title", "Other Phone", "--repo")
+    check("new: a SoC nobody has yet gets a new layer in the device, and --repo makes the device a git repository",
+          r.returncode == 0 and os.path.isfile(os.path.join(root, "devices", "otherphone", "soc", "configs", "newsoc.config")) and
+          os.path.isdir(os.path.join(root, "devices", "otherphone", ".git")) and "git -C devices/otherphone remote add origin" in r.stdout,
+          r.stdout + r.stderr)
+    shutil.rmtree(os.path.join(root, "devices", "otherphone"))
+    # two copies of one SoC: the same is fine, different is refused
+    with open(os.path.join(root, "devices", "fakephone", "soc", "configs", "fakesoc.config"), "a") as f:
+        f.write("CONFIG_CPUS=4\n")
+    r = tool(root, "hakios-config.py", "list")
+    check("two different copies of one SoC are refused, with both named", r.returncode != 0 and "the SoC fakesoc is in" in r.stderr and
+          "differ" in r.stderr, r.stdout + r.stderr)
+    shutil.copy(os.path.join(root, "socs", "fakesoc", "configs", "fakesoc.config"), os.path.join(root, "devices", "fakephone", "soc", "configs"))
+    shutil.rmtree(os.path.join(root, "socs"))
+    r = tool(root, "hakios-config.py", "defconfig", "fakephone")
+    check("a device that carries its SoC needs nothing else: no socs/ at all", r.returncode == 0, r.stdout + r.stderr)
 
     # a driver of the device's own
     d = os.path.join(root, "devices", "fakephone", "drivers", "input")
@@ -97,7 +113,7 @@ try:
     check("a device repository cannot declare `standard` files", "a SoC or device repository has drivers, not `standard`" in r.stdout + r.stderr,
           r.stdout + r.stderr)
     os.remove(os.path.join(d, "conf"))
-    shutil.copy(os.path.join(root, "socs", "fakesoc", "configs", "fakesoc.config"),
+    shutil.copy(os.path.join(root, "devices", "fakephone", "soc", "configs", "fakesoc.config"),
                 os.path.join(root, "devices", "fakephone", "configs", "fakesoc.config"))
     r = tool(root, "hakios-config.py", "defconfig", "fakephone")
     check("the same configuration name in two repositories is refused", r.returncode != 0 and "more than one repository" in r.stderr, r.stderr)

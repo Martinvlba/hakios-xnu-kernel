@@ -19,7 +19,7 @@
 #
 # Configuration, the way Linux's make does it (configs/, tools/hakios-config.py; docs/configs.md):
 #   make redwood_defconfig   .config from configs/defconfig + redwood_defconfig (devices/redwood/configs/), which is
-#                            common_defconfig + sc7280.config (socs/sc7280/) + redwood.config
+#                            common_defconfig + sc7280.config (devices/redwood/soc/) + redwood.config
 #                            (any NAME_defconfig; make common_defconfig is the common kernel alone; docs/configs.md)
 #   make devices             the device and SoC repositories (tools/hakios-device.py list; docs/porting/repositories.md)
 #   make virt.config         lay a fragment (configs/virt.config) over the .config there is

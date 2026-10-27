@@ -44,10 +44,16 @@ class Problem(Exception):
     pass
 
 
+_CONFIG = []
+
+
 def config_tool():
+    if _CONFIG:
+        return _CONFIG[0]
     spec = importlib.util.spec_from_file_location("hakios_config", os.path.join(HERE, "hakios-config.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    _CONFIG.append(module)
     return module
 
 
@@ -88,10 +94,28 @@ def manifest():
     return read_blocks(path, ("device", "soc", "uefi"), {"device": DEVICE_KEYS, "soc": SOC_KEYS, "uefi": {"path", "repository", "revision"}})
 
 
+def soc_homes():
+    """{SoC name: its directory}: socs/<name>/, then the SoC layers devices carry (devices/<device>/soc/), the first of each."""
+    out = {}
+    base = os.path.join(ROOT, "socs")
+    for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        if os.path.isfile(os.path.join(base, name, "soc.conf")):
+            out.setdefault(name, os.path.join(base, name))
+    base = os.path.join(ROOT, "devices")
+    for dev in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        top = os.path.join(base, dev, "soc")
+        named = config_tool().soc_name(top)
+        if named:
+            out.setdefault(named, top)
+    return out
+
+
 def home(kind, name):
     if kind == "uefi":
         return os.path.join(ROOT, "uefi")         # one UEFI for every device: Mu-Silicium with HakiOS's changes (uefi/README.md)
-    return os.path.join(ROOT, "devices" if kind == "device" else "socs", name)
+    if kind == "soc":
+        return soc_homes().get(name, os.path.join(ROOT, "socs", name))
+    return os.path.join(ROOT, "devices", name)
 
 
 def describe(kind, name):
@@ -107,12 +131,11 @@ def describe(kind, name):
 
 def present():
     """[(kind, name)] of every device and SoC checked out, whether or not the manifest names it."""
-    out = []
-    for kind, top, marker in (("soc", "socs", "soc.conf"), ("device", "devices", "device.conf")):
-        base = os.path.join(ROOT, top)
-        for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
-            if os.path.isfile(os.path.join(base, name, marker)):
-                out.append((kind, name))
+    out = [("soc", name) for name in sorted(soc_homes())]
+    base = os.path.join(ROOT, "devices")
+    for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        if os.path.isfile(os.path.join(base, name, "device.conf")):
+            out.append(("device", name))
     return out
 
 
@@ -178,8 +201,8 @@ def check_one(kind, name, hc):
         soc = one(fields, "soc")
         if soc is None:
             problems.append("%s/device.conf: no soc (`none` for a machine with no SoC repository)" % shown)
-        elif soc != "none" and not os.path.isfile(os.path.join(ROOT, "socs", soc, "soc.conf")):
-            problems.append("%s/device.conf: soc %s, and there is no socs/%s/soc.conf (tools/hakios-device.py sync %s)" % (shown, soc, soc, soc))
+        elif soc != "none" and soc not in soc_homes():
+            problems.append("%s/device.conf: soc %s, and neither %s/soc/ nor socs/%s/ has its soc.conf" % (shown, soc, shown, soc))
         defconfig = one(fields, "defconfig")
         path = os.path.join(top, "configs", defconfig or "")
         if not defconfig or not os.path.isfile(path):
@@ -236,7 +259,7 @@ def cmd_check(a):
 NEW_README = """# {title} ({name})
 
 A HakiOS device repository: what is true of this device and of no other. The kernel, the loader, the drivers and the tools are
-the common repository's; the {soc} family's facts are `socs/{soc}/`'s. How the three are put together:
+the common repository's; the {soc} family's facts are in `soc/`, carried with the device. How the three are put together:
 [docs/porting/repositories.md](https://github.com/oosexgang/hakios/blob/main/docs/porting/repositories.md).
 
 | File | What |
@@ -244,6 +267,7 @@ the common repository's; the {soc} family's facts are `socs/{soc}/`'s. How the t
 | `device.conf` | what the device is, and how far each part of it works: its page in the documentation is made from it |
 | `configs/{name}_defconfig` | the common kernel, the SoC's fragment, this device's: `make {name}_defconfig` |
 | `configs/{name}.config` | what is this device's own: the drivers built in, the arguments it needs |
+| `soc/` | its SoC family's layer ({soc}): `soc.conf`, `configs/{soc}.config`, the SoC's drivers; carried here so that this one repository is all the device needs |
 | `drivers/` | drivers of its own, if it needs any (`drivers/<subsystem>/conf`, as in the common repository) |
 
 Every phone driver of the common repository is left out to begin with: their addresses and pins are the phone they were written
@@ -267,12 +291,25 @@ def cmd_new(a):
         print(out.stdout.rstrip())
         if out.returncode != 0:
             raise Problem("tools/new-device.py: %s" % (out.stderr.strip() or "failed"))
-    if a.soc != "none" and not os.path.isfile(os.path.join(ROOT, "socs", a.soc, "soc.conf")):
-        raise Problem("no socs/%s/soc.conf: make the SoC's repository first, or sync it (known: %s)" %
-                      (a.soc, ", ".join(n for k, n in present() if k == "soc") or "none"))
+    if a.soc != "none":
+        # the device carries its SoC's layer: a copy of one there is (another device's, synced), or a new one to fill in
+        socs = soc_homes()
+        os.makedirs(top, exist_ok=True)
+        if a.soc in socs:
+            shutil.copytree(socs[a.soc], os.path.join(top, "soc"), ignore=shutil.ignore_patterns(".git"))
+            print("hakios-device: devices/%s/soc/: the %s layer, copied from %s" % (name, a.soc, os.path.relpath(socs[a.soc], ROOT)))
+        else:
+            os.makedirs(os.path.join(top, "soc", "configs"))
+            with open(os.path.join(top, "soc", "soc.conf"), "w", encoding="utf-8") as f:
+                f.write("# the %s SoC family, carried by this device's repository (docs/porting/repositories.md)\n\nsoc %s\n"
+                        "\ttitle       %s\n\tvendor      ?\n\tmaintainer  %s\n" % (a.soc, a.soc, a.soc_title or a.soc, a.maintainer))
+            with open(os.path.join(top, "soc", "configs", a.soc + ".config"), "w", encoding="utf-8") as f:
+                f.write('# HakiOS fragment: the %s family -- what is true of the SoC, whatever device it is in.\nCONFIG_SOC="%s"\n' % (a.soc, a.soc))
+            print("hakios-device: devices/%s/soc/: a new SoC layer for %s: its cores, addresses and drivers go there" % (name, a.soc))
     hc = config_tool()
     # what a new device begins without: every driver written for one machine (not QEMU's), but the ones its SoC's fragment builds
-    soc_has = hc.parse(hc.find_config(ROOT, a.soc + ".config"))[0] if a.soc != "none" else {}
+    soc_fragment = os.path.join(top, "soc", "configs", a.soc + ".config")      # the copy the device now carries
+    soc_has = hc.parse(soc_fragment)[0] if a.soc != "none" else {}
     left_out = [d.symbol for d in hc.DRIVERS if not d.name.startswith("VIRTIO_") and soc_has.get(d.symbol) != "y"]
     os.makedirs(os.path.join(top, "configs"), exist_ok=True)
     with open(os.path.join(top, "device.conf"), "w", encoding="utf-8") as f:
@@ -290,7 +327,7 @@ def cmd_new(a):
         f.write('CONFIG_DEVICE="%s"\n' % name)
         for sym in left_out:
             f.write("# CONFIG_%s is not set\n" % sym)
-        common = hc.overlay({}, [hc.find_config(ROOT, "common_defconfig")] + ([hc.find_config(ROOT, a.soc + ".config")] if soc_has else []))
+        common = hc.overlay({}, [hc.find_config(ROOT, "common_defconfig")] + ([soc_fragment] if a.soc != "none" else []))
         problems, _ = hc.check(dict(common, **{s: "n" for s in left_out}))
         for p in problems:
             m = re.match(r"CONFIG_([A-Z0-9_]+) gives ", p)
@@ -307,6 +344,13 @@ def cmd_new(a):
     print("hakios-device: devices/%s made: device.conf, configs/%s_defconfig, configs/%s.config, README.md" % (name, name, name))
     print("hakios-device: %d phone drivers left out to begin with; `make %s_defconfig && make config` shows what is built" % (len(left_out), name))
     print("hakios-device: next: docs/porting/index.md, step by step; tools/new-device.py reads the phone's own device tree")
+    if a.repo:
+        git("init", "-q", "-b", "main", cwd=top)
+        git("add", "-A", cwd=top)
+        git("commit", "-q", "-m", "%s: a HakiOS device repository, made by tools/hakios-device.py new" % name, cwd=top)
+        print("hakios-device: devices/%s is a git repository; to publish it: make an empty repository (hakios-%s), then\n"
+              "    git -C devices/%s remote add origin <its URL> && git -C devices/%s push -u origin main\n"
+              "and add its block to devices/manifest.conf (repository, revision) in a pull request" % (name, name, name, name))
     return cmd_check(argparse.Namespace(names=[name]))
 
 
@@ -400,7 +444,9 @@ def main():
     p.set_defaults(fn=cmd_check)
     p = sub.add_parser("new", help="a new device repository")
     p.add_argument("name")
-    p.add_argument("--soc", required=True, help="its SoC family (socs/<soc>/), or none")
+    p.add_argument("--soc", required=True, help="its SoC family: copied from a device or socs/ that has it, else a new layer; or none")
+    p.add_argument("--soc-title", help="for a new SoC layer: what the family is called")
+    p.add_argument("--repo", action="store_true", help="make the device's directory a git repository, ready to push")
     p.add_argument("--title", required=True, help='what it is called ("POCO X5 Pro 5G")')
     p.add_argument("--vendor", default="?")
     p.add_argument("--maintainer", default="?")

@@ -147,7 +147,50 @@ def layers(root):
         for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
             if os.path.isfile(os.path.join(base, name, marker)):
                 out.append((kind, name, os.path.join(base, name)))
+    # A device repository carries its SoC's layer with it (devices/<name>/soc/, with a soc.conf that names the SoC), so that one
+    # repository is all a device needs. Two devices with the same SoC each carry a copy: the copies must be the same, or a build
+    # would depend on which device is checked out.
+    seen = {name: (top, soc_digest(top)) for kind, name, top in out if kind == "soc"}
+    for kind, name, top in list(out):
+        if kind != "device":
+            continue
+        soc = os.path.join(top, "soc")
+        named = soc_name(soc)
+        if named is None:
+            continue
+        digest = soc_digest(soc)
+        if named in seen:
+            if seen[named][1] != digest:
+                raise ConfigError("the SoC %s is in %s and in %s, and the two differ: make them the same (one SoC, one layer)" %
+                                  (named, os.path.relpath(seen[named][0], root), os.path.relpath(soc, root)))
+            continue
+        seen[named] = (soc, digest)
+        out.insert(1 + sum(1 for k, _n, _t in out if k == "soc"), ("soc", named, soc))
     return out
+
+
+def soc_name(top):
+    """The name a soc.conf in TOP gives its SoC (`soc <name>`), or None if there is none."""
+    path = os.path.join(top, "soc.conf")
+    if not os.path.isfile(path):
+        return None
+    for line in open(path, encoding="utf-8"):
+        m = re.match(r"soc\s+([a-z0-9][a-z0-9_-]*)\s*$", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def soc_digest(top):
+    """What a SoC layer holds, as one value: two copies of the same SoC compare equal when every file is the same."""
+    import hashlib
+    h = hashlib.sha256()
+    for d, dirs, files in sorted(os.walk(top)):
+        dirs.sort()
+        for f in sorted(files):
+            path = os.path.join(d, f)
+            h.update(os.path.relpath(path, top).encode() + b"\0" + open(path, "rb").read() + b"\0")
+    return h.hexdigest()
 
 
 class Driver:
