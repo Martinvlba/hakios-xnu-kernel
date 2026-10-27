@@ -56,9 +56,9 @@ program that can write to flash, and CI fails if one appears that is not listed.
 ## What this repository does NOT contain and never distributes
 
 - **No part of iOS**: no iOS binary, image, cache, font, picture or screenshot. The user-space
-  half of the system image is built on your machine from the iOS 16.5 IPSW, which
-  `sysimage/fetch.sh` downloads from Apple's public servers under Apple's license, to your
-  machine only. Nothing of it is committed here.
+  half of the system image is built on your machine from the iOS 16.5 IPSW, which you
+  get yourself, under Apple's license, and hand to `sysimage/unpack.sh` on your machine; no script
+  here downloads it. Nothing of it is committed here.
 - **No device firmware**: the GPU, Wi-Fi, audio DSP, modem, haptics and camera firmware is the
   vendor's (Qualcomm/Xiaomi). It is pulled from your own phone (`make firmware`) and is git-ignored.
 - **No keys, certificates, activation data, or anything to impersonate a genuine Apple device to

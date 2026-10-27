@@ -37,7 +37,7 @@ else
 	bad "python3 does not run" "install Python 3 (on Windows: python.org, not the Microsoft Store stub)"
 fi
 
-# 7-Zip 23 or newer: sysimage/fetch.sh unpacks APFS with it
+# 7-Zip 23 or newer: sysimage/unpack.sh unpacks APFS with it
 z=""; for t in 7zz 7z 7za; do have $t && { z=$t; break; }; done
 if [ -n "$z" ]; then
 	zv=$($z 2>&1 | head -3 | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -46,7 +46,7 @@ else
 	need "7-Zip not found" "install 7-Zip 23 or newer (apt: 7zip, brew: sevenzip)"
 fi
 
-if have cc || have clang; then ok "C compiler ($(have cc && echo cc || echo clang)): builds unzbm for sysimage/fetch.sh"; else need "no C compiler" "install clang or gcc"; fi
+if have cc || have clang; then ok "C compiler ($(have cc && echo cc || echo clang)): builds unzbm for sysimage/unpack.sh"; else need "no C compiler" "install clang or gcc"; fi
 have git && ok "git" || bad "git not found" "install git"
 if have lld-link; then ok "lld-link: the boot loader can be built (xnuloader/build.sh)"; else warn "lld-link not found" "needed to build the boot loader with the iPhone identity from your own IPSW (make loader), which the iOS run needs (apt: lld; brew: lld); the open kernel (make qemu-open) runs with prebuilt/loader.efi, which has no Apple data"; fi
 have lz4 && ok "lz4" || warn "lz4 not found" "needed by some image steps (apt: lz4)"
@@ -63,10 +63,10 @@ fi
 kb=$(df -Pk . 2>/dev/null | awk 'NR == 2 { print $4 }')
 if [ -n "$kb" ] && [ "$kb" -ge 12582912 ]; then ok "disk: $((kb / 1048576)) GB free here"; else warn "disk: ${kb:+$((kb / 1048576)) GB }free here, 12 GB wanted" "free some space, or work in another directory"; fi
 
-# the trap: fetch.sh makes files named NAME:com.apple.decmpfs, and ':' is not a legal NTFS name character
+# the trap: unpack.sh makes files named NAME:com.apple.decmpfs, and ':' is not a legal NTFS name character
 case "$host:$PWD" in
 wsl:/mnt/*) warn "this checkout is on a Windows drive (/mnt/...)" "build in WSL's own filesystem: git clone it to ~/hakios and copy fw-* there (docs/windows.md)" ;;
-gitbash:*) warn "Git Bash cannot run sysimage/fetch.sh (NTFS forbids ':' in file names)" "build the images in WSL, copy them back; run xl from here (docs/windows.md)" ;;
+gitbash:*) warn "Git Bash cannot run sysimage/unpack.sh (NTFS forbids ':' in file names)" "build the images in WSL, copy them back; run xl from here (docs/windows.md)" ;;
 esac
 
 # rebuilding the kernel or userland needs theos's SDK and its Linux toolchain's cctools linker (xnu-deps/setup.sh)
@@ -101,7 +101,7 @@ fi
 
 head1 "What is already built here"
 if [ -f fw-modem/modem.mdt ]; then ok "phone firmware pulled (fw-*/)"; else warn "no fw-modem/ yet" "with the phone on adb: devices/redwood/pull-firmware.sh, or pull-firmware-root.sh if that gets nothing"; fi
-if [ -f userland/system.apfs ] && [ -f userland/root.apfs ]; then ok "userland/system.apfs and root.apfs"; else warn "no iOS images yet" "make fetch, then PREBUILT=1 REST=1 MODEM=1 SYSTEM=1 userland/build.sh (needs iOS 16.5 from Apple's servers, ~8 GB)"; fi
+if [ -f userland/system.apfs ] && [ -f userland/root.apfs ]; then ok "userland/system.apfs and root.apfs"; else warn "no iOS images yet" "make unpack IPSW=your.ipsw (iOS 16.5 20F66 for iPhone X, which you get yourself), then PREBUILT=1 REST=1 MODEM=1 SYSTEM=1 userland/build.sh (~8 GB)"; fi
 
 head1 "Phone"
 adb=""

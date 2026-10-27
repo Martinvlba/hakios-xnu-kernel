@@ -61,7 +61,7 @@ echo "== 2. the UDIF reader on sysimage/rootfs.dmg"
 if [ -f "$ROOT/sysimage/rootfs.dmg" ]; then
 	python3 "$HERE/dmg.py" info "$ROOT/sysimage/rootfs.dmg" | tail -n 14 || fail=1
 else
-	echo "   skipped: sysimage/rootfs.dmg is not here (run sysimage/fetch.sh with KEEP=1)"
+	echo "   skipped: sysimage/rootfs.dmg is not here (run sysimage/unpack.sh with KEEP=1)"
 fi
 echo
 

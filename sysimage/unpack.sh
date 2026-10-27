@@ -1,25 +1,44 @@
 #!/bin/bash
-# Get the files of iOS 16.5 (20F66, iPhone X) that the system image is made of, straight from
-# Apple's servers, and lay them out the way ../userland/build.sh expects them:
+# Unpack the files of iOS 16.5 (20F66, iPhone X) that the system image is made of, out of an IPSW
+# you have on your own disk, and lay them out the way ../userland/build.sh expects them:
 #
 #   rootfs/                  the chosen part of the root filesystem (see select-system.py)
 #   system.files/.manifest   what was chosen, with owners, modes and symbolic links
 #   var.skel                 the skeleton of /private/var (see mkvarskel.py)
 #   cryptex/                 the OS cryptex without the dyld shared cache
-#   cryptex-app.dmg          the App cryptex as Apple ships it (10 MB, an APFS container: Safari's
+#   cryptex-app.dmg          the App cryptex as it is in the IPSW (10 MB, an APFS container: Safari's
 #                            daemons, its settings and the bundles around it, which the root volume's
 #                            launchd jobs and links reach through /System/Cryptexes/App)
 #   cryptex-app/             ... and its files
 #   20F66__iPhone10,3_6/     the dyld shared cache (arm64)
+#   DeviceTree.d22ap.im4p    the device tree, for ../xnuloader/mkidentity.sh
 #
-# Nothing of this is in the repository: the two disk images are fetched out of the IPSW on
-# Apple's CDN (fetch-from-ipsw.py reads single members of the archive, 4.7 GB + 2.7 GB instead of
-# all 6.2 GB) and unpacked with 7z. Needs: python3, 7z (7-Zip 23 or newer: it reads APFS), cc.
-# About 8 GB of disk while it runs, 5.3 GB afterwards.
+# The project ships no file of Apple's and downloads none. The IPSW is yours: get
+# iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw yourself (6 165 698 198 bytes) and give its path:
 #
-#   KEEP=1   keep the downloaded disk images (rootfs.dmg is needed again only after changing
-#            select-system.py; with it in place a second run downloads nothing)
+#   sysimage/unpack.sh ~/Downloads/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw
+#   IPSW=... sysimage/unpack.sh              the same, from the environment (make unpack IPSW=...)
+#
+# The disk images are copied out of the IPSW (ipsw-member.py) and unpacked with 7z. Needs: python3,
+# 7z (7-Zip 23 or newer: it reads APFS), cc. About 8 GB of disk while it runs, 5.3 GB afterwards.
+#
+#   KEEP=1   keep the copied disk images (rootfs.dmg is needed again only after changing
+#            select-system.py; with it in place a second run does not read the IPSW for it)
 set -e
+IPSW=${1:-${IPSW:-}}
+if [ -z "$IPSW" ]; then
+	sed -n '16,20p' "$0" | sed 's/^# \{0,1\}//' >&2
+	echo "unpack.sh: give the path of your iOS 16.5 IPSW" >&2
+	exit 1
+fi
+[ -f "$IPSW" ] || { echo "unpack.sh: $IPSW: no such file" >&2; exit 1; }
+IPSW=$(cd "$(dirname "$IPSW")" && pwd)/$(basename "$IPSW")
+size=$(wc -c < "$IPSW" | tr -d ' ')
+# select-system.py and the checks below are made for this one build; another IPSW would unpack, then fail somewhere later
+if [ "$size" != 6165698198 ] && [ -z "${ANY_IPSW:-}" ]; then
+	echo "unpack.sh: $IPSW is $size bytes, not the 6165698198 of iOS 16.5 20F66 for iPhone10,3/10,6 (ANY_IPSW=1 tries it anyway)" >&2
+	exit 1
+fi
 cd "$(dirname "$0")"
 ROOTFS_DMG=096-04088-077.dmg                    # the root filesystem, APFS
 CRYPTEX_DMG=096-04666-078.dmg                   # the OS cryptex: dyld shared cache and a few libraries
@@ -28,7 +47,7 @@ CACHE=20F66__iPhone10,3_6
 UNZBM=../xnu-deps/host/bin/unzbm
 
 for tool in python3 7z cc; do
-	command -v $tool >/dev/null || { echo "fetch.sh: $tool is not installed"; exit 1; }
+	command -v $tool >/dev/null || { echo "unpack.sh: $tool is not installed"; exit 1; }
 done
 # 7z leaves files compressed with LZBITMAP as an empty file and two attribute files; unzbm finishes them
 if [ ! -x $UNZBM ]; then
@@ -39,21 +58,21 @@ unzbm_all() { # unzbm_all DIR: expand every LZBITMAP file below DIR
 	find "$1" -type f -name '*:com.apple.decmpfs' | sed 's/:com\.apple\.decmpfs$//' | tr '\n' '\0' | xargs -0 -r -n 200 $UNZBM
 	local left
 	left=$(find "$1" -name '*:com.apple.*' | wc -l)
-	[ "$left" -eq 0 ] || { echo "fetch.sh: $left files in $1 are still compressed"; exit 1; }
+	[ "$left" -eq 0 ] || { echo "unpack.sh: $left files in $1 are still compressed"; exit 1; }
 }
 
 # --- the root filesystem --------------------------------------------------------------------------
 if [ ! -f .done-rootfs ] || [ select-system.py -nt .done-rootfs ]; then
 	if [ ! -f rootfs.dmg ]; then
-		echo "fetch.sh: downloading the root filesystem image (4.7 GB)"
-		python3 fetch-from-ipsw.py $ROOTFS_DMG rootfs.dmg.part
+		echo "unpack.sh: copying the root filesystem image out of the IPSW (4.7 GB)"
+		python3 ipsw-member.py "$IPSW" $ROOTFS_DMG rootfs.dmg.part
 		mv rootfs.dmg.part rootfs.dmg
 	fi
-	echo "fetch.sh: listing the image"
+	echo "unpack.sh: listing the image"
 	7z l -slt rootfs.dmg > rootfs.slt
 	python3 select-system.py rootfs.slt system.files system.manifest
 	python3 mkvarskel.py rootfs.slt > var.skel
-	echo "fetch.sh: extracting $(wc -l < system.files) files"
+	echo "unpack.sh: extracting $(wc -l < system.files) files"
 	rm -rf rootfs
 	7z x -y -orootfs rootfs.dmg @system.files > extract-system.log
 	# the two fonts too big for the image as they are, made smaller in place (see select-system.py)
@@ -68,11 +87,11 @@ fi
 # --- the OS cryptex -------------------------------------------------------------------------------
 if [ ! -f .done-cryptex ]; then
 	if [ ! -f cryptex-os.dmg ]; then
-		echo "fetch.sh: downloading the OS cryptex image (2.7 GB)"
-		python3 fetch-from-ipsw.py $CRYPTEX_DMG cryptex-os.dmg.part
+		echo "unpack.sh: copying the OS cryptex image out of the IPSW (2.7 GB)"
+		python3 ipsw-member.py "$IPSW" $CRYPTEX_DMG cryptex-os.dmg.part
 		mv cryptex-os.dmg.part cryptex-os.dmg
 	fi
-	echo "fetch.sh: extracting the cryptex"
+	echo "unpack.sh: extracting the cryptex"
 	rm -rf cryptex cryptex.cache $CACHE
 	# 7z reports every LZBITMAP file as an error ("Unsupported Method"): expected, unzbm_all checks the result
 	7z x -y -ocryptex cryptex-os.dmg '-xr!com.apple.dyld' '-x!System/DriverKit' > extract-cryptex.log 2>&1 || true
@@ -82,7 +101,7 @@ if [ ! -f .done-cryptex ]; then
 	unzbm_all cryptex.cache
 	mv cryptex.cache/System/Library/Caches/com.apple.dyld $CACHE
 	rm -rf cryptex.cache
-	[ "$(ls $CACHE | wc -l)" -eq 43 ] || { echo "fetch.sh: the dyld shared cache is incomplete"; exit 1; }
+	[ "$(ls $CACHE | wc -l)" -eq 43 ] || { echo "unpack.sh: the dyld shared cache is incomplete"; exit 1; }
 	touch .done-cryptex
 	[ -n "$KEEP" ] || rm -f cryptex-os.dmg
 fi
@@ -92,15 +111,17 @@ fi
 # and unpacked (the system image has its files at /System/Cryptexes/App)
 if [ ! -f .done-cryptex-app ]; then
 	if [ ! -f cryptex-app.dmg ]; then
-		echo "fetch.sh: downloading the App cryptex image (10 MB)"
-		python3 fetch-from-ipsw.py $APP_CRYPTEX_DMG cryptex-app.dmg.part
+		echo "unpack.sh: copying the App cryptex image out of the IPSW (10 MB)"
+		python3 ipsw-member.py "$IPSW" $APP_CRYPTEX_DMG cryptex-app.dmg.part
 		mv cryptex-app.dmg.part cryptex-app.dmg
 	fi
-	echo "fetch.sh: extracting the App cryptex"
+	echo "unpack.sh: extracting the App cryptex"
 	rm -rf cryptex-app
 	7z x -y -ocryptex-app cryptex-app.dmg > extract-cryptex-app.log 2>&1 || true
 	unzbm_all cryptex-app
-	[ -f cryptex-app/usr/libexec/webbookmarksd ] || { echo "fetch.sh: the App cryptex is incomplete"; exit 1; }
+	[ -f cryptex-app/usr/libexec/webbookmarksd ] || { echo "unpack.sh: the App cryptex is incomplete"; exit 1; }
 	touch .done-cryptex-app
 fi
-echo "fetch.sh: done: $(du -sh rootfs | cut -f1) rootfs, $(du -sh cryptex | cut -f1) cryptex, $(du -sh cryptex-app | cut -f1) App cryptex, $(du -sh $CACHE | cut -f1) dyld shared cache"
+# --- the device tree, for xnuloader/mkidentity.sh -----------------------------------------------
+[ -f DeviceTree.d22ap.im4p ] || python3 ipsw-member.py "$IPSW" Firmware/all_flash/DeviceTree.d22ap.im4p DeviceTree.d22ap.im4p
+echo "unpack.sh: done: $(du -sh rootfs | cut -f1) rootfs, $(du -sh cryptex | cut -f1) cryptex, $(du -sh cryptex-app | cut -f1) App cryptex, $(du -sh $CACHE | cut -f1) dyld shared cache"

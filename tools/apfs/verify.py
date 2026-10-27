@@ -4,7 +4,7 @@
 # Two independent references, both already in sysimage/:
 #
 #   listing  sysimage/rootfs.slt -- what 7-Zip's own APFS reader saw in the same image
-#            (`7z l -slt rootfs.dmg`, made by sysimage/fetch.sh).  Covers every entry in
+#            (`7z l -slt rootfs.dmg`, made by sysimage/unpack.sh).  Covers every entry in
 #            the volume: path, mode, owner, size, symbolic-link target, inode number.
 #
 #   content  sysimage/rootfs/ -- the files 7-Zip actually extracted, compared byte for
@@ -36,7 +36,7 @@ import apfs
 
 SYSTEM_OBJ_ID_MARK = 0x0FFFFFFF00000000
 
-# sysimage/fetch.sh cuts these two fonts down after extracting them, so what is on disk in
+# sysimage/unpack.sh cuts these two fonts down after extracting them, so what is on disk in
 # the reference tree is deliberately not what is in the image
 TRIMMED = {
     "System/Library/Fonts/CoreAddition/AppleColorEmoji-160px.ttc",
@@ -241,7 +241,7 @@ def cmd_content(image, refdir, limit, do_all, stratified):
     print("volume %r, reference tree %s" % (v.volname, refdir))
     mine = build_tree(v, note=True)
 
-    # every regular file that exists in both, minus the two fonts fetch.sh rewrites
+    # every regular file that exists in both, minus the two fonts unpack.sh rewrites
     cands = []
     for root, _dirs, files in os.walk(refdir):
         for fn in files:

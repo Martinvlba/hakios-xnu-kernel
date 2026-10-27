@@ -63,7 +63,7 @@ __pycache__/
 !/userland/var/
 
 /sysimage/*
-!/sysimage/fetch.sh
+!/sysimage/unpack.sh
 !/sysimage/*.py
 
 # of xnu-deps only what is ours; setup.sh fetches and builds the rest

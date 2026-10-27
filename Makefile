@@ -2,7 +2,7 @@
 # below it; run the script itself for its options.
 #
 #   make                 help
-#   make fetch           the OS files from the iOS 16.5 IPSW into sysimage/ (sysimage/fetch.sh)
+#   make unpack IPSW=F   the OS files out of your own iOS 16.5 IPSW into sysimage/ (sysimage/unpack.sh)
 #   make images          userland/root.apfs and userland/system.apfs (userland/build.sh)
 #   make kernel          the kernel from source (xnu/apply.sh, xnu-deps/setup.sh, xnu-build.sh)
 #   make loader          the boot loader, with identity.h made from your IPSW (xnuloader/build.sh)
@@ -50,7 +50,7 @@ IMAGE_OPTS ?= REST=1
 ESP_DIR ?= build/esp
 PAYLOAD ?= qemu/payload.bin
 
-.PHONY: devices help fetch images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig esp
+.PHONY: devices help unpack images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig esp
 
 help:
 	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
@@ -60,8 +60,8 @@ doctor:
 
 all: kernel loader images
 
-fetch:
-	sysimage/fetch.sh
+unpack:
+	sysimage/unpack.sh $(IPSW)
 
 images:
 	$(IMAGE_OPTS) userland/build.sh

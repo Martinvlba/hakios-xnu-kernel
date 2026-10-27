@@ -39,7 +39,7 @@ Linux 电脑上的 QEMU（`virt`，aarch64）里运行，不需要任何 Apple �
 永远不会有的东西：
 
 - 任何 iOS 文件：没有二进制、镜像、缓存、字体、图片或截图。系统镜像由你在自己机器上用 iOS 16.5
-  的 IPSW 构建，`sysimage/fetch.sh` 从 Apple 的公开服务器为你下载它，不解密、不绕过任何东西；
+  的 IPSW 构建，IPSW 由你自己获取并交给 `sysimage/unpack.sh`；项目不替你下载、不解密、不绕过任何东西；
 - 手机的固件（GPU、Wi-Fi、音频 DSP、调制解调器、振动、摄像头）：属于厂商，从你自己的手机取到
   `fw-*/`，git 忽略这些目录；
 - 密钥、证书、激活，或任何让手机在 Apple 服务面前冒充 iPhone 的东西。这里无法登录 Apple 账户，
@@ -71,7 +71,7 @@ Linux x86-64，约 12 GB 磁盘，7-Zip 23 或更新，`lz4`，`qemu-system-aarc
 git clone https://github.com/oosexgang/hakios.git hakios
 cd hakios
 make doctor       # 检查本机缺什么（QEMU 显示设备、UEFI 固件、内存）以及怎么办
-make fetch        # 从 Apple 服务器取 iOS 16.5 IPSW，解包所需部分（7.4 GB）
+make unpack IPSW=~/your.ipsw  # 你自己获取的 iOS 16.5 IPSW，解包所需部分（7.4 GB）
 make images       # APFS 镜像：userland/root.apfs 和 userland/system.apfs
 make loader       # 引导程序，iPhone 的标识取自你自己的 IPSW 副本（需要 clang 和 lld）
 make qemu         # 20 分钟的会话

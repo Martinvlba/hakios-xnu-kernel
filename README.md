@@ -62,9 +62,8 @@ make phone SECS=600      # a 10-minute session on the phone, in RAM
 | Repository | What |
 |---|---|
 | [hakios](https://github.com/oosexgang/hakios) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
-| [hakios-redwood](https://github.com/oosexgang/hakios-redwood) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script, and its SoC's layer (`soc/`: the Qualcomm SC7280 family) |
+| [hakios-sm7325](https://github.com/oosexgang/hakios-sm7325) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script, and its SoC's layer (`soc/`: the Qualcomm SC7280 family) |
 | [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | HakiOS's UEFI: Mu-Silicium with HakiOS's boot path, banner and name |
-| [hakios-web](https://github.com/oosexgang/hakios-web) | the website, with this documentation and the FAQ |
 
 `devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
 into `devices/` and `uefi/`. One repository per device: it carries its SoC's layer, and `tools/hakios-device.py new` makes one. [How the repositories fit](docs/porting/repositories.md).
@@ -85,8 +84,8 @@ In it: only our own code and data: the patch to Apple's open-source XNU (`xnu/ha
 loader, our programs and libraries, the tools, `prebuilt/` (built from this source; the loader **without** any Apple data:
 `make loader` makes the one that starts iOS, on your machine, from your own IPSW), and the device and SoC directories.
 
-Never in it: any file of iOS (you build the system image on your machine from the IPSW, which `sysimage/fetch.sh` downloads from
-Apple's public servers without decrypting or circumventing anything); the phone's firmware (pulled from your own phone into
+Never in it: any file of iOS (you build the system image on your machine from an IPSW you get yourself and hand to
+`sysimage/unpack.sh`; nothing is downloaded for you, decrypted or circumvented); the phone's firmware (pulled from your own phone into
 `fw-*/`, which git ignores); keys, certificates, activation, or anything that would make the phone pass as an iPhone to Apple.
 
 ## Independent, and Apple-free at the core

@@ -239,7 +239,7 @@ src_root, dest, labels = args[0], args[1], args[2:]
 oslog = os.environ.get('OSLOG', '').split()
 src = f'{src_root}/System/Library/LaunchDaemons'
 # A program in a cryptex -- on a device a volume of its own, grafted at /System/Cryptexes/NAME (eight of
-# Safari's daemons are in the App cryptex) -- is looked for where fetch.sh unpacked that cryptex, beside
+# Safari's daemons are in the App cryptex) -- is looked for where unpack.sh unpacked that cryptex, beside
 # the root filesystem; the images have it at the same place (build.sh).
 CRYPTEXES = {'/System/Cryptexes/OS/': 'cryptex', '/System/Cryptexes/App/': 'cryptex-app'}
 
