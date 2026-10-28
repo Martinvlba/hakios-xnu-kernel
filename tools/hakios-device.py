@@ -378,6 +378,11 @@ def cmd_sync(a):
             print("hakios-device: %s: cloning %s" % (name, repository))
             git("clone", "-q", repository, top)
         else:
+            # the manifest says where the repository is: a clone made before it moved or was renamed follows it
+            origin = subprocess.run(["git", "remote", "get-url", "origin"], cwd=top, capture_output=True, text=True).stdout.strip()
+            if origin != repository:
+                print("hakios-device: %s: origin was %s, now %s (as the manifest says)" % (name, origin or "(none)", repository))
+                git("remote", "set-url" if origin else "add", "origin", repository, cwd=top)
             git("fetch", "-q", "origin", cwd=top)
         if revision:
             git("checkout", "-q", revision, cwd=top)
