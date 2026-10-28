@@ -1,0 +1,11 @@
+#!/bin/bash
+# sha256sum as GNU coreutils has it, on macOS (whose own has no --quiet): shasum -a 256, which reads and checks the same
+# "HASH  FILE" lines. --quiet: the checks print nothing on success (shasum's are not quiet of themselves).
+quiet= args=()
+for a in "$@"; do
+	if [ "$a" = --quiet ]; then quiet=1; else args+=("$a"); fi
+done
+if [ -n "$quiet" ]; then
+	exec shasum -a 256 "${args[@]}" > /dev/null
+fi
+exec shasum -a 256 "${args[@]}"
