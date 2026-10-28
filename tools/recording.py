@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Make a video of a screen recording left by the kernel's display driver (boot-arg rec_secs=N).
 
-usage: recording.py RECORDING OUT.mp4 [--max-hold SECONDS] [--frames FOLDER]
+usage: recording.py RECORDING OUT.mp4 [--fps N] [--max-hold SECONDS] [--frames FOLDER]
 
 With --max-hold, no picture stays longer than that: the stretches in which nothing changes on the
 screen (an emulated machine thinking about starting an application) are cut short, while whatever
@@ -14,20 +14,24 @@ frame the time it was shown (nanoseconds from the first) and width x height pixe
 is kept begins wherever the run's last frames began; "began" is when the first frame was recorded,
 in nanoseconds of the kernel's time. ("RWREC002", a kernel before that, has no "began".)
 The frames are not evenly spaced -- one is recorded whenever the screen changes -- so each is
-repeated for as long as it stayed on the screen, at 30 pictures a second, and ffmpeg encodes
-that. The picture is enlarged twice (it was recorded at a third of the panel's resolution).
+repeated for as long as it stayed on the screen, at 60 pictures a second (--fps: another rate), and
+ffmpeg encodes that. 60 because the window server shows at most one frame per 60 Hz beat: at that
+rate every frame the screen showed has a picture of its own. The video used to be made at 30, which
+threw away every other frame of a smooth 60 and put the rest on a 33 ms grid, so a recording of a
+smooth screen played back jerky. The picture is enlarged twice (it was recorded at a third of the panel's resolution).
 """
 import os
 import struct
 import subprocess
 import sys
 
-FPS = 30
+FPS = 60
 
 
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
+    fps = int(sys.argv[sys.argv.index('--fps') + 1]) if '--fps' in sys.argv else FPS
     data = open(sys.argv[1], 'rb').read()
     magic, width, height, frames, oldest = struct.unpack_from('<8sIIII', data, 0)
     if magic not in (b'RWREC002', b'RWREC003') or not width or not height:
@@ -72,12 +76,27 @@ def main():
     out = sys.argv[2]
     codec = ['-c:v', 'libx264', '-preset', 'slow', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
     ffmpeg = subprocess.Popen(['ffmpeg', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-                               '-s', f'{width}x{height}', '-r', str(FPS), '-i', '-', '-vf', scale] + codec + [out],
+                               '-s', f'{width}x{height}', '-r', str(fps), '-i', '-', '-vf', scale] + codec + [out],
                               stdin=subprocess.PIPE)
-    current = 0
-    for n in range(int(length * FPS)):
-        while current + 1 < len(times) and times[current + 1] <= n / FPS:
-            current += 1
+    # Each frame gets a picture of its own: the one nearest to when it was shown or, when a frame shown
+    # a little late (the present beat wanders by a few milliseconds) finds that one taken by the frame
+    # before, the next. Sampling the screen at the pictures' times instead lost one frame in ten of a
+    # steady 60. A frame more than two pictures late is one the screen showed faster than FPS: dropped.
+    slot, last, dropped = [], -1, 0
+    for t in times:
+        want = round(t * fps)
+        if max(want, last + 1) - want > 2:
+            slot.append(None)
+            dropped += 1
+            continue
+        last = max(want, last + 1)
+        slot.append(last)
+    current, k = 0, 0
+    for n in range(int(length * fps)):
+        while k < len(times) and (slot[k] is None or slot[k] <= n):
+            if slot[k] is not None:
+                current = k
+            k += 1
         ffmpeg.stdin.write(data[offsets[current]:offsets[current] + size])
     ffmpeg.stdin.close()
     if ffmpeg.wait() != 0:
@@ -86,7 +105,8 @@ def main():
     typical = gaps[len(gaps) // 2] if gaps else 0
     print(f'{out}: {len(times)} frames over {real:.1f} s ({len(times) / max(real, 0.001):.1f} a second on average'
           + (f', typically {1 / typical:.0f} a second while something moves' if typical else '') + f'), {width}x{height}'
-          + (f'; the video is {times[-1]:.0f} s long' if times[-1] != real else ''))
+          + (f'; the video is {times[-1]:.0f} s long' if times[-1] != real else '')
+          + (f'; {dropped} frames came faster than {fps} a second and are not in it' if dropped else ''))
 
 
 if __name__ == '__main__':
