@@ -236,7 +236,15 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -bundle -framework CoreFoundation -o obj/HakiosAudio src/audio_plugin.c
 		# the plug-in Metal loads when the kernel names it (boot-arg metal=1): a device, its buffers and the libraries it reads
 		# (src/HakiosMetal.m, src/hakios_metallib.c; tools/metal-plugin-test.sh tries the same objects on a Mac)
-		$DYN -bundle -framework Foundation -framework Metal -lobjc -o obj/HakiosMetal src/HakiosMetal.m src/hakios_metallib.c
+		# With hakios-metal (github.com/oosexgang/hakios-metal, `make ios` in it, beside this tree or at HAKIOS_METAL=): buffers in
+		# the GPU's memory, command buffers, and blits done by the GPU when the kernel has one (gpu=1). Without it, the plug-in as before.
+		HM=${HAKIOS_METAL:-../../hakios-metal}
+		METAL_GPU=
+		if [ -f $HM/out/ios/libhakios-metal.a ]; then
+			METAL_GPU="-DHAKIOS_METAL_GPU -I$HM/include $HM/out/ios/libhakios-metal.a -lc++ -framework IOKit"
+			echo "build.sh: HakiosMetal with hakios-metal ($HM)"
+		fi
+		$DYN -bundle -framework Foundation -framework Metal -lobjc -o obj/HakiosMetal src/HakiosMetal.m src/hakios_metallib.c $METAL_GPU
 		if [ -n "$GL" ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
 			# (Mesa says beside the library what it was built from: one from other patches is built again)
