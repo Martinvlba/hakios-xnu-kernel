@@ -30,6 +30,8 @@
 #   XL_FOLLOW=N fetch the kernel's log every N seconds during a run (default 10; XL_FOLLOW= for never), so that a kernel
 #               that hangs leaves what it said in logs/<time>-run.log.live; after a hang `run` brings the phone back to
 #               Android itself, or says what to press if it is stuck on the logo
+#   XL_HOME=fastboot   after a hang, keep the phone in its bootloader instead of sending it to Android (and send it
+#               there from Android): a long session of runs never waits for Android to start
 #   XL_REBOOT_AFTER=1  when the run is over, send the phone back to Android (it charges there; in the loader it does not,
 #               and its screen stays on: a phone left in the loader overnight is a flat one by morning)
 #   XL_SB_DELAY seconds SpringBoard waits before it starts (default 8; see userland/src/inject_sb.c)
@@ -86,15 +88,25 @@ wait_for() { # wait_for <state> <seconds>
 # charges badly there and a person has to notice), or on the logo, where it does not show on USB at all. Wait for Android;
 # a phone that appears in the bootloader or in this loader is sent on to Android at once; if nothing has come back after
 # two and a half minutes, say what a person has to do, because nothing here can reach a phone that is not on USB.
+# XL_HOME=fastboot: the other way round, for a session of many runs: the phone is kept in its bootloader, where the next
+# run starts at once, and one that comes up in Android is sent there (the logo is the one place nothing here can help).
 recover_phone() {
 	local i s
 	for ((i = 0; i < 150; i += 3)); do
 		s=$(state)
-		case "$s" in
-		android) echo "xl: phone is back in Android"; return 0 ;;
-		fastboot) echo "xl: the phone stopped in its bootloader: sending it on to Android"; timeout 10 fastboot reboot >/dev/null 2>&1 ;;
-		loader) echo "xl: the phone is in this loader: sending it on to Android"; fb reboot >/dev/null ;;
-		esac
+		if [ "${XL_HOME:-android}" = fastboot ]; then
+			case "$s" in
+			fastboot) echo "xl: phone is back in its bootloader (XL_HOME=fastboot)"; return 0 ;;
+			android) echo "xl: the phone came up in Android: sending it to its bootloader (XL_HOME=fastboot)"; adb reboot bootloader ;;
+			loader) echo "xl: the phone is in this loader: restarting it (it comes up in Android, and goes on from there)"; fb reboot >/dev/null ;;
+			esac
+		else
+			case "$s" in
+			android) echo "xl: phone is back in Android"; return 0 ;;
+			fastboot) echo "xl: the phone stopped in its bootloader: sending it on to Android"; timeout 10 fastboot reboot >/dev/null 2>&1 ;;
+			loader) echo "xl: the phone is in this loader: sending it on to Android"; fb reboot >/dev/null ;;
+			esac
+		fi
 		sleep 3
 	done
 	echo "xl: the phone has not come back (state: $(state)): it is on the logo, off, or not on this cable."
