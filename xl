@@ -65,6 +65,10 @@ mkdir -p logs
 # There is one phone, whichever working copy (tools/new-workspace.sh) talks to it: the locks are
 # outside all of them.
 PHONE=${XDG_RUNTIME_DIR:-/tmp}/darwin-hakios-phone
+# adb starts a server of its own the first time, and the server inherits every open descriptor: started during a run it
+# kept the run's lock (descriptor 8, below) for as long as it lived, and every later command said a run was in progress
+# (27 October). So adb never gets that descriptor.
+adb() { command adb "$@" 8>&-; }
 
 # one fastboot at a time (a run in one terminal, "xl screenshot" in another): each takes the lock for itself
 fb() { flock -w 90 $PHONE.lock timeout "${FB_TIMEOUT:-10}" fastboot "$@" 2>&1; }
@@ -132,7 +136,7 @@ enter() {
 	for try in 1 2; do
 		FB_TIMEOUT=40 fb boot xnu-usb.img | grep -q OKAY || { sleep 3; continue; }
 		sleep 6
-		wait_for loader 30 && return 0
+		wait_for loader 30 && { rm -f $PHONE.ran; return 0; }
 		[ "$(state)" = fastboot ] || break
 	done
 	echo "xl: loader did not come up on USB (state: $(state))"; return 1
@@ -144,7 +148,13 @@ fetch_log() { # fetch_log <file>
 	[ -s "$1" ] && tr -d '\0' < "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
+# A second kernel in one session of the loader dies at once (27 October, four runs: every run after one that returned,
+# whatever its arguments, gave no answer within 5 s; every first run of a session lived). Restart the phone into its own
+# bootloader between runs ("xl run" warns when this session has run a kernel already).
 run() { # run <oem command> <label>
+	if [ "$(state)" = loader ] && [ -f $PHONE.ran ]; then
+		echo "xl: warning: a kernel has already run in this session of the loader, and a second one has died at once every time it was tried"
+	fi
 	enter || return 1
 	exec 8> $PHONE.run
 	flock -n 8 || { echo "xl: a run is in progress, started from $(cat $PHONE.who 2>/dev/null) (xl stop ends it)"; return 1; }
@@ -217,6 +227,7 @@ run() { # run <oem command> <label>
 		return 2
 	fi
 	fetch_log "$log"
+	touch $PHONE.ran                # (this session of the loader has run its kernel: see fresh_session)
 	ln -sf "$(basename "$log")" logs/last.log
 	echo "$result  [$log]"
 	case "$result" in
