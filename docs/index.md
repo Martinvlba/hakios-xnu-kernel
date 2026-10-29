@@ -11,6 +11,7 @@ Where to start:
 - [On the phone](getting-started/phone.md): the POCO X5 Pro 5G, in RAM with `fastboot boot`, back to Android with a reboot.
 - [Port a device](porting/index.md): a device is a repository of its own over the common one: a defconfig, a status file, its
   drivers.
+- [U-Boot](u-boot.md): the loader started by U-Boot instead of Silicium's UEFI, from RAM, with nothing of the vendor's.
 - [Reference](reference/drivers.md): every driver, configuration symbol and boot argument, made from the source.
 
 ## What works

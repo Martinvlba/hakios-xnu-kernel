@@ -1,0 +1,10 @@
+# HakiOS's U-Boot on QEMU's virt machine: the phone's way of starting (the hakios command: the loader and its payload
+# from memory, bootefi) on a machine anyone has. qemu/run-u-boot.sh puts the HKUB container in memory at 0x50000000,
+# where a phone's ABL would have put its ramdisk.
+#include "qemu_arm64_defconfig"
+
+CONFIG_CMD_HAKIOS=y
+CONFIG_BOOTDELAY=0
+CONFIG_BOOTCOMMAND="hakios load 0x50000000 && hakios boot"
+# (a host tool that needs GnuTLS, and capsules are not used here)
+# CONFIG_TOOLS_MKEFICAPSULE is not set

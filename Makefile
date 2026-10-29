@@ -16,6 +16,9 @@
 #   make doctor          check this machine and a phone on adb for what HakiOS needs (tools/doctor.sh)
 #   make esp             an EFI system partition tree in build/esp: the loader and a payload it reads itself,
 #                        to copy to a FAT32 volume (UEFI-native boot, no fastboot; docs/uefi-boot.md)
+#   make u-boot          HakiOS's U-Boot for $(DEVICE) (uefi/u-boot/apply.sh, uefi/u-boot/build.sh; docs/u-boot.md)
+#   make u-boot-img      hakios-u-boot.img: U-Boot as a boot image for fastboot boot, starting the loader from RAM
+#   make qemu-u-boot     make qemu-open's payload booted the phone's way: U-Boot, the hakios command, bootefi
 #
 # Configuration, the way Linux's make does it (configs/, tools/hakios-config.py; docs/configs.md):
 #   make redwood_defconfig   .config from configs/defconfig + redwood_defconfig (devices/redwood/configs/), which is
@@ -49,8 +52,10 @@ endif
 IMAGE_OPTS ?= REST=1
 ESP_DIR ?= build/esp
 PAYLOAD ?= qemu/payload.bin
+# make u-boot-img: the payload put in the image's ramdisk with the loader (none: U-Boot waits for them over fastboot)
+UBOOT_PAYLOAD ?=
 
-.PHONY: devices help unpack images kernel loader loader-open hello qemu qemu-open phone prebuilt clean all doctor defconfig config savedefconfig esp
+.PHONY: devices help unpack images kernel loader loader-open hello qemu qemu-open qemu-u-boot u-boot u-boot-img phone prebuilt clean all doctor defconfig config savedefconfig esp
 
 help:
 	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
@@ -100,6 +105,23 @@ qemu-open: kernel loader-open hello
 		kernel=hakios-kernel \
 		ramdisk=userland/hello --cmdline "$(ARGS_OPEN)"
 	qemu/run.sh $(SECS) | tee logs/qemu-open.log
+
+# HakiOS's U-Boot (docs/u-boot.md): the phone's ABL starts it from RAM (fastboot boot), and it starts the loader from
+# memory; nothing is flashed. u-boot/ is made once by uefi/u-boot/apply.sh, with every device's U-Boot files.
+u-boot:
+	[ -d u-boot ] || uefi/u-boot/apply.sh
+	uefi/u-boot/build.sh $(DEVICE)
+
+u-boot-img:
+	tools/mkubootimg.py -d $(DEVICE) $(if $(wildcard $(UBOOT_PAYLOAD)),-p $(UBOOT_PAYLOAD))
+
+qemu-u-boot: kernel loader-open hello
+	[ -f u-boot/build-qemu/u-boot.bin ] || { [ -d u-boot ] || uefi/u-boot/apply.sh; uefi/u-boot/build.sh qemu; }
+	mkdir -p logs
+	xnuloader/mkpayload.py -o qemu/payload.bin \
+		kernel=hakios-kernel \
+		ramdisk=userland/hello --cmdline "$(ARGS_OPEN)"
+	qemu/run-u-boot.sh $(SECS) | tee logs/qemu-u-boot.log
 
 phone:
 	[ ! -f .config ] || tools/hakios-config.py check

@@ -34,6 +34,8 @@
 #               there from Android): a long session of runs never waits for Android to start
 #   XL_REBOOT_AFTER=1  when the run is over, send the phone back to Android (it charges there; in the loader it does not,
 #               and its screen stays on: a phone left in the loader overnight is a flat one by morning)
+#   XL_FIRMWARE=u-boot|silicium   what the phone's bootloader starts the loader with (default: Silicium's UEFI when its
+#               image is built, else HakiOS's U-Boot: docs/u-boot.md); either way from RAM, nothing is flashed
 #   XL_SB_DELAY seconds SpringBoard waits before it starts (default 8; see userland/src/inject_sb.c)
 #               Among XL_CMDLINE, for the phone: bootcpu=7 runs the kernel on the biggest core instead of
 #               the small one the firmware starts on (the loader then watches from the first core, and a
@@ -119,6 +121,20 @@ recover_phone() {
 	return 1
 }
 
+# What the phone's bootloader starts the loader with: Project Silicium's UEFI (mkxnuimg.py) or HakiOS's U-Boot
+# (tools/mkubootimg.py, docs/u-boot.md). XL_FIRMWARE says which; without it, Silicium's when its image has been built
+# (it is made from the phone's own vendor drivers and is not in the repository), else U-Boot's.
+firmware() {
+	case "${XL_FIRMWARE:-}" in
+	u-boot|silicium) echo "$XL_FIRMWARE"; return ;;
+	esac
+	if [ -f Mu-Silicium/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ] || [ -f devices/redwood/prebuilt/SILICIUM_UEFI.fd ]; then
+		echo silicium
+	else
+		echo u-boot
+	fi
+}
+
 enter() {
 	case "$(state)" in
 	loader) return 0 ;;
@@ -129,8 +145,11 @@ enter() {
 		[ "$(state)" = absent ] && { echo "xl: phone not reachable"; return 1; }
 		enter; return ;;
 	esac
-	xnuloader/mkpayload.py -o usb-payload.bin loader.efi=$L --usb >/dev/null &&
-		./mkxnuimg.py -p usb-payload.bin -o xnu-usb.img >/dev/null || { echo "xl: image build failed"; return 1; }
+	xnuloader/mkpayload.py -o usb-payload.bin loader.efi=$L --usb >/dev/null || { echo "xl: payload build failed"; return 1; }
+	case "$(firmware)" in
+	u-boot) tools/mkubootimg.py -d "${DEVICE:-redwood}" -l $L -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
+	*) ./mkxnuimg.py -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
+	esac || { echo "xl: image build failed ($(firmware))"; return 1; }
 	# Right after the phone enters fastboot the first "boot" is sometimes not taken: try twice.
 	local try
 	for try in 1 2; do

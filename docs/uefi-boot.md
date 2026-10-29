@@ -61,3 +61,5 @@ A file that is not a payload gives `is not a payload (no XNUP at its start)`, an
   Manager (or a UEFI that boots from a volume) before it can be.
 - Whether Silicium leaves `0xF0000000` free at the point where the loader runs is not known.
 - The way to a phone that does not need a host today is the boot image itself, in a boot slot: `docs/install.md`.
+- Another UEFI on the phone, all of it open source: HakiOS's U-Boot, started from RAM by ABL, which takes the loader and the
+  payload from memory and starts the loader with `bootefi` ([U-Boot](u-boot.md)).
