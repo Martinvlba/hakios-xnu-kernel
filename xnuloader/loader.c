@@ -1529,13 +1529,13 @@ ufs_survey(void)
  * from the computer (tools/darwin-write.py) is the iOS volume at its start and the two cryptexes
  * behind it, and nothing of this port reads or writes the rest -- so the data of iOS lives there
  * and a write is refused before that block. The identity: the partition named darwin, of the APFS
- * container type, of the same size, in the same place, on logical unit 0. Not its unique GUID:
- * tools/userdata-carve.py gives every phone's darwin a new one (BLOCK_DARWIN_UNIQ was the first
- * phone's, made by darwin-write.py, and no write was ever served on another); it is printed instead.
+ * container type, on logical unit 0, in blocks of 4096 and at least the 20 GiB the port lays out. Not
+ * its place, its exact size or its unique GUID: tools/userdata-carve.py makes darwin at the end of
+ * whatever userdata the phone has, with a GUID of its own (BLOCK_DARWIN_FIRST/LAST and _UNIQ were
+ * the first phone's, and no write was ever served on another); they are printed instead.
  */
 #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
-#define BLOCK_DARWIN_FIRST 25374720ULL                 /* its first and last LBA of unit 0, as the GPT has them */
-#define BLOCK_DARWIN_LAST  30617594ULL
+#define BLOCK_DARWIN_MIN   5242875ULL                  /* blocks of 4096: the first phone's darwin, the layout's */
 #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
 
 /*
@@ -1888,14 +1888,13 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
 	}
 	if (memcmp(&info->type_guid, &type, sizeof(type)) != 0) {
 		why = "its type GUID is not the one it had";
-	} else if (info->start_lba != BLOCK_DARWIN_FIRST || info->end_lba != BLOCK_DARWIN_LAST) {
-		why = "it does not begin and end where it did";
 	} else if (bp->unit != 0) {
 		/* the first unit UEFI lists: this firmware's device paths say no logical unit number
 		 * (device_path_print finds no 3.19 node), so bp->lun is 0xff for every unit */
 		why = "it is not on the first logical unit";
-	} else if (bp->block_size != 4096 || bp->blocks != BLOCK_DARWIN_LAST - BLOCK_DARWIN_FIRST + 1) {
-		why = "its blocks are not what they were";
+	} else if (bp->block_size != 4096 || bp->blocks < BLOCK_DARWIN_MIN ||
+	    info->end_lba - info->start_lba + 1 != bp->blocks) {
+		why = "it is not 20 GiB in blocks of 4096";
 	} else if (bio->media->read_only) {
 		why = "UEFI gives it out read only";
 	}

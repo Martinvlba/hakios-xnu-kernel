@@ -83,11 +83,12 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
  * Where a write may go, and nowhere else: darwin, the port's own 20 GiB at the end of logical
  * unit 0, and in it only past what the build puts there from the computer -- the iOS volume
  * (blocks 0..1374207) and the two cryptexes behind it (..2042367). The loader keeps the same
- * bounds and the GUIDs of the partition besides (xnuloader/loader.c, BLOCK_WRITE_FIRST).
+ * bounds and checks the partition's type besides (xnuloader/loader.c, BLOCK_WRITE_FIRST). Where darwin
+ * begins and its exact size are the phone's (tools/userdata-carve.py puts it after userdata, whatever
+ * that is): at least the layout's 20 GiB.
  */
 #define UFS_WRITE_FIRST    2042368ULL                  /* darwin's blocks of 4096 */
-#define UFS_DARWIN_FIRST   25374720ULL                 /* its first LBA on the unit, as the GPT has it */
-#define UFS_DARWIN_BLOCKS  5242875ULL
+#define UFS_DARWIN_MIN     5242875ULL                  /* the first phone's darwin, in blocks of 4096 */
 
 struct loader_block_part {
 	char name[36];
@@ -1786,10 +1787,8 @@ hakios_ufs_init(void)
 				 * has compared with the loader's reads; the device path this firmware gives
 				 * says no logical unit number at all, so part[].lun is 0xff for every unit */
 				why = "it is not on the first logical unit";
-			} else if (ufs_page->part[i].start_lba != UFS_DARWIN_FIRST) {
-				why = "it does not begin where it did";
-			} else if (ufs_page->part[i].blocks != UFS_DARWIN_BLOCKS) {
-				why = "it is not the size it was";
+			} else if (ufs_page->part[i].blocks < UFS_DARWIN_MIN) {
+				why = "it is smaller than the layout's 20 GiB";
 			} else if (ufs_page->part[i].block_size != 4096) {
 				why = "its blocks are not 4096 bytes";
 			}
@@ -1802,7 +1801,7 @@ hakios_ufs_init(void)
 		if (ufs_write_part >= 0) {
 			printf("ufs: /dev/rufs_darwin takes writes, whole blocks from %llu on (%llu MB of it); "
 			    "everything else of the storage is read only\n", UFS_WRITE_FIRST,
-			    (UFS_DARWIN_BLOCKS - UFS_WRITE_FIRST) * 4096 >> 20);
+			    (ufs_page->part[ufs_write_part].blocks - UFS_WRITE_FIRST) * 4096 >> 20);
 			if (devfs_make_node(makedev(ufs_bmajor, UFS_DATA_MINOR), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640,
 			    "ufs_darwin_data") != NULL) {
 				printf("ufs: /dev/ufs_darwin_data: the same %llu MB as a block device, for the data volume; "
