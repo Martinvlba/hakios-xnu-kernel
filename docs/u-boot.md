@@ -182,3 +182,50 @@ If U-Boot hangs, the menu (volume down) and `fastboot oem console` are the ways 
 - What the loader asks Qualcomm's UEFI for and U-Boot does not have: the charger protocols (the loader goes on without the battery
   reading) and `EFI_CPU_ARCH_PROTOCOL` (the loader's exception hook is not installed; a fault in the loader resets the phone instead of
   being logged).
+
+## Installed beside Android: a menu at every start
+
+What was done on the POCO X5 Pro, 29 October 2026, in this order, each step checked before the next:
+
+1. **Backup** (`tools/backup-partitions.py --yes`, read only, as root): the boot partitions of both slots, `vbmeta*`, `misc`,
+   `devinfo`, `persist`, `modemst1/2`, `fsg`, the first and last 8 blocks of every unit (sda...sdf), each proven by three
+   SHA-256s; a second copy kept off the working tree.
+2. **`darwin`** (`tools/userdata-carve.py --wipe DIR 20`): userdata shortened, `darwin` (sda34, 20 GiB, APFS container
+   type) at the end of LUN 0, two entries changed, both copies of the table checked here and with `sfdisk --sector-size
+   4096`; written from Android (root) with `dd`, read back; then `fastboot -w` (**Android's data is erased**).
+3. **The iOS volume** into `darwin`: Apple's root volume of the IPSW (`tools/apfs/dmg.py extract`), the OS and App cryptexes
+   after it, as the port's own layout (`docs/ru/notes.md`, "Криптексы на флеше"): 8.4 GB as 11 sparse pieces
+   (`tools/sparse-split.py`: Google's fastboot for Windows runs out of memory on one 8 GB image), read back by U-Boot
+   (`hakios sum darwin 0 2042368`) with the image's own sum.
+4. **iOS from `darwin`, still from RAM**: `CRYPTEXES=flash FLASHBOOT=1 userland/build.sh`, `xl ramdisk userland/flashboot.apfs`,
+   `root_apfs=ufs_darwin ufs=2`: the iOS volume is the root, SpringBoard up.
+5. **The boot image of slot a** (`tools/mkubootimg.py --install`): U-Boot, the loader, a payload with the kernel, `root.apfs`
+   and `flashboot.apfs` as its `resident` image (the loader puts it where `xl ramdisk` would), the flash-root command line,
+   and `devices/redwood/u-boot/install.env`; `fastboot flash boot_a`, `fastboot set_active a`.
+
+At every start: U-Boot marks slot a successful and shows the menu; **Android** (the default after 10 s) marks slot a
+unbootable and restarts, and ABL makes slot b active itself; `fastboot set_active a` (or `hakios-menu.sh` in Android, with
+root) brings the menu back. Seen on the phone: the menu, and Android from it.
+
+### Which slot is active is never U-Boot's to change
+
+On these phones a slot being active is three things that ABL's `SetActiveSlot()` changes together: the bits of
+`boot_a`/`boot_b`, the type GUIDs of every `_a`/`_b` pair (23 on LUN 4, `vbmeta_system` on LUN 0: the active slot's carry
+the real types, the other's `77036cd4-...`, which XBL loads by), and the UFS boot LUN (1 for a, 2 for b). At every boot
+`ValidateSlotGuids()` refuses a slot whose `boot_X` and `abl_X` carry the same GUID or whose LUN does not match:
+`Failed to load/authenticate boot image: Device Error`, for every image, Android's too.
+
+A first version of `hakios slot b` changed the bits alone. After it no image started, and no ABL command could help: every
+`set_active` swaps the GUIDs *and* moves the bits, so the two stay apart. What brought the phone back:
+
+- **not** `fastboot flash partition:N` with a stock table set blindly: ABL's `WriteGpt()` calls `ErasePartition()` on the
+  whole unit first. On this phone that erase left the data as it was (every partition read back the same), but the code
+  says otherwise and LUN 4 holds `abl`, `tz`, `hyp`, `modem` and the phone's own `secdata`, `storsec`, `tzsc`;
+- `fastboot flash partition:4` with **this phone's own** LUN 4 table from step 1, in ABL's `gpt_both` layout
+  (`work/gptboth.py`: what ABL's `PatchGpt()` makes of it was computed first: every block as it was but the backup header's
+  `my_lba`, which ABL always sets to 1), then `fastboot set_active b` (the slot already active: ABL sets the boot LUN only);
+- then the hashes of `boot_b`, `vendor_boot_b`, `dtbo_b`, `vbmeta_a/b` read by U-Boot: those of the backup.
+
+So `hakios slot` changes only the active slot's own bits, as ABL does (`successful`, `unbootable`), and only ABL or
+Android's boot control HAL change which slot is active. LUN 0's `vbmeta_system` pair was swapped by ABL three times
+during this and is the other way round from LUN 4 now; nothing that starts reads it by type, and it is left so.
