@@ -15,7 +15,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-REPO = "https://github.com/oosexgang/hakios/blob/main/"
+REPO = "https://github.com/oosexgang/hakios-xnu-kernel/blob/hakios/"
 MARK = {"works": "works", "partial": "partly", "missing": "no"}
 HEADER = "<!-- Made by tools/docs-gen.py from %s. Do not edit: change that, then run tools/docs-gen.py. -->\n\n"
 
@@ -74,11 +74,21 @@ def drivers_page(hc, hd):
     return "\n".join(out)
 
 
+def repository_link(hd, name):
+    """A device with a repository of its own (devices/manifest.conf) links there; one kept in this tree, here."""
+    for kind, n, fields, _line in hd.manifest():
+        repository = hd.one(fields, "repository")
+        if kind == "device" and n == name and repository:
+            url = repository[:-4] if repository.endswith(".git") else repository
+            return "[%s](%s)" % (url.rsplit("/", 1)[-1], url)
+    return "[`devices/%s/`](%sdevices/%s)" % (name, REPO.replace("/blob/", "/tree/"), name)
+
+
 def device_page(hd, name, fields):
     out = [HEADER % "devices/%s/device.conf" % name, "# %s (`%s`)" % (hd.one(fields, "title"), name), ""]
     rows = [("Vendor", hd.one(fields, "vendor", "?")), ("SoC", "`%s`" % hd.one(fields, "soc", "?")),
             ("Configuration", "`make %s`" % hd.one(fields, "defconfig", "?")), ("Maintainer", hd.one(fields, "maintainer", "?")),
-            ("Repository", "[`devices/%s/`](%sdevices/%s)" % (name, REPO.replace("/blob/", "/tree/"), name))]
+            ("Repository", repository_link(hd, name))]
     if hd.one(fields, "firmware"):
         rows.append(("Firmware", "`devices/%s/%s` pulls it from your own phone" % (name, hd.one(fields, "firmware"))))
     out += ["| | |", "|---|---|"] + ["| %s | %s |" % r for r in rows] + ["", "## What works", "", "| Part | State | |", "|---|---|---|"]

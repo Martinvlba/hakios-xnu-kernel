@@ -1,7 +1,7 @@
 Built 2026-10-25 22:53 from this tree.
 
 03e794e8e1d389a6abb9bcd2431eaccf9747271ff8c1234922225718c70441e9  prebuilt/hakios-kernel
-adb2f30c01ad7e6842ce6cec43b8d75bc0f76d68543ffb41c0d02c1d285e4b73  prebuilt/loader.efi
+fb856531febdc303af412c66e30921aaa2fd7158baad5986144eed922dd614a7  prebuilt/loader.efi
 932c856c04e87611b16c872da37c461d572c6258da0202ecd875d91c29886e03  prebuilt/userland/HakiosAudio
 45bffe2da6b2484836bd29074b39bd5cc67b4cdaa253c2aa39561ce5188d6ddc  prebuilt/userland/child
 35f3065e4602965911a20d0666a289cafba16644e611ea870d40bda81ea67546  prebuilt/userland/cpu_test
