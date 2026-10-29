@@ -1506,6 +1506,15 @@ ufs_survey(void)
 #define BLOCK_PART_UNIT    1u                          /* the entry is a whole logical unit, not a partition */
 #define BLOCK_OP_READ      0u
 #define BLOCK_OP_WRITE     1u
+/*
+ * The data volume's writes (HFS Plus on /dev/ufs_darwin_data): written and nothing more -- no flush, no read back --
+ * because its journal asks for the flush itself (BLOCK_OP_FLUSH) where the order matters, and a flush and a read
+ * back after every 4 KB of metadata made iOS crawl. Offered with BLOCK_CAN_FAST in write_caps; the same bounds as
+ * BLOCK_OP_WRITE. /dev/rufs_darwin's writes stay BLOCK_OP_WRITE, flushed and read back.
+ */
+#define BLOCK_OP_WRITE_FAST 2u
+#define BLOCK_OP_FLUSH     3u                          /* the write partition's cache to the flash; one block in bounds */
+#define BLOCK_CAN_FAST     1u
 
 /*
  * The one partition a write may reach, and from which of its blocks. darwin is the port's own
@@ -1553,7 +1562,7 @@ struct loader_block {
 	 * which is a read, and a loader that does not know them leaves these zero, which is no write.
 	 */
 	uint32_t write_part_plus_one;
-	uint32_t write_reserved;
+	uint32_t write_caps;                   /* BLOCK_CAN_FAST; zero from a loader before it, which a kernel reads as none */
 	uint64_t write_first;
 	/* written by the kernel: what it wants, then request is advanced */
 	struct {
@@ -2015,6 +2024,7 @@ block_start(void)
 	if (block_write_part >= 0) {
 		block_shared.write_part_plus_one = (uint32_t)block_write_part + 1;
 		block_shared.write_first = BLOCK_WRITE_FIRST;
+		block_shared.write_caps = BLOCK_CAN_FAST;
 	}
 	block_shared.magic = BLOCK_MAGIC;
 	block_shared.version = BLOCK_VERSION;
@@ -2140,7 +2150,7 @@ block_poll(void)
 			}
 			s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
 			bytes = 0;
-		} else if (op == BLOCK_OP_WRITE) {
+		} else if (op == BLOCK_OP_WRITE || op == BLOCK_OP_WRITE_FAST || op == BLOCK_OP_FLUSH) {
 			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < BLOCK_WRITE_FIRST) {
 				/* not darwin, or not past what the build writes from the computer: never */
 				if (block_writes_refused++ < 8) {
@@ -2149,6 +2159,17 @@ block_poll(void)
 				}
 				s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
 				bytes = 0;
+			} else if (op == BLOCK_OP_FLUSH) {
+				s = bio->flush_blocks(bio);
+				bytes = 0;
+			} else if (op == BLOCK_OP_WRITE_FAST) {
+				flush_dcache((uint64_t)(uintptr_t)block_buffer,
+				    (uint64_t)(uintptr_t)block_buffer + bytes);
+				s = bio->write_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
+				if (!EFI_ERROR(s)) {
+					block_writes++;
+					block_write_bytes += bytes;
+				}
 			} else {
 				/*
 				 * The kernel filled the buffer and cleaned its lines of it; drop whatever this

@@ -75,6 +75,9 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
 #define BLOCK_PART_UNIT    1u                          /* a whole logical unit, not a partition */
 #define BLOCK_OP_READ      0u
 #define BLOCK_OP_WRITE     1u
+#define BLOCK_OP_WRITE_FAST 2u                         /* written only: the data volume's (the loader, BLOCK_OP_WRITE_FAST) */
+#define BLOCK_OP_FLUSH     3u
+#define BLOCK_CAN_FAST     1u
 
 /*
  * Where a write may go, and nowhere else: darwin, the port's own 20 GiB at the end of logical
@@ -110,7 +113,7 @@ struct loader_block {
 	 * which is a read.
 	 */
 	uint32_t write_part_plus_one;
-	uint32_t write_reserved;
+	uint32_t write_caps;                   /* BLOCK_CAN_FAST; zero from a loader that has only BLOCK_OP_WRITE */
 	uint64_t write_first;
 	struct {
 		volatile uint32_t request;
@@ -328,7 +331,7 @@ ufs_request(uint32_t op, uint32_t part, uint64_t lba, uint64_t count, uint8_t *d
 		}
 		ufs_last_part = part;
 		ufs_last_end = lba + count;
-	} else {
+	} else if (op != BLOCK_OP_FLUSH) {
 		/*
 		 * The data into the buffer and out of this core's cache before the request is raised:
 		 * core 0 drops its own lines of the buffer and hands it to UEFI's driver.
@@ -378,14 +381,16 @@ ufs_request(uint32_t op, uint32_t part, uint64_t lba, uint64_t count, uint8_t *d
 	if (status != 0) {
 		printf("ufs: %s: blocks %llu..%llu: the loader's %s failed (status %llx)\n",
 		    ufs_page->part[part].name, lba, lba + count - 1,
-		    op == BLOCK_OP_WRITE ? "write" : "read", (uint64_t)status);
+		    op == BLOCK_OP_READ ? "read" : op == BLOCK_OP_FLUSH ? "flush" : "write", (uint64_t)status);
 		ufs_errors++;
 		return EIO;
 	}
-	if (op == BLOCK_OP_WRITE) {
-		/* the loader has read the blocks back and found them the same */
-		ufs_writes++;
-		ufs_write_bytes += bytes;
+	if (op != BLOCK_OP_READ) {
+		/* BLOCK_OP_WRITE: the loader has flushed, read the blocks back and found them the same */
+		if (op != BLOCK_OP_FLUSH) {
+			ufs_writes++;
+			ufs_write_bytes += bytes;
+		}
 		return 0;
 	}
 	started = mach_absolute_time();
@@ -593,7 +598,7 @@ ufs_read(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
  * is in memory (ramfs) and only its copy for the next boot is written here.
  */
 static int
-ufs_write(uint32_t part, uint64_t offset, const uint8_t *src, uint64_t len)
+ufs_write(uint32_t op, uint32_t part, uint64_t offset, const uint8_t *src, uint64_t len)
 {
 	uint64_t nbs, per;
 	int error = 0;
@@ -642,7 +647,7 @@ ufs_write(uint32_t part, uint64_t offset, const uint8_t *src, uint64_t len)
 			/* it did not go out after all: UEFI's driver must not be asked to ring */
 			error = EIO;
 		} else {
-			error = ufs_request(BLOCK_OP_WRITE, part, offset / nbs, count, NULL, src);
+			error = ufs_request(op, part, offset / nbs, count, NULL, src);
 		}
 		lck_mtx_unlock(&ufs_lock);
 		offset += count * nbs;
@@ -686,6 +691,34 @@ ufs_data_bytes(void)
 }
 
 /*
+ * How the data volume writes: only written, when the loader can (BLOCK_CAN_FAST), the flash's cache flushed when the
+ * file system asks (DKIOCSYNCHRONIZE: HFS Plus's journal, where the order of what reaches the flash matters); else as
+ * /dev/rufs_darwin writes, each flushed and read back, which is safe and slow.
+ */
+static uint32_t
+ufs_data_op(void)
+{
+	return (ufs_page->write_caps & BLOCK_CAN_FAST) ? BLOCK_OP_WRITE_FAST : BLOCK_OP_WRITE;
+}
+
+static int
+ufs_data_flush(void)
+{
+	int error;
+
+	if (ufs_data_op() != BLOCK_OP_WRITE_FAST) {
+		return 0;               /* every write was flushed already */
+	}
+	lck_mtx_lock(&ufs_write_mtx);
+	lck_mtx_lock(&ufs_lock);
+	/* one block in bounds, for the loader's checks; nothing of it is touched */
+	error = ufshc_list_in() ? EIO : ufs_request(BLOCK_OP_FLUSH, (uint32_t)ufs_write_part, UFS_WRITE_FIRST, 1, NULL, NULL);
+	lck_mtx_unlock(&ufs_lock);
+	lck_mtx_unlock(&ufs_write_mtx);
+	return error;
+}
+
+/*
  * Bytes [offset, offset + len) of the data volume, read into p or written from it. A write that is not whole blocks
  * of 4096 (the device may be counted in 512-byte ones) is made whole here: the blocks around it read, patched,
  * written.
@@ -705,7 +738,7 @@ ufs_data_io(bool write, uint64_t offset, uint8_t *p, uint64_t len)
 	}
 	lck_mtx_lock(&ufs_data_mtx);
 	if (offset % 4096 == 0 && len % 4096 == 0) {
-		error = ufs_write((uint32_t)ufs_write_part, base + offset, p, len);
+		error = ufs_write(ufs_data_op(), (uint32_t)ufs_write_part, base + offset, p, len);
 		lck_mtx_unlock(&ufs_data_mtx);
 		return error;
 	}
@@ -725,7 +758,7 @@ ufs_data_io(bool write, uint64_t offset, uint8_t *p, uint64_t len)
 		error = ufs_read((uint32_t)ufs_write_part, base + first, bounce, span);
 		if (error == 0) {
 			memcpy(bounce + skip, p, (size_t)take);
-			error = ufs_write((uint32_t)ufs_write_part, base + first, bounce, span);
+			error = ufs_write(ufs_data_op(), (uint32_t)ufs_write_part, base + first, bounce, span);
 		}
 		offset += take;
 		p += take;
@@ -791,8 +824,7 @@ ufs_data_ioctl(u_long cmd, caddr_t data)
 		return 0;
 	case DKIOCSYNCHRONIZE:
 	case DKIOCSYNCHRONIZECACHE:
-		/* the loader flushes after every write and reads it back before it answers: nothing is left to flush */
-		return 0;
+		return ufs_data_flush();
 	default:
 		return ENOTTY;
 	}
@@ -1034,7 +1066,7 @@ ufs_cwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 		}
 		error = uiomove((caddr_t)bounce, (int)want, uio);
 		if (error == 0) {
-			error = ufs_write(part, (uint64_t)at, bounce, (uint64_t)want);
+			error = ufs_write(BLOCK_OP_WRITE, part, (uint64_t)at, bounce, (uint64_t)want);
 			if (error != 0) {
 				/* these bytes did not go in: the write is to say so, not to count them */
 				uio_setoffset(uio, at);
@@ -1773,8 +1805,9 @@ hakios_ufs_init(void)
 			    (UFS_DARWIN_BLOCKS - UFS_WRITE_FIRST) * 4096 >> 20);
 			if (devfs_make_node(makedev(ufs_bmajor, UFS_DATA_MINOR), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640,
 			    "ufs_darwin_data") != NULL) {
-				printf("ufs: /dev/ufs_darwin_data: the same %llu MB as a block device, for the data volume\n",
-				    ufs_data_bytes() >> 20);
+				printf("ufs: /dev/ufs_darwin_data: the same %llu MB as a block device, for the data volume; "
+				    "%s\n", ufs_data_bytes() >> 20, ufs_data_op() == BLOCK_OP_WRITE_FAST ?
+				    "writes flushed when the file system asks" : "every write flushed and read back (an older loader)");
 			}
 		} else {
 			printf("ufs: nothing takes writes: darwin is not among the partitions\n");
