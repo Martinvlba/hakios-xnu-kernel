@@ -37,6 +37,12 @@ if [ -n "$EXTERNAL" ]; then
 	printf '%s\n' "$EXTERNAL" | while IFS= read -r tree; do rm -f "$HERE/files.new/$tree"; done
 fi
 
+# Apple's HFS Plus is not kept here: what this port changes in it goes into xnu/hfs/hfs.patch, and Apple's files are
+# fetched again by xnu/apply.sh (xnu/hfs/hfs.sh). Its own files (bsd/hfs/hfs_builtin.c) stay in files/.
+while read -r f; do rm -f "$HERE/files.new/bsd/hfs/$f"; done < "$HERE/hfs/core.list"
+while read -r f; do rm -f "$HERE/files.new/bsd/hfs_encodings/$f"; done < "$HERE/hfs/encodings.list"
+"$HERE/hfs/hfs.sh" export "$SRC"
+
 # The drivers (drivers/map) are kept by subsystem in drivers/<subsystem>/, not under files/: take them out of
 # files.new and put each one where the map says. A hakios.* file the map does not list is refused, not guessed at.
 MAP="$HERE/../drivers/map"

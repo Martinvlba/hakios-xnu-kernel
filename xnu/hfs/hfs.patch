@@ -1,0 +1,109 @@
+--- a/bsd/hfs/hfs_iokit.h
++++ b/bsd/hfs/hfs_iokit.h
+@@ -30,7 +30,9 @@
+ #define hfs_iokit_h
+ 
+ #include <sys/cdefs.h>
++#if CONFIG_PROTECT
+ #include <AppleKeyStore/AppleKeyStoreFSServices.h>
++#endif
+ 
+ __BEGIN_DECLS
+ 
+@@ -42,6 +44,7 @@
+ 									void *arg);
+ kern_return_t hfs_get_platform_serial_number(char *serial_number_str,
+ 											 uint32_t len);
++#if CONFIG_PROTECT
+ int hfs_unwrap_key(aks_cred_t access, const aks_wrapped_key_t wrapped_key_in,
+ 				   aks_raw_key_t key_out);
+ int hfs_rewrap_key(aks_cred_t access, cp_key_class_t dp_class,
+@@ -52,6 +55,8 @@
+ int hfs_backup_key(aks_cred_t access, const aks_wrapped_key_t wrapped_key_in,
+ 				   aks_wrapped_key_t wrapped_key_out);
+ 
++#endif /* CONFIG_PROTECT */
++
+ __END_DECLS
+ 
+ #endif /* hfs_iokit_h */
+--- a/bsd/hfs/hfs_vfsops.c
++++ b/bsd/hfs/hfs_vfsops.c
+@@ -2622,6 +2622,10 @@
+ 
+ 	journal_init();
+ 
++	/* HakiOS: built in, so what the kext's start() did after vfs_fsadd() is done here */
++	hfs_init_zones();
++	hfs_sysctl_register();
++
+ 	return (0);
+ }
+ 
+--- a/bsd/hfs/kext-config.h
++++ b/bsd/hfs/kext-config.h
+@@ -1,55 +1,16 @@
+ /*
+- * Copyright (c) 2015 Apple Inc. All rights reserved.
+- *
+- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+- *
+- * This file contains Original Code and/or Modifications of Original Code
+- * as defined in and that are subject to the Apple Public Source License
+- * Version 2.0 (the 'License'). You may not use this file except in
+- * compliance with the License. The rights granted to you under the License
+- * may not be used to create, or enable the creation or redistribution of,
+- * unlawful or unlicensed copies of an Apple operating system, or to
+- * circumvent, violate, or enable the circumvention or violation of, any
+- * terms of an Apple operating system software license agreement.
+- *
+- * Please obtain a copy of the License at
+- * http://www.opensource.apple.com/apsl/ and read it before using this file.
+- *
+- * The Original Code and all software distributed under the License are
+- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+- * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+- * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+- * Please see the License for the specific language governing rights and
+- * limitations under the License.
+- *
+- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
++ * HakiOS: HFS Plus built into the kernel (bsd/hfs, from Apple's hfs-627.100.6) rather than a kext, for the data
++ * volume on the phone's flash.  FIFO, CONFIG_PROTECT and NAMEDSTREAMS are the kernel's own options (config/MASTER);
++ * what is HFS's alone is decided here.
+  */
+-
+ #ifndef _hfs_config_
+ #define _hfs_config_
+-
+-#include <TargetConditionals.h>
+-
+-#define HFS_COMPRESSION 1
+-#define FIFO 1
+-
+-// #define HFS_LEAK_DEBUG 1
+-
+-#if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) // iOS (real hardware)
+-
++#define HFS_COMPRESSION 1       /* (the code does not build without it; decmpfs is the kernel's) */
++#ifndef QUOTA
+ #define QUOTA 0
+-#define CONFIG_PROTECT 1
+-#define CONFIG_SECLUDED_RENAME 1
+-
+-
+-#else // OS X
+-
+-#define QUOTA 1
+-#define NAMEDSTREAMS 1
+-#define CONFIG_HFS_DIRLINK 1
+-#define CONFIG_SEARCHFS 1
+-
+ #endif
+-
++#define CONFIG_SECLUDED_RENAME 0
++/* content protection's keys are AppleKeyStore's, which this kernel does not have (bsd/hfs/hfs_builtin.c) */
++#undef CONFIG_PROTECT
++#define CONFIG_PROTECT 0
+ #endif /* defined(_hfs_config_) */
