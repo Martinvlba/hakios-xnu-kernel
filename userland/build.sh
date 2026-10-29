@@ -28,7 +28,7 @@
 #                      RC_JOBS=<file> what the job com.hakios.demo runs: rc.jobs (default), or
 #                                   rc.jobs.unlock, which also swipes the lock screen away (for the phone,
 #                                   where nothing else can touch the screen yet).
-#                                   A job list cannot assume a shell. Darwin userland 16.5's own root has none at all
+#                                   A job list cannot assume a shell. Darwin 16.5's own root has none at all
 #                                   -- /bin is df and ps, and nothing else -- so a line beginning /bin/sh
 #                                   fails with "No such file or directory" and status 127 on a flash-root
 #                                   boot. The /var/jb/bin/sh that rc.jobs.jb and rc.jobs.sileo run is the

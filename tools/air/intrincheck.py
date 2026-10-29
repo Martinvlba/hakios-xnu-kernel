@@ -1042,7 +1042,7 @@ def emit_suite(arith, outdir, want, verbose, few=False, cases=0):
         f.write(RUNNER)
     os.chmod(run, 0o755)
     # rc.jobs: the same suite as a job list, for a device with no shell. run.sh
-    # above is for this machine; the phone cannot use it, because Darwin userland 16.5's own
+    # above is for this machine; the phone cannot use it, because Darwin 16.5's own
     # root carries no sh at all (/bin holds df and ps, nothing else) and the
     # /var/jb/bin/sh that userland/rc.jobs.jb runs belongs to the jailbreak
     # prefix, which a flash-root image does not carry. So every module gets a
