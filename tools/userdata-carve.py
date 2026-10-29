@@ -2,6 +2,12 @@
 """Cut a partition of this port's own off the end of Android's userdata: the new GPT, made and checked here.
 
 usage: userdata-carve.py DIR GIB [NAME]
+       userdata-carve.py --wipe DIR GIB [NAME]
+
+--wipe: Android's data is to be erased and userdata made again (fastboot -w), so no f2fs is shrunk and none is read:
+userdata ends where NAME begins, NAME being the last GIB of the unit (from a 2 MB boundary). Only gpt-head.bin and
+gpt-tail.bin are needed in DIR (tools/backup-partitions.py's gpt-sda-head.bin and gpt-sda-tail.bin). Everything else --
+the checks of the old and the new table, two entries changed and nothing more -- is as without it.
   DIR   what was saved from the phone under Android (adb's root shell), all read only:
           gpt-head.bin             the first 8 blocks of LUN 0 (dd if=/dev/block/sda bs=4096 count=8)
           gpt-tail.bin             its last 8 blocks (... skip=BLOCKS-8 count=8)
@@ -108,13 +114,16 @@ def check(name, head, tail, disk):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
+    args = sys.argv[1:]
+    wipe = '--wipe' in args
+    if wipe:
+        args.remove('--wipe')
+    if len(args) not in (2, 3):
         sys.exit(__doc__)
-    d, gib = sys.argv[1], int(sys.argv[2])
-    name = sys.argv[3] if len(sys.argv) > 3 else 'darwin'
+    d, gib = args[0], int(args[1])
+    name = args[2] if len(args) > 2 else 'darwin'
     head = open(f'{d}/gpt-head.bin', 'rb').read()
     tail = open(f'{d}/gpt-tail.bin', 'rb').read()
-    sb = open(f'{d}/userdata-meta-before.bin', 'rb').read(BS)[1024:2048]
     if len(head) != 8 * BS or len(tail) != 8 * BS:
         sys.exit('userdata-carve.py: gpt-head.bin and gpt-tail.bin are to be 8 blocks each')
     # the backup header says where it is: the last block of the unit
@@ -136,6 +145,25 @@ def main():
     if not free or free[0] < max(used):
         sys.exit('userdata-carve.py: no free entry after the used ones')
     slot = free[0]
+
+    if wipe:
+        new_first = (ph['last_usable'] + 1 - gib * 2**30 // BS) // 512 * 512
+        if new_first <= entries[u]['first'] + 256 * 2**20 // BS:
+            sys.exit(f'userdata-carve.py: {gib} GiB leaves userdata less than 256 MB')
+        part_end = new_first
+        print(f'userdata: lba {entries[u]["first"]}..{entries[u]["last"]} -> {entries[u]["first"]}..{part_end - 1} '
+              f'({(part_end - entries[u]["first"]) * BS / 2**30:.2f} GiB), to be made again (fastboot -w): its data goes')
+    else:
+        part_end, new_first = carve_f2fs(d, gib, entries, u, name)
+    new_last = ph['last_usable']
+    print(f'{name}: lba {new_first}..{new_last} ({(new_last - new_first + 1) * BS / 2**30:.3f} GiB), '
+          f'entry {slot} (sda{slot + 1} under Android), type APFS container')
+    make_table(d, head, tail, disk, ph, bh, entries, u, slot, name, new_first, new_last, part_end, wipe)
+
+
+def carve_f2fs(d, gib, entries, u, name):
+    """userdata shrunk to its f2fs: (where userdata ends, where NAME begins)"""
+    sb = open(f'{d}/userdata-meta-before.bin', 'rb').read(BS)[1024:2048]
 
     # the f2fs of userdata: where its main area is, and how its segments are filled
     magic, = struct.unpack_from('<I', sb, 0)
@@ -181,14 +209,14 @@ def main():
         sys.exit(f'userdata-carve.py: {len(in_tail)} segments past the new end hold data; shrink with less, '
                  f'or let the kernel move it first')
 
-    new_first = new_start
-    new_last = ph['last_usable']
     print(f'userdata: lba {entries[u]["first"]}..{entries[u]["last"]} ({part_blocks * BS / 2**30:.2f} GiB) '
           f'-> {entries[u]["first"]}..{part_end - 1} ({fs_blocks * BS / 2**30:.2f} GiB, the f2fs exactly); '
           f'{new_start - part_end} blocks between it and {name} belong to neither')
-    print(f'{name}: lba {new_first}..{new_last} ({(new_last - new_first + 1) * BS / 2**30:.3f} GiB), '
-          f'entry {slot} (sda{slot + 1} under Android), type APFS container')
+    carve_f2fs.new_blocks = new_blocks
+    return part_end, new_start
 
+
+def make_table(d, head, tail, disk, ph, bh, entries, u, slot, name, new_first, new_last, part_end, wipe):
     # the new table: userdata's end, and one new entry; every other byte as it was
     praw, _, pat = entries_of(head, ph, 0)
     table = bytearray(praw)
@@ -223,9 +251,12 @@ def main():
     open(f'{d}/gpt-tail.new', 'wb').write(new_tail)
     print(f'\nmade {d}/gpt-head.new and {d}/gpt-tail.new\n')
     print('on the phone, in this order (adb root shell):')
-    print(f'  1. /data/local/tmp/f2fs-resize /data {new_blocks}     # the filesystem first')
-    print(f'     and, with no reboot in between (the boot would grow it back), save its first block as sb-after.bin')
-    print(f'     and run this again: it checks the shrunk size and makes the table for it')
+    if wipe:
+        print('  1. nothing to shrink: userdata is erased and made again in step 3')
+    else:
+        print(f'  1. /data/local/tmp/f2fs-resize /data {carve_f2fs.new_blocks}     # the filesystem first')
+        print(f'     and, with no reboot in between (the boot would grow it back), save its first block as sb-after.bin')
+        print(f'     and run this again: it checks the shrunk size and makes the table for it')
     # each copy: its table before its header, so that a write cut short leaves a header whose table
     # CRC is wrong (and the other copy is used) rather than a right header over a half-written table
     tl, tn = ph['entries_lba'], (ph['count'] * ph['entry_size'] + BS - 1) // BS
@@ -235,6 +266,8 @@ def main():
     print(f'     dd if=gpt-head.new of=/dev/block/sda bs={BS} skip=1 seek=1 count=1 conv=notrunc,fsync')
     print(f'     dd if=gpt-tail.new of=/dev/block/sda bs={BS} skip={changed_tail[0]} seek={disk - 8 + changed_tail[0]} '
           f'count={changed_tail[-1] - changed_tail[0] + 1} conv=notrunc,fsync')
+    if wipe:
+        print('  3. adb reboot bootloader; fastboot -w   (userdata and metadata made again: Android starts as new)')
     return 0
 
 
