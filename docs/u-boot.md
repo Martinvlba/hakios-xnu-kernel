@@ -156,6 +156,10 @@ Run on a POCO X5 Pro 5G (`redwood`, bootloader unlocked, Android on slot b), fro
   (that is what `hello` does) and the kernel returns: `result: returned 22037 0`. The loader's log is written to `logdump` and read
   back the same.
 - `./xl screenshot`: the kernel's last screen, with U-Boot's `[oosexgang]` lines under it.
+- **iOS 16.5**, the images built from the IPSW (`sysimage/unpack.sh`, `PREBUILT=1 REST=1 SYSTEM=1 userland/build.sh`, `make
+  loader`), no firmware of the phone yet (no GPU: drawn in software): `./xl ramdisk userland/system.apfs` takes 2361 MB in 71 s
+  (33 MB/s) through U-Boot, and `XL_CMDLINE="debug=0x8 rd=md0 hv_wdt_pet=1 bootcpu=7 cpus=8 cpufreq=1 ufs=2 touchscreen=1" ./xl run`
+  brings the home screen in under a minute (the screenshot at 60 s), with touch.
 - The way through U-Boot's own fastboot (`stage`, `oem run:hakios load fastboot`, `continue`): U-Boot takes the container and
   starts the loader, but **the loader's USB then does not come up on the bus**: the controller, released by U-Boot's fastboot and
   taken again by the loader, does not connect. Until that is fixed, put the loader and the payload in the boot image (`xl enter`
