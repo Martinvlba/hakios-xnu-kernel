@@ -295,7 +295,8 @@ find_log_partition(void)
  * last run. It is what gets written to the log partition and what the host
  * fetches over USB (fastboot get_staged).
  */
-static char out_buf[2 * 1024 * 1024];
+/* aligned for any firmware's block I/O: U-Boot's wants a buffer aligned to the block size (media->io_align) */
+static char out_buf[2 * 1024 * 1024] __attribute__((aligned(0x2000)));
 /* the storage's reads for the kernel land here (block_poll), and nothing else may be put in it */
 #define BLOCK_BUFFER_SIZE  (4u << 20)
 static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));
@@ -3645,6 +3646,13 @@ usb_start(void)
  * Returns the byte count, or -1 if the transfer was cancelled or the cable
  * state changed. Keeps the watchdog fed while idle.
  */
+/*
+ * Seconds a download may go without a byte before it is given up (0: wait for ever). A host that is stopped half-way
+ * through a download (a fastboot killed by its timeout) left the loader waiting for the rest for good: every command
+ * after it was taken for data, and only the power button brought the phone back.
+ */
+static uint64_t usb_data_timeout;
+
 static int64_t
 usb_wait(uint8_t endpoint)
 {
@@ -3664,6 +3672,10 @@ usb_wait(uint8_t endpoint)
 		}
 		/* with a kernel running, a host that went away must not keep this core from watching it */
 		if (run_active && READ_SYSREG(CNTVCT_EL0) - began > 3 * freq) {
+			return -1;
+		}
+		if (usb_data_timeout != 0 && READ_SYSREG(CNTVCT_EL0) - began > usb_data_timeout * freq) {
+			USB->abort_xfer(endpoint);
 			return -1;
 		}
 		if (msg == UsbDeviceEventTransferNotification && data.transfer.endpoint_index == endpoint) {
@@ -3826,6 +3838,7 @@ fb_command(char *cmd)
 			uint32_t magic_held = 0;
 			int magic_taken = 0;
 			fb_reply_data(total);
+			usb_data_timeout = 20;
 			while (got < total) {
 				uint64_t want = total - got > USB_CHUNK ? USB_CHUNK : total - got;
 				int64_t r = usb_rx(usb_rx_buf, want);
@@ -3844,6 +3857,7 @@ fb_command(char *cmd)
 				}
 				got += (uint64_t)r;
 			}
+			usb_data_timeout = 0;
 			if (got == total) {
 				if (magic_taken) {
 					*(volatile uint32_t *)dest = magic_held;
