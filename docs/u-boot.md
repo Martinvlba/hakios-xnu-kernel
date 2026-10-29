@@ -207,6 +207,24 @@ At every start: U-Boot marks slot a successful and shows the menu; **Android** (
 unbootable and restarts, and ABL makes slot b active itself; `fastboot set_active a` (or `hakios-menu.sh` in Android, with
 root) brings the menu back. Seen on the phone: the menu, and Android from it.
 
+### The data volume: /private/var kept, the size of the space
+
+Without it `/private/var` is a memory filesystem: empty at every start, and iOS shows the size of that (a quarter of
+the RAM, "1 GB") as the phone's storage. With it, `/private/var` is HFS Plus in `darwin` after the iOS volume and the
+cryptexes (block 2042368 to the end, 12.2 GB): kept between starts, journaled, and what iOS shows is its size.
+
+- the kernel: HFS Plus is built in (Apple's `hfs-627.100.6`, `bsd/hfs`); with `ufs_write=1` the UFS driver gives that
+  stretch out as `/dev/ufs_darwin_data`, which reads and writes through the loader (each write flushed and read back);
+- `init`: `var_hfs=ufs_darwin_data` mounts it on `/private/var`, a memory filesystem as before if it does not mount;
+- the empty volume, once: `tools/mkdatavol.py data.simg` and `fastboot flash darwin data.simg` (53 KB: the image says
+  DONT_CARE for the iOS volume and the cryptexes, and for every block the volume does not use). Flashing it again
+  empties the volume;
+- the payload's command line gains `ufs_write=1 var_hfs=ufs_darwin_data`.
+
+Tried in QEMU first (`qemu/run-hfs-test.sh`; iOS with `virtio_blk=2 var_hfs=rvblk0`): written, stopped hard, the journal
+replayed at the next mount, the files there. The volume's root has to be root's (`mkfs.hfsplus -U 0 -G 0 -M 755`, as
+`mkdatavol.py` makes it): with another owner iOS takes it for a data volume to migrate and stays at the progress bar.
+
 ### Which slot is active is never U-Boot's to change
 
 On these phones a slot being active is three things that ABL's `SetActiveSlot()` changes together: the bits of
