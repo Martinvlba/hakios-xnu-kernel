@@ -996,7 +996,7 @@ Three references, each independent of the translator:
 
    The other 98 of the 100 modules carried did not run, because the job list ended with
    `/bin/sh /redwood/share/airops/run.sh` and the answer was
-   **`/bin/sh: No such file or directory`, status 127. Darwin userland 16.5's own root has no shell at all**
+   **`/bin/sh: No such file or directory`, status 127. Darwin 16.5's own root has no shell at all**
    — `/bin` holds `df` and `ps`, and nothing else. The `/var/jb/bin/sh` that `rc.jobs.jb` and
    `rc.jobs.sileo` run belongs to the package manager's prefix, which only a `JB=1` image carries.
    This was asserted, not checked: a `grep` for `bin/sh` matched six `rc.jobs*` files and the
