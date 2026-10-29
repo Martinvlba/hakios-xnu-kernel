@@ -14,7 +14,7 @@ The same container on its own (-c) is what the host sends to a U-Boot that is al
   HKUB, little-endian: u32 magic "HKUB", u32 version 1, u32 count, u32 header size,
                        count x { char name[16]; u32 offset; u32 size; u32 crc32; u32 reserved }, entries 4 KiB aligned
 
-usage: mkubootimg.py [-d DEVICE] [-u u-boot.bin] [-l loader.efi] [-p payload.bin] [-o out.img] [-c out.hkub]
+usage: mkubootimg.py [-d DEVICE] [-u u-boot.bin] [-l loader.efi] [-p payload.bin] [-o out.img] [-c out.hkub] [--env F | --install]
        mkubootimg.py -p payload.bin -c x.hkub        the container alone
 """
 import argparse, gzip, os, struct, subprocess, sys, zlib
@@ -47,6 +47,9 @@ def main():
     ap.add_argument('-o', '--output', help='the boot image (default: hakios-u-boot.img)')
     ap.add_argument('-c', '--container', help='write the HKUB container on its own (for fastboot stage); without -o, only it')
     ap.add_argument('--no-ramdisk', action='store_true', help='U-Boot only: it waits for the loader over fastboot')
+    ap.add_argument('--env', help='an environment for U-Boot to take with the loader (name=value lines): what the image does')
+    ap.add_argument('--install', action='store_true',
+                    help='the image for a boot partition: with devices/DEVICE/u-boot/install.env (the menu: Android or HakiOS)')
     args = ap.parse_args()
 
     dev = os.path.join(ROOT, 'devices', args.device)
@@ -88,6 +91,12 @@ def main():
             entries.append(('payload', data))
         # after the payload: a loader.efi the payload carries (xl enter's) gives way to this one
         entries.append(('loader', efi))
+        env = args.env or (os.path.join(dev, 'u-boot', 'install.env') if args.install else None)
+        if env:
+            if not os.path.isfile(env):
+                sys.exit(f'mkubootimg.py: {env} not found')
+            # last: U-Boot takes it once the loader and the payload are in place
+            entries.append(('env', open(env, 'rb').read()))
     hkub = container(entries) if entries else b''
     if args.container:
         open(args.container, 'wb').write(hkub)

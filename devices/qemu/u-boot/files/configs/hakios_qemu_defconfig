@@ -5,6 +5,8 @@
 
 CONFIG_CMD_HAKIOS=y
 CONFIG_BOOTDELAY=0
-CONFIG_BOOTCOMMAND="hakios load 0x50000000 && hakios boot"
+CONFIG_BOOTCOMMAND="hakios load 0x50000000 && run hakios_start"
 # (a host tool that needs GnuTLS, and capsules are not used here)
 # CONFIG_TOOLS_MKEFICAPSULE is not set
+# the menu of an installed HakiOS (tools/mkubootimg.py --install), tried here before a phone
+CONFIG_CMD_BOOTMENU=y

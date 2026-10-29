@@ -2535,6 +2535,8 @@ struct payload_info {
 	uint64_t checkpoint;
 	uint64_t forced_base;
 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
+	const uint8_t *resident;        /* ... or one the payload carries, which the loader puts there itself */
+	uint32_t resident_size;
 	const char *kernel_version;     /* kernel.ver: the version of the kernel in this payload (tools/kernel-version.py) */
 	int usb_mode;
 };
@@ -2605,6 +2607,9 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->cmdline = text;
 		} else if (str_eq(e->name, "physbase")) {
 			pi->forced_base = parse_number(text, 16); /* testing aid; must be free RAM */
+		} else if (str_eq(e->name, "resident")) {
+			pi->resident = p + sizeof(*e);            /* the image xl ramdisk would send: a boot with no host */
+			pi->resident_size = e->size;
 		} else if (str_eq(e->name, "rdres")) {
 			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
 		} else if (str_eq(e->name, "kernel.ver")) {
@@ -2893,6 +2898,20 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			return 0;
 		}
 		resident_rd_size = pi.resident_rd;
+	}
+	/*
+	 * The payload's own resident image (a boot from the phone's boot partition, where no host sends one): put where
+	 * "oem ramdisk" puts it, once per run, and taken as if it had been sent.
+	 */
+	if (pi.resident != NULL) {
+		if (win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE ||
+		    pi.resident_size > win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE) {
+			print("resident %x does not fit in the memory window\n", (uint64_t)pi.resident_size);
+			return 0;
+		}
+		memcpy((void *)(phys_base + RESIDENT_RD_OFFSET), pi.resident, pi.resident_size);
+		resident_rd_size = pi.resident_size;
+		print("resident image from the payload: %x bytes\n", (uint64_t)pi.resident_size);
 	}
 	if (resident_rd_size != 0) {
 		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;

@@ -16,6 +16,7 @@ ap.add_argument('--cmdline', default='')
 ap.add_argument('--physbase', default='', help='hex: force XNU physical base (testing)')
 ap.add_argument('--usb', action='store_true', help='make the loader stay resident and take commands over USB')
 ap.add_argument('--rdres', default='', help='hex size of a root image already placed at the resident address (QEMU)')
+# (a resident image the loader places itself: give it as an item, resident=FILE -- a boot with no host, from the phone's boot partition)
 ap.add_argument('--checkpoint', default='', help='kernel checkpoint to stop at; 999 = loader self test')
 ap.add_argument('--kernel-version', default='',
                 help='the kernel.ver the loader prints under its banner (default: tools/kernel-version.py)')
