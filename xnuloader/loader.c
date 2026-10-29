@@ -168,6 +168,13 @@ str_eq(const char *a, const char *b)
  * the screen is left to the kernel (and to "oem screenshot").
  */
 static int screen_quiet;
+/*
+ * And while the kernel runs, whatever started the loader: under HakiOS's U-Boot (the menu of an installed HakiOS) there
+ * is no USB command loop, the text console is U-Boot's, drawn into the framebuffer the kernel shows iOS in, and every
+ * line core 0 printed during a run (the storage's, the battery's, the watchdog's) ran over the system's screen.
+ * What it was before the run, to go back to.
+ */
+static int screen_quiet_before_run;
 
 static void
 put_char(char c)
@@ -1521,14 +1528,15 @@ ufs_survey(void)
  * 20 GiB at the end of logical unit 0 (README, "The port's partition"); what the build puts there
  * from the computer (tools/darwin-write.py) is the iOS volume at its start and the two cryptexes
  * behind it, and nothing of this port reads or writes the rest -- so the data of iOS lives there
- * and a write is refused before that block. The identity is the whole of darwin-write.py's: the
- * same partition, named the same, of the same size, in the same place, on logical unit 0.
+ * and a write is refused before that block. The identity: the partition named darwin, of the APFS
+ * container type, of the same size, in the same place, on logical unit 0. Not its unique GUID:
+ * tools/userdata-carve.py gives every phone's darwin a new one (BLOCK_DARWIN_UNIQ was the first
+ * phone's, made by darwin-write.py, and no write was ever served on another); it is printed instead.
  */
 #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
 #define BLOCK_DARWIN_FIRST 25374720ULL                 /* its first and last LBA of unit 0, as the GPT has them */
 #define BLOCK_DARWIN_LAST  30617594ULL
 #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
-#define BLOCK_DARWIN_UNIQ  { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } }
 
 /*
  * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
@@ -1868,7 +1876,8 @@ block_tables(void)
 static int
 block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
 {
-	static const efi_guid type = BLOCK_DARWIN_TYPE, uniq = BLOCK_DARWIN_UNIQ;
+	static const efi_guid type = BLOCK_DARWIN_TYPE;
+	const uint8_t *u = (const uint8_t *)&info->unique_guid;
 	static const char name[] = "darwin";
 	const char *why = NULL;
 
@@ -1879,8 +1888,6 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
 	}
 	if (memcmp(&info->type_guid, &type, sizeof(type)) != 0) {
 		why = "its type GUID is not the one it had";
-	} else if (memcmp(&info->unique_guid, &uniq, sizeof(uniq)) != 0) {
-		why = "its unique GUID is not the one it had";
 	} else if (info->start_lba != BLOCK_DARWIN_FIRST || info->end_lba != BLOCK_DARWIN_LAST) {
 		why = "it does not begin and end where it did";
 	} else if (bp->unit != 0) {
@@ -1896,8 +1903,9 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
 		print("ufs: darwin: no write will be served: %s\n", why);
 		return 0;
 	}
-	print("ufs: darwin (LBA %d..%d of unit 0): its blocks from %d on may be written this run\n",
-	    info->start_lba, info->end_lba, BLOCK_WRITE_FIRST);
+	print("ufs: darwin (LBA %d..%d of unit 0, unique GUID %x...%x): its blocks from %d on may be written this run\n",
+	    info->start_lba, info->end_lba, (uint64_t)u[3] << 24 | (uint64_t)u[2] << 16 | (uint64_t)u[1] << 8 | u[0],
+	    (uint64_t)u[12] << 24 | (uint64_t)u[13] << 16 | (uint64_t)u[14] << 8 | u[15], BLOCK_WRITE_FIRST);
 	return 1;
 }
 
@@ -3453,6 +3461,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	print("jumping to %x\n", entry_va + slide);
 	flush_log();
+	screen_quiet_before_run = screen_quiet;
+	screen_quiet = 1;               /* the screen is the kernel's now; the log still takes every line */
 	/* From here on the kernel feeds the watchdog (boot-arg hv_wdt_pet, see loader_return.c in XNU). */
 	wdt_set_ms(60000);
 
@@ -3487,6 +3497,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		if (kernel_mpidr != this_mpidr) {
 			int64_t status = run_on_other_cpu(kernel_mpidr, entry_va + slide, ba_pa, kernel_live, slide, kernel_budget);
 
+			screen_quiet = screen_quiet_before_run;
 			wdt_set_ms(WDT_BITE_MS);
 			if (status != 0) {
 				/* a kernel that hung may have left its own transfer list in the controller */
@@ -3516,6 +3527,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 
 	/* --- the kernel came back ------------------------------------------- */
+	screen_quiet = screen_quiet_before_run;
 	wdt_set_ms(WDT_BITE_MS);
 	hc_take_back("the kernel came back");   /* before anything here touches the storage */
 	if (hc_known) {
