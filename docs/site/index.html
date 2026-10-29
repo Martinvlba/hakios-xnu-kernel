@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HakiOS для POCO X5 Pro</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* layout: one reading column, a step rail for the install, a terminal-style block for every command */
+:root {
+  --bg: #f3f5f7;
+  --surface: #ffffff;
+  --fg: #16202a;
+  --muted: #5a6875;
+  --line: #d6dde4;
+  --accent: #0b7a6f;
+  --accent-soft: #dff1ee;
+  --warn: #9a5b00;
+  --warn-soft: #fbefd9;
+  --code-bg: #101820;
+  --code-fg: #d7f5ef;
+  --font-display: "Unbounded", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e151b; --surface: #15202a; --fg: #e3eaf0; --muted: #93a3b1; --line: #263542;
+    --accent: #3cc8b4; --accent-soft: #123430; --warn: #f0b45a; --warn-soft: #33270f;
+    --code-bg: #070c10; --code-fg: #c9f3ea; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e151b; --surface: #15202a; --fg: #e3eaf0; --muted: #93a3b1; --line: #263542;
+  --accent: #3cc8b4; --accent-soft: #123430; --warn: #f0b45a; --warn-soft: #33270f;
+  --code-bg: #070c10; --code-fg: #c9f3ea; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 16px/1.6 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+.wrap { max-width: 760px; margin: 0 auto; display: grid; gap: 40px; }
+header { display: grid; gap: 12px; }
+.device { font: 500 12px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 700 clamp(30px, 6vw, 46px)/1.1 var(--font-display); margin: 0; text-wrap: balance; }
+.lead { color: var(--muted); font-size: 18px; margin: 0; max-width: 62ch; }
+h2 { font: 700 21px/1.25 var(--font-display); margin: 0 0 14px; text-wrap: balance; }
+h3 { font: 600 17px/1.3 var(--font-body); margin: 0 0 6px; }
+p { margin: 0 0 12px; max-width: 65ch; }
+p:last-child { margin-bottom: 0; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+section { display: grid; gap: 4px; }
+.specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.spec { background: var(--surface); padding: 14px 16px; display: grid; gap: 2px; }
+.spec b { font: 600 12px/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.spec span { font-size: 15px; }
+.note { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 14px 16px; border-radius: 0 8px 8px 0; }
+.note strong { color: var(--warn); }
+ol.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: 22px; }
+ol.steps > li { counter-increment: step; display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 14px; }
+ol.steps > li::before {
+  content: counter(step); font: 700 15px/36px var(--font-display); text-align: center;
+  width: 36px; height: 36px; border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+}
+.cmd { position: relative; margin: 8px 0 4px; }
+pre { margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 8px; padding: 12px 14px; padding-right: 72px; overflow-x: auto; font: 14px/1.5 var(--font-mono); }
+.copy {
+  position: absolute; top: 7px; right: 7px; font: 500 12px/1 var(--font-body);
+  padding: 7px 9px; border-radius: 6px; border: 1px solid #ffffff2e; background: #ffffff14; color: var(--code-fg); cursor: pointer;
+}
+.copy:hover { background: #ffffff26; }
+code { font: 14px var(--font-mono); background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+pre code { background: none; padding: 0; }
+.menu { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-family: var(--font-mono); font-size: 14px; }
+.menu div { background: var(--surface); padding: 10px 14px; display: grid; grid-template-columns: minmax(0, 17em) minmax(0, 1fr); gap: 12px; }
+.menu div span:first-child { font-weight: 500; }
+.menu div span:last-child { color: var(--muted); font-family: var(--font-body); }
+.menu div.def span:first-child::after { content: "  по умолчанию"; color: var(--accent); font-size: 12px; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+.tablebox { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 600 12px/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.ok { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.part { color: var(--warn); font-weight: 600; white-space: nowrap; }
+.no { color: var(--muted); font-weight: 600; white-space: nowrap; }
+footer { color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); padding-top: 16px; }
+@media (max-width: 520px) { .menu div { grid-template-columns: 1fr; gap: 2px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="device">POCO X5 Pro · redwood · SM7325</div>
+    <h1>HakiOS: Darwin рядом с Android</h1>
+    <p class="lead">Ядро Darwin (XNU) и его пользовательское окружение на телефоне с Android. Система ставится вторым вариантом загрузки: при каждом включении меню U-Boot предлагает выбрать Android или HakiOS. Android остаётся на месте.</p>
+  </header>
+
+  <section>
+    <div class="specs">
+      <div class="spec"><b>Запуск</b><span>U-Boot из раздела boot_a, ядро из памяти</span></div>
+      <div class="spec"><b>Система</b><span>раздел <code>darwin</code>, 20 ГБ</span></div>
+      <div class="spec"><b>Хранилище</b><span>HFS+ с журналом, около 12 ГБ</span></div>
+      <div class="spec"><b>Android</b><span>слот b, без изменений</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Перед началом</h2>
+    <p>Нужны разблокированный загрузчик, компьютер с <code>fastboot</code> и <code>adb</code> и кабель USB. Образы системы каждый пользователь берёт из своей копии прошивки: в репозитории их нет.</p>
+    <div class="note"><p><strong>Установка стирает данные Android.</strong> Раздел <code>darwin</code> вырезается из конца <code>userdata</code>, после этого нужен <code>fastboot -w</code>. Сделайте резервную копию всего, что нужно, и сохраните копию разделов (шаг 1) вне телефона.</p></div>
+  </section>
+
+  <section>
+    <h2>Установка</h2>
+    <ol class="steps">
+      <li><div>
+        <h3>Резервная копия разделов</h3>
+        <p>Из Android с root: загрузочные разделы обоих слотов, <code>vbmeta</code>, <code>persist</code>, <code>modemst</code>, начало и конец каждого LUN. Без этой копии телефон не восстановить, если таблица разделов испортится.</p>
+        <div class="cmd"><pre><code>python3 tools/backup-partitions.py --yes</code></pre></div>
+      </div></li>
+      <li><div>
+        <h3>Раздел darwin</h3>
+        <p>Укорачивает <code>userdata</code> и создаёт <code>darwin</code> на 20 ГиБ в конце LUN 0. Затем данные Android стираются.</p>
+        <div class="cmd"><pre><code>python3 tools/userdata-carve.py --wipe backups 20
+fastboot -w</code></pre></div>
+      </div></li>
+      <li><div>
+        <h3>Системный том</h3>
+        <p>Системный том и два криптекса из своей прошивки записываются в начало <code>darwin</code>. Windows-версия <code>fastboot</code> не тянет образ на 8 ГБ одним куском, поэтому он режется на части, и они прошиваются по очереди.</p>
+        <div class="cmd"><pre><code>python3 tools/sparse-split.py darwin.img pieces
+fastboot flash darwin pieces/piece-00.simg   # и так все части</code></pre></div>
+      </div></li>
+      <li><div>
+        <h3>Хранилище для данных</h3>
+        <p>Пустой том HFS+ в свободной части <code>darwin</code>. Образ весит около 50 КБ и не трогает системный том. Повторная прошивка этого образа стирает данные HakiOS.</p>
+        <div class="cmd"><pre><code>python3 tools/mkdatavol.py data.simg
+fastboot flash darwin data.simg</code></pre></div>
+      </div></li>
+      <li><div>
+        <h3>Загрузчик и меню</h3>
+        <p>Образ с U-Boot, загрузчиком и ядром прошивается в <code>boot_a</code>. Слот a становится активным, и при включении появляется меню.</p>
+        <div class="cmd"><pre><code>fastboot flash boot_a hakios-install.img
+fastboot set_active a
+fastboot reboot</code></pre></div>
+      </div></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Меню при включении</h2>
+    <p>Меню ждёт 10 секунд. Если ничего не выбрать, загружается Android: под HakiOS телефон не заряжается, поэтому после самопроизвольной перезагрузки безопаснее оказаться в Android. Выбор делается кнопками громкости, подтверждение кнопкой питания.</p>
+    <div class="menu">
+      <div class="def"><span>Android</span><span>слот a помечается неготовым, телефон перезагружается в Android</span></div>
+      <div><span>HakiOS (Darwin)</span><span>загрузка системы из памяти</span></div>
+      <div><span>HakiOS over fastboot</span><span>новое ядро с компьютера, для разработки</span></div>
+      <div><span>Fastboot</span><span>загрузчик телефона</span></div>
+      <div><span>What is in memory</span><span>что загружено и какой слот активен</span></div>
+      <div><span>U-Boot shell</span><span>командная строка U-Boot</span></div>
+      <div><span>Reset</span><span>перезагрузка</span></div>
+    </div>
+    <p>После выбора Android активен слот b, и следующее включение сразу уходит в Android. Чтобы меню появилось снова, выполните <code>fastboot set_active a</code> или поставьте в Android (нужен root) службу <code>hakios-menu.sh</code>, которая делает это сама после загрузки.</p>
+    <div class="cmd"><pre><code>fastboot set_active a</code></pre></div>
+  </section>
+
+  <section>
+    <h2>Хранилище</h2>
+    <p><code>/private/var</code> лежит на томе HFS+ в разделе <code>darwin</code>, сразу за системой: около 12 ГБ, данные сохраняются между перезагрузками, журнал восстанавливает том после внезапного отключения. Если том не смонтировался, система загрузится на временном томе в памяти. Он пуст при каждом включении, и в настройках виден объём около 1 ГБ.</p>
+    <p>Первая загрузка на новом томе дольше обычной: система регистрирует приложения и готовит данные. Пока она не закончила, части значков и обоев может не быть.</p>
+  </section>
+
+  <section>
+    <h2>Что работает</h2>
+    <div class="tablebox"><table>
+      <thead><tr><th>Часть</th><th>Состояние</th><th>Примечание</th></tr></thead>
+      <tbody>
+        <tr><td>Экран, касания, интерфейс</td><td class="ok">работает</td><td>рисует GPU Adreno 642L через OpenGL ES</td></tr>
+        <tr><td>Хранилище</td><td class="ok">работает</td><td>HFS+ около 12 ГБ, данные сохраняются</td></tr>
+        <tr><td>Wi-Fi</td><td class="part">частично</td><td>поднимается с <code>wifi=1</code></td></tr>
+        <tr><td>Графические эффекты</td><td class="part">частично</td><td>части эффектов рендереру не хватает</td></tr>
+        <tr><td>Звук, вибрация</td><td class="no">выключено</td><td>при запуске через U-Boot пока роняют телефон</td></tr>
+        <tr><td>Сотовая связь</td><td class="no">нет</td><td>модем запускается, но связь не подключена</td></tr>
+        <tr><td>Зарядка</td><td class="no">нет</td><td>заряжайте в Android</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>Если что-то пошло не так</h2>
+    <h3>Чёрный экран или зависание</h3>
+    <p>Зажмите громкость вниз и питание, пока не появится fastboot. Оттуда можно загрузить Android: <code>fastboot set_active b</code>, затем <code>fastboot reboot</code>.</p>
+    <h3>«Device Error» при любой загрузке</h3>
+    <p>Так ABL сообщает, что атрибуты слотов не совпадают с типами разделов. Не прошивайте чужие таблицы разделов: используйте только свою копию из шага 1, а потом <code>fastboot set_active</code> на рабочий слот. Подробно, по шагам, это разобрано в <code>docs/u-boot.md</code>.</p>
+    <h3>Логи загрузки</h3>
+    <p>Загрузчик пишет журнал каждого запуска в раздел <code>logdump</code>. При подключении к компьютеру его можно забрать командой <code>./xl log</code>.</p>
+  </section>
+
+  <footer>
+    Ядро — XNU от Apple под Apple Public Source License 2.0, остальной код — MIT. Прошивки Apple и телефона в репозиторий не входят. Для разработчиков: <code>docs/u-boot.md</code>, <code>docs/boot-args.md</code>.
+  </footer>
+</div>
+
+<script>
+document.querySelectorAll('.cmd').forEach(function (box) {
+  var btn = document.createElement('button');
+  btn.className = 'copy';
+  btn.type = 'button';
+  btn.textContent = 'Копировать';
+  btn.addEventListener('click', function () {
+    var text = box.querySelector('code').innerText.replace(/\s+#.*$/gm, '');
+    var done = function () { btn.textContent = 'Скопировано'; setTimeout(function () { btn.textContent = 'Копировать'; }, 1500); };
+    var select = function () { var r = document.createRange(); r.selectNodeContents(box.querySelector('code')); var s = getSelection(); s.removeAllRanges(); s.addRange(r); };
+    try {
+      navigator.clipboard.writeText(text).then(done, select);
+    } catch (e) { select(); }
+  });
+  box.appendChild(btn);
+});
+</script>
+</body>
+</html>
