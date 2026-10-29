@@ -100,8 +100,26 @@ index a4d25040f38f..aad72993d139 100644
  kern_csr.o_INCFLAGS += -I$(SRCROOT)/osfmk
  kern_debug.o_INCFLAGS += -I$(SRCROOT)/osfmk
  
+diff --git a/bsd/conf/Makefile.template b/bsd/conf/Makefile.template
+index 4b83160780c3..8997af1f0e1b 100644
+--- a/bsd/conf/Makefile.template
++++ b/bsd/conf/Makefile.template
+@@ -588,5 +588,13 @@ do_build_all:: do_all
+ 
+ %RULES
+ 
++# HakiOS: HFS Plus built in (bsd/hfs, Apple's hfs-627.100.6), compiled as its kext was: against the kernel's KPI,
++# not its insides (no XNU/BSD/MACH_KERNEL_PRIVATE), kext-config.h first, its own headers beside it, and its warnings
++# its own (it is Apple's code as it was published, not this kernel's)
++HFS_OBJS = $(patsubst %.c,%.o,$(notdir $(wildcard $(SRCROOT)/bsd/hfs/*.c)))
++$(foreach o,$(HFS_OBJS),$(eval $(o)_CFLAGS_ADD += -UXNU_KERNEL_PRIVATE -UBSD_KERNEL_PRIVATE -UMACH_KERNEL_PRIVATE \
++	-include $(SRCROOT)/bsd/hfs/kext-config.h -I$(SRCROOT)/bsd/hfs -idirafter $(SDKROOT)/usr/include))
++$(foreach o,$(HFS_OBJS),$(eval $(o)_CWARNFLAGS_ADD += -w))
++
+ include $(MakeInc_rule)
+ include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..086752d95378 100644
+index 44274016a4cf..27cccab98c8e 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
 @@ -109,6 +109,51 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
@@ -156,7 +174,7 @@ index 44274016a4cf..086752d95378 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +200,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +200,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -168,10 +186,48 @@ index 44274016a4cf..086752d95378 100644
 +bsd/miscfs/apfs/apfs_vfsops.c		optional apfs
 +bsd/miscfs/apfs/apfs_vnops.c		optional apfs
 +bsd/miscfs/ramfs/ramfs.c			optional ramfs
++bsd/hfs/BTree.c		optional hfs
++bsd/hfs/BTreeAllocate.c		optional hfs
++bsd/hfs/BTreeMiscOps.c		optional hfs
++bsd/hfs/BTreeNodeOps.c		optional hfs
++bsd/hfs/BTreeNodeReserve.c		optional hfs
++bsd/hfs/BTreeScanner.c		optional hfs
++bsd/hfs/BTreeTreeOps.c		optional hfs
++bsd/hfs/BTreeWrapper.c		optional hfs
++bsd/hfs/CatalogUtilities.c		optional hfs
++bsd/hfs/FileExtentMapping.c		optional hfs
++bsd/hfs/FileIDsServices.c		optional hfs
++bsd/hfs/MacOSStubs.c		optional hfs
++bsd/hfs/UnicodeWrappers.c		optional hfs
++bsd/hfs/VolumeAllocation.c		optional hfs
++bsd/hfs/hfs_attrlist.c		optional hfs
++bsd/hfs/hfs_btreeio.c		optional hfs
++bsd/hfs/hfs_builtin.c		optional hfs
++bsd/hfs/hfs_catalog.c		optional hfs
++bsd/hfs/hfs_chash.c		optional hfs
++bsd/hfs/hfs_cnode.c		optional hfs
++bsd/hfs/hfs_cprotect.c		optional hfs
++bsd/hfs/hfs_endian.c		optional hfs
++bsd/hfs/hfs_extents.c		optional hfs
++bsd/hfs/hfs_fsinfo.c		optional hfs
++bsd/hfs/hfs_hotfiles.c		optional hfs
++bsd/hfs/hfs_journal.c		optional hfs
++bsd/hfs/hfs_link.c		optional hfs
++bsd/hfs/hfs_lookup.c		optional hfs
++bsd/hfs/hfs_notification.c		optional hfs
++bsd/hfs/hfs_quota.c		optional hfs
++bsd/hfs/hfs_readwrite.c		optional hfs
++bsd/hfs/hfs_resize.c		optional hfs
++bsd/hfs/hfs_search.c		optional hfs
++bsd/hfs/hfs_vfsops.c		optional hfs
++bsd/hfs/hfs_vfsutils.c		optional hfs
++bsd/hfs/hfs_vnops.c		optional hfs
++bsd/hfs/hfs_xattr.c		optional hfs
++bsd/hfs/rangelist.c		optional hfs
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +414,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +452,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -179,7 +235,7 @@ index 44274016a4cf..086752d95378 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +437,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +475,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -1197,16 +1253,20 @@ index cbaa0b221894..78315a2d54cf 100644
  	int eofflag;
  	uint64_t options;
 diff --git a/bsd/vfs/vfs_conf.c b/bsd/vfs/vfs_conf.c
-index bae70cda3a96..031613b10643 100644
+index bae70cda3a96..63814100c68f 100644
 --- a/bsd/vfs/vfs_conf.c
 +++ b/bsd/vfs/vfs_conf.c
-@@ -103,6 +103,15 @@ extern  struct vfsops mockfs_vfsops;
+@@ -103,6 +103,19 @@ extern  struct vfsops mockfs_vfsops;
  extern  int mockfs_mountroot(mount_t, vnode_t, vfs_context_t);
  #endif /* MOCKFS */
  
 +#if RAMFS
 +extern  struct vfsops ramfs_vfsops;
 +#endif /* RAMFS */
++
++#if HFS
++extern  struct vfsops hfs_vfsops;
++#endif /* HFS */
 +
 +#if APFS
 +extern  struct vfsops apfs_vfsops;
@@ -1216,18 +1276,19 @@ index bae70cda3a96..031613b10643 100644
  enum fs_type_num {
  	FT_NFS = 2,
  	FT_DEVFS = 19,
-@@ -110,7 +119,9 @@ enum fs_type_num {
+@@ -110,7 +123,10 @@ enum fs_type_num {
  	FT_ROUTEFS = 21,
  	FT_NULLFS = 22,
  	FT_BINDFS = 23,
 -	FT_MOCKFS  = 0x6D6F636B
 +	FT_MOCKFS  = 0x6D6F636B,
 +	FT_RAMFS   = 0x72616D66,
++	FT_HFS     = 0x11,
 +	FT_APFS    = 0x61706673
  };
  
  int fstypenumstart = FT_BINDFS + 1;
-@@ -194,6 +205,54 @@ static struct vfstable vfstbllist[] = {
+@@ -194,6 +210,79 @@ static struct vfstable vfstbllist[] = {
  	},
  #endif /* BINDFS */
  
@@ -1249,6 +1310,31 @@ index bae70cda3a96..031613b10643 100644
 +		.vfc_sysctl = NULL
 +	},
 +#endif /* RAMFS */
++
++#if HFS
++	/*
++	 * HFS Plus, read-write, built in rather than a kext (bsd/hfs, Apple's hfs-627.100.6): the data volume on the
++	 * phone's flash, /private/var, where ramfs keeps it in memory.  Its own arguments (struct hfs_mount_args) and
++	 * local ones, as the kext registered itself (no VFS_TBLGENERICMNTARGS): the kernel looks up the device named
++	 * by their first field and hands its vnode to hfs_mount().  Mounted by init, from user space.
++	 */
++	{
++		.vfc_vfsops = &hfs_vfsops,
++		.vfc_name = "hfs",
++		.vfc_typenum = FT_HFS,
++		.vfc_refcount = 0,
++		.vfc_flags = MNT_LOCAL | MNT_DOVOLFS,
++		.vfc_mountroot = NULL,
++		.vfc_next = NULL,
++		.vfc_reserved1 = 0,
++		.vfc_reserved2 = 0,
++		.vfc_vfsflags = VFC_VFSLOCALARGS | VFC_VFSREADDIR_EXTENDED | VFC_VFS64BITREADY | VFC_VFSVNOP_PAGEOUTV2 |
++		    VFC_VFSVNOP_PAGEINV2 | VFC_VFSNATIVEXATTR,
++		.vfc_descptr = NULL,
++		.vfc_descsize = 0,
++		.vfc_sysctl = NULL
++	},
++#endif /* HFS */
 +
 +#if APFS
 +	/*
@@ -1282,7 +1368,7 @@ index bae70cda3a96..031613b10643 100644
  #if MOCKFS
  	/* If we are configured for it, mockfs should always be the last standard entry (and thus the last FS we attempt mountroot with) */
  	{
-@@ -298,6 +357,15 @@ extern const struct vnodeopv_desc devfs_fdesc_vnodeop_opv_desc;
+@@ -298,6 +387,21 @@ extern const struct vnodeopv_desc devfs_fdesc_vnodeop_opv_desc;
  extern const struct vnodeopv_desc mockfs_vnodeop_opv_desc;
  #endif /* MOCKFS */
  
@@ -1291,6 +1377,12 @@ index bae70cda3a96..031613b10643 100644
 +extern const struct vnodeopv_desc ramfs_vnodeop_opv_desc;
 +#endif /* RAMFS */
 +
++#if HFS
++extern const struct vnodeopv_desc hfs_vnodeop_opv_desc;
++extern const struct vnodeopv_desc hfs_specop_opv_desc;
++extern const struct vnodeopv_desc hfs_fifoop_opv_desc;
++#endif /* HFS */
++
 +#if APFS
 +extern const struct vnodeopv_desc apfs_vnodeop_opv_desc;
 +#endif /* APFS */
@@ -1298,13 +1390,18 @@ index bae70cda3a96..031613b10643 100644
  extern const struct vnodeopv_desc nullfs_vnodeop_opv_desc;
  extern const struct vnodeopv_desc bindfs_vnodeop_opv_desc;
  
-@@ -327,5 +395,11 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
+@@ -327,5 +431,16 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
  #if MOCKFS
  	&mockfs_vnodeop_opv_desc,
  #endif /* MOCKFS */
 +#if RAMFS
 +	&ramfs_vnodeop_opv_desc,
 +#endif /* RAMFS */
++#if HFS
++	&hfs_vnodeop_opv_desc,
++	&hfs_specop_opv_desc,
++	&hfs_fifoop_opv_desc,
++#endif /* HFS */
 +#if APFS
 +	&apfs_vnodeop_opv_desc,
 +#endif /* APFS */
@@ -1509,20 +1606,21 @@ index 60c8b9eedd50..b0029de5ef21 100644
  					("shared_region: %p [%d(%s)] map(%p:'%s'): "
  					"not on process' root volume nor preboot volume\n",
 diff --git a/config/MASTER b/config/MASTER
-index 07147cb3188b..e937e62bf4c3 100644
+index 07147cb3188b..86e9eefb5ec7 100644
 --- a/config/MASTER
 +++ b/config/MASTER
-@@ -113,6 +113,8 @@ options		CONFIG_WORKLOOP_DEBUG	# <config_workloop_debug>
+@@ -113,6 +113,9 @@ options		CONFIG_WORKLOOP_DEBUG	# <config_workloop_debug>
  #	4.4 filesystems
  #
  options		MOCKFS		# Boot from an executable	# <mockfs>
 +options		APFS		# Apple File System, read only	# <apfs>
 +options		RAMFS		# Read-write filesystem in memory	# <ramfs>
++options		HFS		# HFS Plus, read-write: the data volume on the flash	# <hfs>
  options		FIFO		# fifo support			# <fifo>
  options		FDESC		# fdesc_fs support		# <fdesc>
  options		DEVFS		# devfs support			# <devfs>
 diff --git a/config/MASTER.arm64.bcm2837 b/config/MASTER.arm64.bcm2837
-index 1ed75eea2052..117891784c1a 100644
+index 1ed75eea2052..4c67d211fb60 100644
 --- a/config/MASTER.arm64.bcm2837
 +++ b/config/MASTER.arm64.bcm2837
 @@ -16,15 +16,15 @@
@@ -1541,7 +1639,7 @@ index 1ed75eea2052..117891784c1a 100644
 -#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams bindfs]
 +#  BSD_DEV =        [ BSD_BASE config_netboot config_imageboot config_coredump config_vnguard ]
 +#  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump config_vnguard ]
-+#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams bindfs mockfs ramfs apfs ]
++#  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams bindfs mockfs ramfs apfs hfs ]
  #  FILESYS_RELEASE= [ FILESYS_BASE ]
  #  FILESYS_DEV =    [ FILESYS_BASE config_union_mounts fdesc ]
  #  FILESYS_DEBUG =  [ FILESYS_BASE config_union_mounts fdesc ]
