@@ -219,7 +219,18 @@ cryptexes (block 2042368 to the end, 12.2 GB): kept between starts, journaled, a
 - the empty volume, once: `tools/mkdatavol.py data.simg` and `fastboot flash darwin data.simg` (53 KB: the image says
   DONT_CARE for the iOS volume and the cryptexes, and for every block the volume does not use). Flashing it again
   empties the volume;
-- the payload's command line gains `ufs_write=1 var_hfs=ufs_darwin_data`.
+- the payload's command line gains `ufs_write=1 var_hfs=ufs_darwin_data`;
+- the loader serves writes to any phone's `darwin` (name, type, place, size, LUN 0; the unique GUID, which
+  `userdata-carve.py` makes new on every phone, only printed): until then it compared the first phone's GUID, and on
+  this one the volume never mounted (`/dev/ufs_darwin_data: No such file or directory`, a memory filesystem instead);
+- the volume's writes are only written (`BLOCK_OP_WRITE_FAST`), the flash's cache flushed when the journal asks
+  (`DKIOCSYNCHRONIZE` -> `BLOCK_OP_FLUSH`): a flush and a read back after each 4 KB write made the system crawl.
+
+The rest of the installed image's command line is the configuration's (`tools/hakios-config.py args`) without
+`adsp`, `sound` and `haptic`, which stopped the phone under U-Boot: `gpu=1 wifi=1 modem=1 modem_again=1
+modem_buffer=0xa8000000 socinfo=1 thermal=1`. And `userland/build.sh` with `GL=1` (Mesa: `tools/mk-mesa.sh`): without
+`libhakios.gl.dylib` in the image CoreAnimation draws with its software renderer whatever the GPU does -- slow, and
+the wallpaper black ("Failed to initialize Metal or OpenGLES contexts!").
 
 Tried in QEMU first (`qemu/run-hfs-test.sh`; iOS with `virtio_blk=2 var_hfs=rvblk0`): written, stopped hard, the journal
 replayed at the next mount, the files there. The volume's root has to be root's (`mkfs.hfsplus -U 0 -G 0 -M 755`, as
