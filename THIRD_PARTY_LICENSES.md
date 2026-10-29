@@ -27,7 +27,7 @@ This supersedes the summary in `NOTICE`, which stays as the short, canonical lis
 
 | Component | Fetched by | Origin | License |
 |---|---|---|---|
-| iOS 16.5 IPSW (user space of the system image) | `sysimage/unpack.sh` | Apple | Apple's — user supplies, user's own copy |
+| Darwin userland 16.5 IPSW (user space of the system image) | `sysimage/unpack.sh` | Apple | Apple's — user supplies, user's own copy |
 | iPhoneOS 16.5 SDK | `xnu-deps/setup.sh` (github.com/theos/sdks) | Apple (headers) via theos | Apple's / theos |
 | Apple open sources (AvailabilityVersions, libdispatch, libpthread, cctools, bootstrap_cmds) | `xnu-deps/setup.sh` | Apple | APSL 2.0 |
 | MacOSX13.3 SDK (Kernel.framework DriverKit headers only) | `xnu-deps/setup.sh` | Apple via joseluisq/macosx-sdks | Apple's |

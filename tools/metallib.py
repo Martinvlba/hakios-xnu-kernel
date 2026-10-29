@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Take a .metallib apart: the MTLB container, its function list, and each function's LLVM bitcode.
 
-The container was worked out by hand against the files of iOS 16.5; what is in it, and what the
+The container was worked out by hand against the files of Darwin userland 16.5; what is in it, and what the
 numbers below mean, is written down in docs/metal.md (section 9). Every module of every .metallib
 in the extracted system is ordinary LLVM bitcode in the standard 0x0B17C0DE wrapper, so after
 "metallib.py dump" an ordinary llvm-dis reads them.

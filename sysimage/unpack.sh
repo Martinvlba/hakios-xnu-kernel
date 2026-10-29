@@ -1,5 +1,5 @@
 #!/bin/bash
-# Unpack the files of iOS 16.5 (20F66, iPhone X) that the system image is made of, out of an IPSW
+# Unpack the files of Darwin userland 16.5 (20F66, iPhone X) that the system image is made of, out of an IPSW
 # you have on your own disk, and lay them out the way ../userland/build.sh expects them:
 #
 #   rootfs/                  the chosen part of the root filesystem (see select-system.py)
@@ -28,7 +28,7 @@ set -e
 IPSW=${1:-${IPSW:-}}
 if [ -z "$IPSW" ]; then
 	sed -n '16,20p' "$0" | sed 's/^# \{0,1\}//' >&2
-	echo "unpack.sh: give the path of your iOS 16.5 IPSW" >&2
+	echo "unpack.sh: give the path of your Darwin userland 16.5 IPSW" >&2
 	exit 1
 fi
 [ -f "$IPSW" ] || { echo "unpack.sh: $IPSW: no such file" >&2; exit 1; }
@@ -36,7 +36,7 @@ IPSW=$(cd "$(dirname "$IPSW")" && pwd)/$(basename "$IPSW")
 size=$(wc -c < "$IPSW" | tr -d ' ')
 # select-system.py and the checks below are made for this one build; another IPSW would unpack, then fail somewhere later
 if [ "$size" != 6165698198 ] && [ -z "${ANY_IPSW:-}" ]; then
-	echo "unpack.sh: $IPSW is $size bytes, not the 6165698198 of iOS 16.5 20F66 for iPhone10,3/10,6 (ANY_IPSW=1 tries it anyway)" >&2
+	echo "unpack.sh: $IPSW is $size bytes, not the 6165698198 of Darwin userland 16.5 20F66 for iPhone10,3/10,6 (ANY_IPSW=1 tries it anyway)" >&2
 	exit 1
 fi
 cd "$(dirname "$0")"

@@ -35,7 +35,7 @@ static_assert(sizeof(struct minisurf_result) == 0x68, "result layout");
 static_assert(offsetof(struct minisurf_shared, attachments) == 0x30, "shared layout");
 static_assert(sizeof(struct minisurf_result) + 20 * sizeof(struct minisurf_plane) == MINISURF_RESULT_MAX, "result size");
 
-/* IOConnectCallMethod selectors of IOSurfaceRootUserClient (iOS 16.5) */
+/* IOConnectCallMethod selectors of IOSurfaceRootUserClient (Darwin userland 16.5) */
 enum {
 	kSurfaceMethodCreate            = 0,
 	kSurfaceMethodLookup            = 4,

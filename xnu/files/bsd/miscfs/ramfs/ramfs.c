@@ -61,7 +61,7 @@ struct ramfs_dirent {
 	uint32_t           rd_namelen;
 };
 
-/* An extended attribute: iOS keeps container metadata, ACLs and much else in them. */
+/* An extended attribute: Darwin keeps container metadata, ACLs and much else in them. */
 struct ramfs_xattr {
 	TAILQ_ENTRY(ramfs_xattr) rx_link;
 	char   *rx_name;                        /* rx_namelen bytes and a terminator */

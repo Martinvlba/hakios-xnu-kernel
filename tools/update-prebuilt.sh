@@ -11,7 +11,7 @@ mkdir -p prebuilt/userland devices/redwood/prebuilt
 cp $K prebuilt/hakios-kernel
 # The loader in prebuilt/ is built with the PLACEHOLDER identity (xnuloader/mkidentity.sh --placeholder: no Apple data), in a
 # temporary copy so that the real xnuloader/identity.h of this tree, made from your own IPSW, is left alone and never copied
-# here. It boots the open kernel (make qemu-open); to start iOS, build the loader yourself (make loader).
+# here. It boots the open kernel (make qemu-open); to start Darwin, build the loader yourself (make loader).
 if command -v lld-link >/dev/null && command -v clang >/dev/null; then
 	T=$(mktemp -d)
 	mkdir "$T/xnuloader"

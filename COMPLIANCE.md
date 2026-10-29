@@ -23,7 +23,7 @@ publishes under the APSL 2.0. The full text is in `LICENSE.APSL`. The obligation
 - **No re-licensing.** The XNU-derived code stays under the APSL; it is **not** relabeled MIT. The
   MIT License in `LICENSE` applies only to our own non-XNU code.
 
-What is NOT covered and must not be assumed covered by the APSL: iOS user space, Apple firmware,
+What is NOT covered and must not be assumed covered by the APSL: Darwin user space, Apple firmware,
 trademarks, and any Apple binary. None of those are in this repository.
 
 ## MIT (our own code)
@@ -35,7 +35,7 @@ License (`LICENSE`). Contributions are accepted under the same terms (`CONTRIBUT
 
 Each third-party component is listed in `THIRD_PARTY_LICENSES.md` with its origin, license, and
 whether it is redistributed in the tree or fetched at build time. Components fetched at build time
-(the iOS SDK, Mesa, Procursus/Sileo, lzfse, ath11k, LinuxKPI headers) are never committed; they
+(the Darwin SDK, Mesa, Procursus/Sileo, lzfse, ath11k, LinuxKPI headers) are never committed; they
 are obtained from their own upstreams under their own licenses.
 
 ## Items still to verify

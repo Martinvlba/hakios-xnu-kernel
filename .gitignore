@@ -1,5 +1,5 @@
 # A whitelist: the working tree also holds gigabytes of downloads, build output, logs, third-party
-# clones and files of iOS, none of which belongs in the repository. Nothing is tracked unless it
+# clones and files of Darwin, none of which belongs in the repository. Nothing is tracked unless it
 # is named here.
 /*
 !/.gitignore

@@ -1,6 +1,6 @@
 # source this (from bash) before building XNU on Linux
 # Everything is found relative to this file. THEOS (default ~/theos) provides the cctools and the
-# iOS SDK; XNU_SRC is the kernel tree (xnu/apply.sh creates it).
+# Darwin SDK; XNU_SRC is the kernel tree (xnu/apply.sh creates it).
 DARWIN_REDWOOD=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export DARWIN_REDWOOD
 export XNU_HOST_OS=$(uname)

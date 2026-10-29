@@ -18,7 +18,7 @@ card starts the kernel, with no fastboot. docs/uefi-boot.md says what this does 
 
 It refuses what the loader would refuse, and says so here instead of on a phone's screen: a file that is not a
 payload (no XNUP), a payload with no kernel in it, one that does not fit in the loader's payload region (63 MiB: the
-big iOS system image does not come this way).
+big Darwin system image does not come this way).
 """
 import argparse
 import os
@@ -72,7 +72,7 @@ def main():
         sys.exit("mkesp: the payload has no kernel in it (entries: %s)" % (", ".join(sorted(parts)) or "none"))
     if len(data) > PAYLOAD_LIMIT:
         sys.exit("mkesp: the payload is %d bytes and the loader's payload region holds %d: the root image is too big for "
-                 "this way of booting (the big iOS image goes in over USB, `xl ramdisk`)" % (len(data), PAYLOAD_LIMIT))
+                 "this way of booting (the big Darwin image goes in over USB, `xl ramdisk`)" % (len(data), PAYLOAD_LIMIT))
     version = parts.get("kernel.ver", b"").rstrip(b"\0").decode(errors="replace")
     head = open(loader, "rb").read(2)
     if head != b"MZ":

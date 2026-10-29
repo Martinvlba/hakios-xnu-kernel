@@ -1,5 +1,5 @@
 #!/bin/bash
-# Make xnuloader/identity.h: the identity of the iPhone whose files iOS 16.5 was built for, taken
+# Make xnuloader/identity.h: the identity of the iPhone whose files Darwin userland 16.5 was built for, taken
 # from the device tree in the IPSW (Firmware/all_flash/DeviceTree.d22ap.im4p) at build time, on
 # the builder's machine, from their own copy of the firmware. The header is not in the repository.
 #
@@ -14,14 +14,14 @@
 #                                  (with no argument: sysimage/DeviceTree.d22ap.im4p, or $IPSW)
 #        xnuloader/mkidentity.sh --placeholder       (no IPSW: an identity.h with no Apple data,
 #                                                     enough to build and boot the open kernel under
-#                                                     QEMU with an Apple-free user space, not iOS)
+#                                                     QEMU with an Apple-free user space, not Darwin)
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
 if [ "$1" = --placeholder ] || [ "${PLACEHOLDER:-}" = 1 ]; then
 	python3 "$HERE/mkidentity.py" --placeholder > "$HERE/identity.h.new"
 	mv "$HERE/identity.h.new" "$HERE/identity.h"
-	echo "mkidentity.sh: xnuloader/identity.h made WITHOUT an IPSW (placeholder; no Apple data, not for iOS)"
+	echo "mkidentity.sh: xnuloader/identity.h made WITHOUT an IPSW (placeholder; no Apple data, not for Darwin)"
 	exit 0
 fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/mkidentity.XXXXXX")
@@ -31,7 +31,7 @@ SRC=${1:-}
 [ -n "$SRC" ] || { [ -f "$TOP/sysimage/DeviceTree.d22ap.im4p" ] && SRC=$TOP/sysimage/DeviceTree.d22ap.im4p; } || SRC=${IPSW:-}
 if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
 	echo "mkidentity.sh: no device tree. Run sysimage/unpack.sh YOUR.ipsw first, or give the IPSW or" >&2
-	echo "  DeviceTree.d22ap.im4p as the argument (or --placeholder for the open kernel without iOS)" >&2
+	echo "  DeviceTree.d22ap.im4p as the argument (or --placeholder for the open kernel without Darwin)" >&2
 	exit 1
 fi
 case $SRC in

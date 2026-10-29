@@ -11,9 +11,10 @@ Two licenses apply, by directory:
    userland/src/, the tools, the scripts, the documentation, the device layer under devices/)
    is licensed under the MIT License below.
 
-Third-party components and their licenses are listed in NOTICE. iOS, the iOS 16.5 IPSW, Apple's
-trademarks and the phone's own firmware are not part of this repository and are not licensed by
-it; every user obtains them from their own device and their own copy of the firmware.
+Third-party components and their licenses are listed in NOTICE. Apple's operating system and its
+firmware images (IPSW), Apple's trademarks and the phone's own firmware are not part of this
+repository and are not licensed by it; every user obtains them from their own device and their own
+copy of the firmware.
 
 ----------------------------------------------------------------------------------------------
 

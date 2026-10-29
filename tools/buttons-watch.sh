@@ -3,7 +3,7 @@
 # (the driver's "buttons:" lines, backboardd's "[Button]" lines, button presses a script makes
 # with rwtouch), print each new line, and take pictures of the screen after every press -- one at
 # once and one two seconds later -- so that a session in which somebody presses the phone's keys
-# also shows what iOS made of them (a volume key: the volume indicator; the side button: the
+# also shows what Darwin made of them (a volume key: the volume indicator; the side button: the
 # screen off, or back on).
 #
 # usage: XL_SECS=N tools/buttons-watch.sh [DIR]   (N as for the run; pictures go to DIR, default

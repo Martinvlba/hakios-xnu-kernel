@@ -8,7 +8,7 @@ yours (the user space you lay out).
 
 ```
  Android's fastboot        HakiOS UEFI              xnuloader              XNU + HakiOS             launchd       user space
- (the phone's own)   -->   (Mu-Silicium with   -->  (loader.efi,     -->   (xnu/, drivers/)   -->            -->   (yours: iOS 16.5,
+ (the phone's own)   -->   (Mu-Silicium with   -->  (loader.efi,     -->   (xnu/, drivers/)   -->            -->   (yours: Darwin userland 16.5,
   fastboot boot             HakiOS's changes,        xnuloader/)            drivers started                       or userland/hello)
                             uefi/ + the device's)    reads the payload      by boot-arguments
 ```
@@ -20,7 +20,7 @@ yours (the user space you lay out).
 | 3. the loader | `xnuloader` reads the payload (the kernel, the command line, `kernel.ver`), lays out memory and the device tree the kernel expects, keeps a service for the storage, starts the kernel; at the end of a run it takes control back | `xnuloader/` |
 | 4. the kernel | XNU with this port: Apple's patched files (`xnu/hakios.patch`), new ones (`xnu/files/`), the drivers (`drivers/`) | [Building](../getting-started/building.md) |
 | 5. the drivers | each one does nothing until its boot-argument asks; those the configuration left out are not in the kernel at all | [Drivers in the configuration](../drivers-config.md) |
-| 6. user space | launchd starts what the system image holds: iOS 16.5's (layer 2, yours), or `userland/hello` for the open kernel | `userland/` |
+| 6. user space | launchd starts what the system image holds: Darwin userland 16.5's (layer 2, yours), or `userland/hello` for the open kernel | `userland/` |
 
 ## How a configuration becomes a kernel and a command line
 

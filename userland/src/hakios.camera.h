@@ -1,5 +1,5 @@
 /*
- * /dev/hakios-camera: the phone's wide camera for iOS (boot-arg cam=5; the kernel's drivers/camera/hakios.camera.c,
+ * /dev/hakios-camera: the phone's wide camera for Darwin (boot-arg cam=5; the kernel's drivers/camera/hakios.camera.c,
  * whose bsd/sys/hakios.camera.h this is a copy of).
  *
  *   open()   the first one powers the sensor up and starts its frames (the sensor's mode: boot-arg

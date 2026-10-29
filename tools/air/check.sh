@@ -11,17 +11,17 @@
 #   tools/air/check.sh -q         only the numbers, write nothing
 set -e
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
-IOS=${IOS:-$ROOT/sysimage}
+DARWIN=${DARWIN:-$ROOT/sysimage}
 QUIET=0
 [ "${1:-}" = "-q" ] && QUIET=1
 
 # The corpus: the MTLB libraries of the device image. The five are named rather
 # than searched for, so a missing one is an error and not a smaller corpus.
 LIBS=(
-	"$IOS/rootfs/System/Library/VideoDecoders/AV1SW.metallib"
-	"$IOS/rootfs/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib"
-	"$IOS/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/default.metallib"
-	"$IOS/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/portrait_filters.metallib"
+	"$DARWIN/rootfs/System/Library/VideoDecoders/AV1SW.metallib"
+	"$DARWIN/rootfs/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib"
+	"$DARWIN/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/default.metallib"
+	"$DARWIN/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/portrait_filters.metallib"
 )
 # SafariSharedUI's default.metallib is in the corpus list of docs/air.md and is
 # deliberately not here: it is 118 bytes and holds no functions at all.

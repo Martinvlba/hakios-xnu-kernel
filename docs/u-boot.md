@@ -156,7 +156,7 @@ Run on a POCO X5 Pro 5G (`redwood`, bootloader unlocked, Android on slot b), fro
   (that is what `hello` does) and the kernel returns: `result: returned 22037 0`. The loader's log is written to `logdump` and read
   back the same.
 - `./xl screenshot`: the kernel's last screen, with U-Boot's `[oosexgang]` lines under it.
-- **iOS 16.5**, the images built from the IPSW (`sysimage/unpack.sh`, `PREBUILT=1 REST=1 SYSTEM=1 userland/build.sh`, `make
+- **Darwin userland 16.5**, the images built from the IPSW (`sysimage/unpack.sh`, `PREBUILT=1 REST=1 SYSTEM=1 userland/build.sh`, `make
   loader`), no firmware of the phone yet (no GPU: drawn in software): `./xl ramdisk userland/system.apfs` takes 2361 MB in 71 s
   (33 MB/s) through U-Boot, and `XL_CMDLINE="debug=0x8 rd=md0 hv_wdt_pet=1 bootcpu=7 cpus=8 cpufreq=1 ufs=2 touchscreen=1" ./xl run`
   brings the home screen in under a minute (the screenshot at 60 s), with touch.
@@ -193,12 +193,12 @@ What was done on the POCO X5 Pro, 29 October 2026, in this order, each step chec
 2. **`darwin`** (`tools/userdata-carve.py --wipe DIR 20`): userdata shortened, `darwin` (sda34, 20 GiB, APFS container
    type) at the end of LUN 0, two entries changed, both copies of the table checked here and with `sfdisk --sector-size
    4096`; written from Android (root) with `dd`, read back; then `fastboot -w` (**Android's data is erased**).
-3. **The iOS volume** into `darwin`: Apple's root volume of the IPSW (`tools/apfs/dmg.py extract`), the OS and App cryptexes
+3. **The Darwin volume** into `darwin`: Apple's root volume of the IPSW (`tools/apfs/dmg.py extract`), the OS and App cryptexes
    after it, as the port's own layout (`docs/ru/notes.md`, "Криптексы на флеше"): 8.4 GB as 11 sparse pieces
    (`tools/sparse-split.py`: Google's fastboot for Windows runs out of memory on one 8 GB image), read back by U-Boot
    (`hakios sum darwin 0 2042368`) with the image's own sum.
-4. **iOS from `darwin`, still from RAM**: `CRYPTEXES=flash FLASHBOOT=1 userland/build.sh`, `xl ramdisk userland/flashboot.apfs`,
-   `root_apfs=ufs_darwin ufs=2`: the iOS volume is the root, SpringBoard up.
+4. **Darwin from `darwin`, still from RAM**: `CRYPTEXES=flash FLASHBOOT=1 userland/build.sh`, `xl ramdisk userland/flashboot.apfs`,
+   `root_apfs=ufs_darwin ufs=2`: the Darwin volume is the root, SpringBoard up.
 5. **The boot image of slot a** (`tools/mkubootimg.py --install`): U-Boot, the loader, a payload with the kernel, `root.apfs`
    and `flashboot.apfs` as its `resident` image (the loader puts it where `xl ramdisk` would), the flash-root command line,
    and `devices/redwood/u-boot/install.env`; `fastboot flash boot_a`, `fastboot set_active a`.
@@ -209,15 +209,15 @@ root) brings the menu back. Seen on the phone: the menu, and Android from it.
 
 ### The data volume: /private/var kept, the size of the space
 
-Without it `/private/var` is a memory filesystem: empty at every start, and iOS shows the size of that (a quarter of
-the RAM, "1 GB") as the phone's storage. With it, `/private/var` is HFS Plus in `darwin` after the iOS volume and the
-cryptexes (block 2042368 to the end, 12.2 GB): kept between starts, journaled, and what iOS shows is its size.
+Without it `/private/var` is a memory filesystem: empty at every start, and Darwin shows the size of that (a quarter of
+the RAM, "1 GB") as the phone's storage. With it, `/private/var` is HFS Plus in `darwin` after the Darwin volume and the
+cryptexes (block 2042368 to the end, 12.2 GB): kept between starts, journaled, and what Darwin shows is its size.
 
 - the kernel: HFS Plus is built in (Apple's `hfs-627.100.6`, `bsd/hfs`); with `ufs_write=1` the UFS driver gives that
   stretch out as `/dev/ufs_darwin_data`, which reads and writes through the loader (each write flushed and read back);
 - `init`: `var_hfs=ufs_darwin_data` mounts it on `/private/var`, a memory filesystem as before if it does not mount;
 - the empty volume, once: `tools/mkdatavol.py data.simg` and `fastboot flash darwin data.simg` (53 KB: the image says
-  DONT_CARE for the iOS volume and the cryptexes, and for every block the volume does not use). Flashing it again
+  DONT_CARE for the Darwin volume and the cryptexes, and for every block the volume does not use). Flashing it again
   empties the volume;
 - the payload's command line gains `ufs_write=1 var_hfs=ufs_darwin_data`;
 - the loader serves writes to any phone's `darwin` (name, type, place, size, LUN 0; the unique GUID, which
@@ -232,9 +232,9 @@ modem_buffer=0xa8000000 socinfo=1 thermal=1`. And `userland/build.sh` with `GL=1
 `libhakios.gl.dylib` in the image CoreAnimation draws with its software renderer whatever the GPU does -- slow, and
 the wallpaper black ("Failed to initialize Metal or OpenGLES contexts!").
 
-Tried in QEMU first (`qemu/run-hfs-test.sh`; iOS with `virtio_blk=2 var_hfs=rvblk0`): written, stopped hard, the journal
+Tried in QEMU first (`qemu/run-hfs-test.sh`; Darwin with `virtio_blk=2 var_hfs=rvblk0`): written, stopped hard, the journal
 replayed at the next mount, the files there. The volume's root has to be root's (`mkfs.hfsplus -U 0 -G 0 -M 755`, as
-`mkdatavol.py` makes it): with another owner iOS takes it for a data volume to migrate and stays at the progress bar.
+`mkdatavol.py` makes it): with another owner Darwin takes it for a data volume to migrate and stays at the progress bar.
 
 ### Which slot is active is never U-Boot's to change
 

@@ -12,4 +12,4 @@ driver WIFI
 	requires QMI
 	help    Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k
 	help    (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211
-	help    surface iOS's wifid talks to. Needs fw-wifi/ from the phone
+	help    surface Darwin's wifid talks to. Needs fw-wifi/ from the phone

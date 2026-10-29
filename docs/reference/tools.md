@@ -8,11 +8,11 @@ Every `make` target is a script below it; run the script itself for its options 
 |---|---|
 | `make` | the list below |
 | `make doctor` | checks this machine (and a phone on `adb`) for what HakiOS needs |
-| `make unpack IPSW=F` | the OS files out of your own iOS 16.5 IPSW into `sysimage/` (nothing is downloaded) |
+| `make unpack IPSW=F` | the OS files out of your own Darwin userland 16.5 IPSW into `sysimage/` (nothing is downloaded) |
 | `make images` | `userland/root.apfs` and `userland/system.apfs` |
 | `make kernel` | the kernel from source, with the `.config`'s drivers |
 | `make loader` / `make loader-open` | the boot loader with your IPSW's identity / the placeholder that boots the open kernel only |
-| `make qemu` / `make qemu-open` | a session in QEMU with iOS / the open kernel with nothing of Apple's |
+| `make qemu` / `make qemu-open` | a session in QEMU with Darwin / the open kernel with nothing of Apple's |
 | `make phone` | a session on the phone with the `.config`'s arguments |
 | `make firmware` | the phone's firmware off the phone (`devices/$(DEVICE)/pull-firmware.sh`) |
 | `make esp` | an EFI system partition tree for a UEFI-native boot ([UEFI boot](../uefi-boot.md)) |

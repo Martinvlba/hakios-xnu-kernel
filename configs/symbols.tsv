@@ -190,7 +190,7 @@ REC_STEP	arg	rec_step	GPU and display	k	MiniIOMobileFramebuffer.cpp
 REGTRACE	arg	regtrace	CPU, memory and boot	k	(patch)	
 RETURN_CPU	arg	return_cpu	CPU, memory and boot	k	loader_return.c	
 RETURN_PANIC	arg	return_panic	CPU, memory and boot	k	loader_return.c	
-ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the iOS root volume on /dev/DEV -- the phone's flash, read only
+ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
 SERIAL	arg	serial	Loader	l	loader.c	
 SMALL_CORES	arg	small_cores	CPU, memory and boot	k	(patch)	
 SMALL_CORES_AFTER	arg	small_cores_after	CPU, memory and boot	k	GenericARMPE.cpp	

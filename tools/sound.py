@@ -7,7 +7,7 @@ RECORDING is the piece of memory as the loader hands it over ("xl sound"; under 
 monitor's pmemsave at the address in the kernel's line "hakios-audio: recording ... at 0x..."):
 a header { "RWSND001", rate, channels, blocks }, then for every write to /dev/hakios-audio the
 time it was made (nanoseconds since the kernel started), the number of frames and the frames
-themselves, 16-bit samples. iOS writes only while something plays, so the recording holds no
+themselves, 16-bit samples. Darwin writes only while something plays, so the recording holds no
 silence: here the blocks are put back where they were in time, with silence in between
 (a pause of more than a quarter of a second is a pause; anything shorter is the writer being
 early or late, and the blocks are joined).

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Get Apple's XNU sources (the release that iOS 16.5 was built from) and put the HakiOS
+# Get Apple's XNU sources (the release that Darwin userland 16.5 was built from) and put the HakiOS
 # work on top of them: hakios.patch changes Apple's files, files/ holds the new ones.
 # usage: xnu/apply.sh [DIR]              (default: $XNU_SRC, else xnu-src/xnu-8796.121.2 next to this directory)
 # env:   XNU_URL   where to fetch from (default: Apple's repository on GitHub; an existing clone

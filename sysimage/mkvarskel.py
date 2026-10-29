@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Write the skeleton of the data volume: mkvarskel.py rootfs.slt > var.skel
 
-The iOS image carries a template of /private/var (the restore process copies it to the data
+The Darwin image carries a template of /private/var (the restore process copies it to the data
 volume). Our /private/var is an empty memory filesystem at every boot, so init re-creates the
 directories of that template, with their owners and modes, from this list. Lines, tab separated:
     d  mode(octal)  uid  gid  path
     l  target  path                      (symbolic link)
 The staged applications and assets of the template are left out; a few directories that daemons
-expect but only a running iOS creates are added at the end.
+expect but only a running Darwin creates are added at the end.
 """
 import importlib.util
 import os

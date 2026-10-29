@@ -2,7 +2,7 @@
  * /dev/hakios-touch: touch samples on their way from whoever produces them to the
  * program that turns them into HID events for the window server.
  *
- * iOS expects touches from Apple's multitouch driver through IOHIDFamily; neither exists
+ * Darwin expects touches from Apple's multitouch driver through IOHIDFamily; neither exists
  * here. Instead a producer -- a kernel driver for a real touch controller or for an emulated
  * pointer, or a user program replaying a script -- posts samples, and code of ours running
  * inside backboardd reads them and synthesizes the events. Both sides use the same record.

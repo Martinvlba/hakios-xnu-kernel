@@ -1,7 +1,7 @@
 /*
- * en1: the modem's packets as a network interface iOS will use.
+ * en1: the modem's packets as a network interface Darwin will use.
  *
- * iOS's own cellular interface (pdp_ip0) is made by its baseband stack, which is not here. What
+ * Darwin's own cellular interface (pdp_ip0) is made by its baseband stack, which is not here. What
  * is here is the kernel's Ethernet-looking interface (hakios.net.c) and configd, which treats an
  * Ethernet interface whose link comes up the way it treats a USB Ethernet adapter: it runs DHCP
  * on it, takes the address, the router and the DNS servers it is given, and routes through it.

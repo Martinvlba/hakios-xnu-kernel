@@ -22,7 +22,7 @@ In the repository:
 
 Fetched at build time, never committed:
 
-- the iOS 16.5 IPSW (Apple): the user space of the system image; the user gets it and
+- the Darwin userland 16.5 IPSW (Apple): the user space of the system image; the user gets it and
   sysimage/unpack.sh unpacks it on their machine; nothing downloads it; its license is Apple's.
 - the iPhoneOS 16.5 SDK from github.com/theos/sdks, and theos's cctools (Apple's open-source cctools): the
   kernel's and user space's build tools.

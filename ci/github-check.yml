@@ -34,7 +34,7 @@ jobs:
         run: make help
       - name: Provenance - every binary and blob explained, nothing proprietary, nothing writes to the phone
         run: |
-          # The rule of the repository: nothing of iOS, no pictures of it, no vendor firmware, and a
+          # The rule of the repository: nothing of Darwin, no pictures of it, no vendor firmware, and a
           # promise that the project boots from RAM and does not write to the phone's storage. Every
           # binary must have a line in tools/provenance.allow saying where it came from.
           # (This replaces two lines of the form `! git ls-files | grep ...`: bash -e does not stop on

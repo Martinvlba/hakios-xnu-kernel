@@ -4,7 +4,7 @@
 usage: tools/provenance-check.py [--report] [--root DIR]
 
 The rule of this repository is that it holds only what its authors may redistribute: the source of
-the project, and files built from that source. Nothing of Apple's closed software (iOS, its images,
+the project, and files built from that source. Nothing of Apple's closed software (Darwin, its images,
 fonts, pictures), nothing of a phone vendor's firmware. A rule like that holds only if a machine
 checks it on every push, so this does. It reads the files git tracks and fails when it finds
 

@@ -519,7 +519,7 @@ index 95192dd62449..b00da803b5b4 100644
  
  	/*
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 1d71c66629fb..1d5025f32b88 100644
+index 1d71c66629fb..a22095ccf5f0 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -1157,6 +1157,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
@@ -670,7 +670,7 @@ index 1d71c66629fb..1d5025f32b88 100644
 +	if (persona == NULL) {
 +		/*
 +		 * hakios: there are no personas in this port -- nothing makes them, and
-+		 * kpersona_find_by_type() answers "no such process" to everyone who asks. iOS's own
++		 * kpersona_find_by_type() answers "no such process" to everyone who asks. Darwin's own
 +		 * programs get along without them, but a package manager becomes root by way of one:
 +		 * Sileo asks posix_spawn for persona 99 with OVERRIDE and uid 0 (its APTWrapper), and
 +		 * that is how it runs apt and dpkg. With the persona missing the lookup failed, the
@@ -922,7 +922,7 @@ index 1750d3a52d3c..0373d0dd160f 100644
  }
  
 diff --git a/bsd/kern/kern_priv.c b/bsd/kern/kern_priv.c
-index 88adf2dda936..e29e09fc0f0b 100644
+index 88adf2dda936..168384889bc1 100644
 --- a/bsd/kern/kern_priv.c
 +++ b/bsd/kern/kern_priv.c
 @@ -82,6 +82,19 @@ priv_check_cred(kauth_cred_t cred, int priv, int flags)
@@ -931,7 +931,7 @@ index 88adf2dda936..e29e09fc0f0b 100644
  
 +	/*
 +	 * hakios: nothing is signed here and no process carries an entitlement (AMFI is a stub), so
-+	 * every privilege that an entitlement would answer for is refused -- and iOS leans on one of
++	 * every privilege that an entitlement would answer for is refused -- and Darwin leans on one of
 +	 * them for ordinary work. A daemon that goes to the network on behalf of an application
 +	 * (trustd checking the certificate for whoever opened the connection, nsurlsessiond carrying
 +	 * out its downloads) describes the connection to NECP as delegated, and without this
@@ -1018,7 +1018,7 @@ index 4ca22ee4371a..e95e618b4cb6 100644
  	int spacetype = IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
  
 diff --git a/bsd/kern/sys_work_interval.c b/bsd/kern/sys_work_interval.c
-index b544bf307dfe..85e34caf9f62 100644
+index b544bf307dfe..a06cbc68ffdb 100644
 --- a/bsd/kern/sys_work_interval.c
 +++ b/bsd/kern/sys_work_interval.c
 @@ -265,6 +265,22 @@ work_interval_ctl(__unused proc_t p, struct work_interval_ctl_args *uap,
@@ -1030,7 +1030,7 @@ index b544bf307dfe..85e34caf9f62 100644
 +	case 8:
 +		/*
 +		 * (redwood) Not in the open source: what os_workgroup_interval_start(), _update() and
-+		 * _finish() of iOS send, for the performance controller, which is not here either.
++		 * _finish() of Darwin send, for the performance controller, which is not here either.
 +		 * CoreAudio does it in every I/O cycle and logs an error each time it is refused: fifty
 +		 * lines a second from the audio server's real-time thread. For its threads, and only
 +		 * for them, there is nothing to do and nothing wrong. (The window server asks for its
@@ -1058,7 +1058,7 @@ index dce802fc36f1..e2e6b3a3f3db 100644
  		user_ssize_t    rlen;
  		off_t   pgoff;
 diff --git a/bsd/miscfs/bindfs/bind_vfsops.c b/bsd/miscfs/bindfs/bind_vfsops.c
-index 412f9ecfc22c..1788b8698ebd 100644
+index 412f9ecfc22c..c88c240d4262 100644
 --- a/bsd/miscfs/bindfs/bind_vfsops.c
 +++ b/bsd/miscfs/bindfs/bind_vfsops.c
 @@ -139,8 +139,12 @@ bindfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
@@ -1069,7 +1069,7 @@ index 412f9ecfc22c..1788b8698ebd 100644
 -	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
 +	/*
 +	 * check entitlement -- hakios: or process 1, the port's own init, unsigned, which binds
-+	 * its choice of launchd jobs and the like onto the read-only iOS root volume before it
++	 * its choice of launchd jobs and the like onto the read-only Darwin root volume before it
 +	 * hands over to launchd (userland/src/init.c, root_apfs=)
 +	 */
 +	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT) && proc_getpid(current_proc()) != 1) {
@@ -1581,7 +1581,7 @@ index 5b51e9c46a8d..6872b94631c9 100644
  	context.vc_thread = current_thread();
  	context.vc_ucred = cred;
 diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
-index 60c8b9eedd50..b0029de5ef21 100644
+index 60c8b9eedd50..4384b6fec634 100644
 --- a/bsd/vm/vm_unix.c
 +++ b/bsd/vm/vm_unix.c
 @@ -2538,7 +2538,19 @@ after_root_check:
@@ -1590,7 +1590,7 @@ index 60c8b9eedd50..b0029de5ef21 100644
  			error = vnode_lookup(PREBOOT_CRYPTEX_PATH, 0, &preboot_vp, vfs_context_current());
 -			if (error || srfmp->vp->v_mount != preboot_vp->v_mount) {
 +			/*
-+			 * (redwood) Or a volume of its own mounted on a directory right inside it: iOS
++			 * (redwood) Or a volume of its own mounted on a directory right inside it: Darwin
 +			 * grafts each cryptex image into the Preboot volume (graftdmg), so its files are
 +			 * that volume's; this port mounts the image there as it is (bsd/miscfs/apfs), a
 +			 * mount of its own whose covered directory is Preboot's Cryptexes/<name>.

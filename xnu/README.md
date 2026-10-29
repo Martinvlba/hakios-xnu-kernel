@@ -1,6 +1,6 @@
 # The kernel
 
-Our changes to XNU `xnu-8796.121.2` (the kernel of iOS 16.5, Darwin 22.5.0):
+Our changes to XNU `xnu-8796.121.2` (the kernel of Darwin userland 16.5, Darwin 22.5.0):
 
 - `hakios.patch`: changes to Apple's files;
 - `files/`: new files at their paths in the XNU tree;
@@ -24,7 +24,7 @@ xnu-deps/setup.sh        # dependencies, mig/unifdef/tcsh, the SDK overlay, two 
 ```
 
 The kernel: `hakios-kernel` at the top of the repository (`make kernel` copies it there from XNU's `xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837`).
-`./xl run` and `qemu/run-ios.sh` take it from there (`prebuilt/` only when it is missing).
+`./xl run` and `qemu/run-darwin.sh` take it from there (`prebuilt/` only when it is missing).
 
 Things to know:
 

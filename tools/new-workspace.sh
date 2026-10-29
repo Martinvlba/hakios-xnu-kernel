@@ -6,7 +6,7 @@
 #
 # usage: tools/new-workspace.sh NAME INSTANCE [DIR]
 #   NAME      the branch, and the directory ../hakios-NAME unless DIR is given
-#   INSTANCE  the QEMU instance number of the copy (1, 2, ...; see qemu/run-ios.sh)
+#   INSTANCE  the QEMU instance number of the copy (1, 2, ...; see qemu/run-darwin.sh)
 #
 # The kernel tree is copied as it is now, uncommitted work included, and that state is recorded
 # (refs/redwood/baseline in the copy's kernel tree): tools/kernel-delta.sh, run in the workspace,
@@ -37,7 +37,7 @@ rm -rf $K/BUILD
 )
 # what the kernel build needs besides the tree
 cp -a --reflink=auto "$ROOT/xnu-deps/." xnu-deps/
-# The files of iOS and the system image made of them. Every one of these is taken only if it is
+# The files of Darwin and the system image made of them. Every one of these is taken only if it is
 # there: a main copy that has not built its images yet has no system.apfs nor root.apfs, and
 # cryptex-app is unpacked only where somebody has needed it -- under "set -e" a copy of a file that
 # is not there used to end the script halfway, leaving a workspace without its QEMU instance number

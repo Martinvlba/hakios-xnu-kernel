@@ -73,7 +73,7 @@ CONFIG_HAKIOS_MODEM=y
 # QEMU's virtio network device as the link behind en0 (virtio_net=1). QEMU only [hakios.virtio_net.c]
 CONFIG_HAKIOS_VIRTIO_NET=y
 
-# the battery: kern.hakios.battery_*, and HakiosBattery, the IOPMPowerSource iOS reads the charge from (the state ... [hakios.battery.c, hakios.battery.cpp]
+# the battery: kern.hakios.battery_*, and HakiosBattery, the IOPMPowerSource Darwin reads the charge from (the state ... [hakios.battery.c, hakios.battery.cpp]
 CONFIG_HAKIOS_BATTERY=y
 
 # the clock of the cores the kernel runs on (cpufreq=1), and the memory bus's votes (ddr=) [hakios.cpufreq.c]
@@ -1087,7 +1087,7 @@ CONFIG_MODEM_AGAIN=y
 # the renderer is made to answer that it has those functions after all
 # CONFIG_GLYES is not set
 
-# the root is to be the iOS root volume on /dev/DEV -- the phone's flash, read only
+# the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
 # CONFIG_ROOT_APFS is not set
 
 # read by inject_sb.c (user space)

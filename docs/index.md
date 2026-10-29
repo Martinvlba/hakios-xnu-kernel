@@ -6,7 +6,7 @@ of Apple's and nothing of any phone's.
 
 Where to start:
 
-- [Getting started](getting-started/index.md): the open kernel in QEMU in a few commands, or the iOS 16.5 user space you lay
+- [Getting started](getting-started/index.md): the open kernel in QEMU in a few commands, or the Darwin userland 16.5 user space you lay
   out yourself.
 - [On the phone](getting-started/phone.md): the POCO X5 Pro 5G, in RAM with `fastboot boot`, back to Android with a reboot.
 - [Port a device](porting/index.md): a device is a repository of its own over the common one: a defconfig, a status file, its
@@ -34,7 +34,7 @@ The table is made from the devices' own `device.conf`: [all devices](devices/ind
 ## The three layers
 
 1. **The open core**: the kernel port, the loader, the drivers, the tools. All source, in these repositories.
-2. **What you put on top**: the kernel can start a user space you supply; it was built so that it can start iOS 16.5's, which you
+2. **What you put on top**: the kernel can start a user space you supply; it was built so that it can start Darwin userland 16.5's, which you
    lay out yourself from Apple's own download. None of it is in the repositories.
 3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
 

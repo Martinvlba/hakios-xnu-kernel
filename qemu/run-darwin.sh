@@ -2,7 +2,7 @@
 # Boot the whole system under QEMU: the big system image preloaded at the loader's resident
 # address (it becomes /dev/md0, the root) and the small image in the payload (/dev/md1), the
 # same arrangement `xl ramdisk` + `xl run` make on the phone.
-# usage: run-ios.sh [seconds] [extra qemu args...]
+# usage: run-darwin.sh [seconds] [extra qemu args...]
 #
 # Counting anything in the log this writes: every console line comes out TWICE, the second copy in a
 # block replayed some thousands of lines later (take any launchd line and grep -n it). So `grep -c` gives
@@ -18,7 +18,7 @@
 #                          (it hands out an address by DHCP, answers DNS and passes connections on to
 #                          this machine's network; no privileges needed). The kernel makes en0 of it
 #                          (boot-arg virtio_net=1, added here); see userland/src/net_test.m for the rest.
-#      AUDIO=<where>       what plays the sound of iOS: a QEMU audio back end (pipewire, pa, alsa, sdl: each
+#      AUDIO=<where>       what plays the sound of Darwin: a QEMU audio back end (pipewire, pa, alsa, sdl: each
 #                          needs its QEMU module, e.g. the package qemu-audio-pipewire) or FILE.wav to
 #                          write it into a file instead. Default: nowhere (the guest plays all the same).
 #      QEMU_INSTANCE=<n>   to run several at once: each number has its own monitor and QMP ports
@@ -35,17 +35,17 @@
 # host RAM).
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 K=hakios-kernel
-[ -f $K ] || { K=prebuilt/hakios-kernel; echo "run-ios.sh: no kernel built here, using $K" >&2; }
-# iOS has to be told which iPhone it runs on, and that comes from the user's own IPSW, into the loader at build time
-# (xnuloader/mkidentity.sh). The loader in prebuilt/ has no Apple data, so with it iOS does not start, and the window stays black.
+[ -f $K ] || { K=prebuilt/hakios-kernel; echo "run-darwin.sh: no kernel built here, using $K" >&2; }
+# Darwin has to be told which iPhone it runs on, and that comes from the user's own IPSW, into the loader at build time
+# (xnuloader/mkidentity.sh). The loader in prebuilt/ has no Apple data, so with it Darwin does not start, and the window stays black.
 if [ ! -f xnuloader/loader.efi ] && [ -z "$QEMU_PREBUILT_LOADER" ]; then
-	echo "run-ios.sh: no xnuloader/loader.efi: iOS needs the loader built with the identity of the iPhone from your own IPSW:"
+	echo "run-darwin.sh: no xnuloader/loader.efi: Darwin needs the loader built with the identity of the iPhone from your own IPSW:"
 	echo "            make loader        (needs clang and lld; QEMU_PREBUILT_LOADER=1 to run with the one without Apple data anyway)"
 	exit 1
 fi
 IMG=${IMG:-userland/system.apfs}
 ROOT=${ROOT:-userland/root.apfs}
-[ -f "$IMG" ] && [ -f "$ROOT" ] || { echo "run-ios.sh: $IMG or $ROOT is missing (userland/build.sh makes them)"; exit 1; }
+[ -f "$IMG" ] && [ -f "$ROOT" ] || { echo "run-darwin.sh: $IMG or $ROOT is missing (userland/build.sh makes them)"; exit 1; }
 SECS=${1:-60}; shift
 RAM_BASE=0x40000000 RD_ADDR=0xFC000000
 RAM_GB=${QEMU_RAM_GB:-7}
@@ -54,7 +54,7 @@ INSTANCE=${QEMU_INSTANCE:-$(cat qemu/instance 2>/dev/null || echo 0)}
 # an instance takes 2.5-3 GB of host memory; starting one that does not fit gets something killed
 AVAILABLE=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
 if [ "${AVAILABLE:-9999}" -lt 3000 ] && [ -z "$QEMU_FORCE" ]; then
-	echo "run-ios.sh: only $AVAILABLE MB of memory available on this machine: stop another QEMU first (QEMU_FORCE=1 to start anyway)"
+	echo "run-darwin.sh: only $AVAILABLE MB of memory available on this machine: stop another QEMU first (QEMU_FORCE=1 to start anyway)"
 	exit 1
 fi
 

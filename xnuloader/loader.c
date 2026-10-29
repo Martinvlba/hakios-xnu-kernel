@@ -10,7 +10,7 @@
  *   - exits boot services, turns the MMU off and jumps to the kernel entry
  */
 #include "efi.h"
-#include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
+#include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
@@ -170,7 +170,7 @@ str_eq(const char *a, const char *b)
 static int screen_quiet;
 /*
  * And while the kernel runs, whatever started the loader: under HakiOS's U-Boot (the menu of an installed HakiOS) there
- * is no USB command loop, the text console is U-Boot's, drawn into the framebuffer the kernel shows iOS in, and every
+ * is no USB command loop, the text console is U-Boot's, drawn into the framebuffer the kernel shows Darwin in, and every
  * line core 0 printed during a run (the storage's, the battery's, the watchdog's) ran over the system's screen.
  * What it was before the run, to go back to.
  */
@@ -492,7 +492,7 @@ dt_prop_padded(struct dt_writer *w, const char *name, const char *value, uint32_
 
 /*
  * Properties copied from the iPhone's device tree (identity.h), but one: the iPhone X's display is a
- * wide-gamut one ("artwork-display-gamut" P3), and with it iOS takes the screen for one that shows
+ * wide-gamut one ("artwork-display-gamut" P3), and with it Darwin takes the screen for one that shows
  * extended colour (MobileGestalt's HasExtendedColorDisplay): WebKit then draws a page's tiles into
  * surfaces of ten bits a colour ('w30r', 'b3a8'), which neither the kernel's surfaces nor the window
  * server's renderer here do (eight bits, BGRA), and every page comes out black. Here the screen is
@@ -1495,7 +1495,7 @@ ufs_survey(void)
  * Reads, and -- with ufs_write=1 on the command line -- writes into one partition and nowhere
  * else: the port's own darwin, proved by its GPT entry (name, both GUIDs, first and last LBA, its
  * logical unit), and in it only past everything the build writes from the computer, so that no
- * answer to the kernel can reach Android's partitions, the iOS volume or the cryptexes. The
+ * answer to the kernel can reach Android's partitions, the Darwin volume or the cryptexes. The
  * refusals are here, in the kernel (drivers/storage/hakios.ufs.c) and in UEFI's own driver, which gives
  * out a partition's BlockIo and bounds it: a request has to pass all three.
  *
@@ -1516,7 +1516,7 @@ ufs_survey(void)
 /*
  * The data volume's writes (HFS Plus on /dev/ufs_darwin_data): written and nothing more -- no flush, no read back --
  * because its journal asks for the flush itself (BLOCK_OP_FLUSH) where the order matters, and a flush and a read
- * back after every 4 KB of metadata made iOS crawl. Offered with BLOCK_CAN_FAST in write_caps; the same bounds as
+ * back after every 4 KB of metadata made Darwin crawl. Offered with BLOCK_CAN_FAST in write_caps; the same bounds as
  * BLOCK_OP_WRITE. /dev/rufs_darwin's writes stay BLOCK_OP_WRITE, flushed and read back.
  */
 #define BLOCK_OP_WRITE_FAST 2u
@@ -1526,8 +1526,8 @@ ufs_survey(void)
 /*
  * The one partition a write may reach, and from which of its blocks. darwin is the port's own
  * 20 GiB at the end of logical unit 0 (README, "The port's partition"); what the build puts there
- * from the computer (tools/darwin-write.py) is the iOS volume at its start and the two cryptexes
- * behind it, and nothing of this port reads or writes the rest -- so the data of iOS lives there
+ * from the computer (tools/darwin-write.py) is the Darwin volume at its start and the two cryptexes
+ * behind it, and nothing of this port reads or writes the rest -- so the data of Darwin lives there
  * and a write is refused before that block. The identity: the partition named darwin, of the APFS
  * container type, on logical unit 0, in blocks of 4096 and at least the 20 GiB the port lays out. Not
  * its place, its exact size or its unique GUID: tools/userdata-carve.py makes darwin at the end of
@@ -2997,7 +2997,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (drivers/camera/hakios.torch.c) */
 	int torch_requested = 0;
-	/* "cam=5" there too: the phone's wide camera is iOS's (drivers/camera/hakios.camera.c) */
+	/* "cam=5" there too: the phone's wide camera is Darwin's (drivers/camera/hakios.camera.c) */
 	int camera_requested = 0;
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
 	gamut_p3 = 0;
@@ -3219,7 +3219,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	dt_begin(&w, "device-tree");
 	/*
-	 * The identity is the iPhone's (model, compatible, target-type ...): iOS user space looks
+	 * The identity is the iPhone's (model, compatible, target-type ...): Darwin user space looks
 	 * its device up by these, and its files -- the dyld shared cache to begin with -- are
 	 * those of that phone. XNU itself does not care; the hardware is described further down.
 	 */
@@ -3318,9 +3318,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_begin(&w, "product");
 	dt_identity(&w, identity_product, sizeof(identity_product) / sizeof(identity_product[0]), identity_product_data);
 	/*
-	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes iOS play
+	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes Darwin play
 	 * its vibrations and feedbacks as waveforms on the "Actuator" audio device (the audio plug-in
-	 * hands them to the kernel's motor driver); without it iOS looks for an IOKit vibration motor
+	 * hands them to the kernel's motor driver); without it Darwin looks for an IOKit vibration motor
 	 * that the iPhone X does not have, and nothing vibrates.
 	 */
 	dt_begin(&w, "haptics");
@@ -4074,7 +4074,7 @@ usb_command_loop(void)
  * QEMU's "ramfb" display shows whatever guest memory it is told to, in any size; the firmware
  * only offers a few small landscape modes of it. So we point it at memory of our own with the
  * shape of the iPhone's screen, through the fw_cfg file "etc/ramfb" (the firmware's own mode
- * is simply replaced). In QEMU the display is then exactly what iOS expects; on the real phone
+ * is simply replaced). In QEMU the display is then exactly what Darwin expects; on the real phone
  * the kernel's display driver scales that picture to the panel.
  */
 #define PHONE_WIDTH     1125            /* the screen of the iPhone X, whose identity we carry */
@@ -4108,7 +4108,7 @@ ramfb_phone_screen(void)
 	/*
 	 * volatile: QEMU writes `control' back (to 0) when it has done the request, behind the compiler's back. Without the
 	 * qualifier a build is free to keep the value written a few lines below and never look again, and the loader then
-	 * says the request failed, leaves ramfb at the firmware's 800x600 and iOS draws its 1125x2436 into a corner: a black window
+	 * says the request failed, leaves ramfb at the firmware's 800x600 and Darwin draws its 1125x2436 into a corner: a black window
 	 * (it did, with a newer build of this very file; the older one happened to reload).
 	 */
 	static volatile struct {
@@ -4175,7 +4175,7 @@ ramfb_phone_screen(void)
  * happened, and efi_main says it under the banner. The file has to fit in the payload region (less the last MiB,
  * which holds the panic log), and the region has to be free: where a firmware keeps it reserved, the allocation is
  * refused and the loader goes on without a payload, as it always did.
- * Only the kernel and a root image that fits in the payload come this way; the big iOS system image does not
+ * Only the kernel and a root image that fits in the payload come this way; the big Darwin system image does not
  * (docs/uefi-boot.md says what does).
  */
 static uint64_t volume_payload_bytes;           /* 0: nothing was read; else the payload's size */

@@ -10,7 +10,7 @@ code and the money apart.
   request, or put a result in `docs/` ([CONTRIBUTING.md](CONTRIBUTING.md)).
 - **What a contribution is licensed under** is what the file it touches is under: the kernel patch and the files
   that sit in Apple's tree under APSL 2.0, everything else MIT ([LEGAL.md](LEGAL.md), [NOTICE](NOTICE)).
-- **A contribution brings nothing of Apple's or a vendor's.** No iOS file, no firmware, no key, no screenshot of
+- **A contribution brings nothing of Apple's or a vendor's.** No Darwin file, no firmware, no key, no screenshot of
   either. CI runs `tools/provenance-check.py` and fails a change that does. If you are not sure what counts, ask first.
 - **Results are reported as seen.** A test says what ran, on which phone, with which arguments, and what did not.
   "Does not work" and "I did not try" are both useful, and are not the same.

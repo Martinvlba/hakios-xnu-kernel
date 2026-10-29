@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Choose the part of the iOS root filesystem that goes into the in-memory system image.
+"""Choose the part of the Darwin root filesystem that goes into the in-memory system image.
 
 usage: select-system.py rootfs.slt system.files system.manifest
 
@@ -16,7 +16,7 @@ The whole root is 7.9 GB and the kernel on the phone has about 4 GB of RAM for e
   - from the framework directories (the code itself is in the dyld shared cache) what a
     program may open at run time and is not huge: property lists, string tables, resources,
     plug-ins, and the XPC services and helper executables bundled with frameworks;
-  - the applications (the home screen is made of their icons), without their media; those that iOS
+  - the applications (the home screen is made of their icons), without their media; those that Darwin
     keeps in /private/var/staged_system_apps until its first boot installs them (Maps, Notes,
     Weather, ...) are put straight into /Applications, where they are system applications like
     the rest: system.files names them where they are in the image, system.manifest where they go

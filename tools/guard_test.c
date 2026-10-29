@@ -137,11 +137,11 @@ main(void)
 	run("pink noise at -15 dB RMS (loud music)", 0, 2, pow(10, -15 / 20.0), 0, 60, 10);
 	run("pink noise at -9 dB RMS (music mastered as loud as it goes)", 0, 2, pow(10, -9 / 20.0), 0, 120, 20);
 	run("silence", HAKIOS_GUARD_SILENT, 0, 0, 0, 300, 300);
-	/* iOS at its top: a tone 12.6 dB under full scale, then 12 dB of gain before the guard */
+	/* Darwin at its top: a tone 12.6 dB under full scale, then 12 dB of gain before the guard */
 	hakios_guard_configure(true, 96);
-	run("iOS's top (a 440 Hz sine at -12.6 dB) with 12 dB of gain", 0, 1, pow(10, -12.6 / 20), 440, 90, 10);
+	run("Darwin's top (a 440 Hz sine at -12.6 dB) with 12 dB of gain", 0, 1, pow(10, -12.6 / 20), 440, 90, 10);
 	run("silence", HAKIOS_GUARD_SILENT, 0, 0, 0, 600, 600);
-	run("pink noise at -24 dB RMS (loud music as iOS leaves it) with 12 dB of gain", 0, 2, pow(10, -24 / 20.0), 0, 60, 20);
+	run("pink noise at -24 dB RMS (loud music as Darwin leaves it) with 12 dB of gain", 0, 2, pow(10, -24 / 20.0), 0, 60, 20);
 	run("silence", HAKIOS_GUARD_SILENT, 0, 0, 0, 600, 600);
 	run("the same with the amplifiers 90 dB under (sound_below=720)", 720, 2, pow(10, -24 / 20.0), 0, 10, 5);
 	return 0;

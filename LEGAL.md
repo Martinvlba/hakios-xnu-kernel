@@ -2,7 +2,7 @@
 
 HakiOS is an independent open-source research project that ports the open-source XNU kernel to
 ARM64 Qualcomm hardware. It is **not affiliated with, endorsed by, or connected to Apple Inc.**
-"iOS", "iPhone", "XNU", "Apple" and other marks belong to their owners and are used here only to
+"Darwin", "iPhone", "XNU", "Apple" and other marks belong to their owners and are used here only to
 describe what the code works with.
 
 This file explains, in plain terms, what is and is not distributed by this repository. It is a
@@ -23,7 +23,7 @@ Linux to phones. It has three layers, and the project says plainly which one it 
    ships none, distributes none, and does not decrypt, circumvent or patch anything to obtain one: the tools only lay
    out, on your own machine, files that you have downloaded yourself from the vendor. **Whether you may use such
    software on this hardware is your decision and your responsibility.** Be aware of what you are deciding: Apple's
-   software licence for iOS ties it to Apple-branded hardware and restricts copying and modification, courts have
+   software licence for Darwin ties it to Apple-branded hardware and restricts copying and modification, courts have
    treated that differently (see `docs/legal-review.md`), and the answer depends on your country and on what you do.
    The project does not tell you that it is permitted, and does not tell you that it is not; it tells you that it is
    not the project's to decide.
@@ -55,8 +55,8 @@ program that can write to flash, and CI fails if one appears that is not listed.
 
 ## What this repository does NOT contain and never distributes
 
-- **No part of iOS**: no iOS binary, image, cache, font, picture or screenshot. The user-space
-  half of the system image is built on your machine from the iOS 16.5 IPSW, which you
+- **No part of Darwin**: no Darwin binary, image, cache, font, picture or screenshot. The user-space
+  half of the system image is built on your machine from the Darwin userland 16.5 IPSW, which you
   get yourself, under Apple's license, and hand to `sysimage/unpack.sh` on your machine; no script
   here downloads it. Nothing of it is committed here.
 - **No device firmware**: the GPU, Wi-Fi, audio DSP, modem, haptics and camera firmware is the
@@ -73,7 +73,7 @@ The core kernel, the boot loader and the open tools build and run with **nothing
 builds the kernel and a placeholder loader (no IPSW needed, see `xnuloader/mkidentity.sh
 --placeholder`) and boots a small raw-syscall user space (`userland/src/hello.c`) under QEMU.
 This is the configuration a contributor can build and test without downloading any closed Apple
-software. The full iOS user space is an optional target that depends on software you supply.
+software. The full Darwin user space is an optional target that depends on software you supply.
 
 ## Reporting
 

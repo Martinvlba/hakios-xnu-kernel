@@ -109,7 +109,7 @@ say(const char *format, ...)
 	return length;
 }
 
-/* A line that says all went as it should: not said again in iOS's later recordings (mic=4), where it is the same each time. */
+/* A line that says all went as it should: not said again in Darwin's later recordings (mic=4), where it is the same each time. */
 static bool quiet;
 #define note(...)       do { if (!quiet) { say(__VA_ARGS__); } } while (0)
 
@@ -1447,10 +1447,10 @@ dsp_off(void)
 	}
 }
 
-/* ---- mic=4: the microphone for iOS ------------------------------------------------------------------- */
+/* ---- mic=4: the microphone for Darwin ------------------------------------------------------------------- */
 
 /*
- * What the microphone hears goes into a ring, and /dev/hakios-mic gives it to iOS's audio server
+ * What the microphone hears goes into a ring, and /dev/hakios-mic gives it to Darwin's audio server
  * (HakiosAudio.driver's device "Codec", userland/src/audio_plugin.c): 16-bit samples, one channel,
  * 48 kHz. The path is up only while the device is open (the audio server opens it when its input
  * starts and closes it when it stops), and a read never waits: it gives what has come, keeping the
@@ -1465,8 +1465,8 @@ static int16_t *ring;
 static volatile uint64_t ring_written;          /* frames put into the ring since the device was made */
 static uint64_t ring_read;                      /* frames taken from it (one reader: the audio server) */
 static bool ring_primed;                        /* the reader is RING_KEEP behind; false after it ran dry */
-static uint64_t ring_skipped, ring_dry;         /* frames skipped, reads that found too little: said when iOS stops */
-static volatile uint32_t ios_wants;             /* the device is open */
+static uint64_t ring_skipped, ring_dry;         /* frames skipped, reads that found too little: said when Darwin stops */
+static volatile uint32_t darwin_wants;             /* the device is open */
 static volatile bool stopping;                  /* the run ends (hakios_mic_dsp_down()) */
 
 static void
@@ -1521,7 +1521,7 @@ mic_dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 static int
 mic_dev_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
 {
-	ios_wants = 1;
+	darwin_wants = 1;
 	return 0;
 }
 
@@ -1529,7 +1529,7 @@ mic_dev_open(__unused dev_t dev, __unused int flags, __unused int type, __unused
 static int
 mic_dev_close(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
 {
-	ios_wants = 0;
+	darwin_wants = 0;
 	return 0;
 }
 
@@ -1544,13 +1544,13 @@ static const struct cdevsw mic_cdevsw = {
 static uint32_t mic_secs = 10;
 
 /*
- * The stream run, read for mic_secs (for_ios: while iOS has the device open): how loud it is, every
- * second (for iOS: the first three, then every 30th); into the recording with rec_sound_mic=1; for
- * iOS into the ring. False if it could not get going (the run refused, a read not sent, no read ever came
- * back): not a failure that sets `broken', so for_ios() counts it from this.
+ * The stream run, read for mic_secs (for_darwin: while Darwin has the device open): how loud it is, every
+ * second (for Darwin: the first three, then every 30th); into the recording with rec_sound_mic=1; for
+ * Darwin into the ring. False if it could not get going (the run refused, a read not sent, no read ever came
+ * back): not a failure that sets `broken', so for_darwin() counts it from this.
  */
 static bool
-listen(bool for_ios)
+listen(bool for_darwin)
 {
 	uint32_t run[3] = { 0, 0, 0 }, frames = 0, seconds = 0, peak = 0, periods = 0, empty = 0;
 	int64_t sum = 0;
@@ -1575,8 +1575,8 @@ listen(bool for_ios)
 			return false;
 		}
 	}
-	if (for_ios) {
-		say("mic: LISTENING for iOS: %u reads of 20 ms given to the DSP\n", MIC_PERIODS);
+	if (for_darwin) {
+		say("mic: LISTENING for Darwin: %u reads of 20 ms given to the DSP\n", MIC_PERIODS);
 	} else {
 		say("mic: LISTENING: %u reads of 20 ms given to the DSP; for %u s\n", MIC_PERIODS, mic_secs);
 	}
@@ -1596,7 +1596,7 @@ listen(bool for_ios)
 			tap = 2;
 		}
 		/* (`stopping' ends every kind of run: hakios_mic_dsp_down() waits for mic_lock, which is held until this returns) */
-		if ((for_ios ? !ios_wants : elapsed_ms >= mic_secs * 1000ull) || stopping || broken) {
+		if ((for_darwin ? !darwin_wants : elapsed_ms >= mic_secs * 1000ull) || stopping || broken) {
 			break;
 		}
 		if (!(read_ready & (1u << next))) {
@@ -1628,7 +1628,7 @@ listen(bool for_ios)
 				peak = a > peak ? a : peak;
 			}
 			frames += got;
-			if (for_ios) {
+			if (for_darwin) {
 				ring_put(samples, got);
 			}
 			if (hakios_audio_recording_mic()) {
@@ -1665,7 +1665,7 @@ listen(bool for_ios)
 				db10 = tenths - (int)((32768 - r) * 60 / 16384);
 			}
 			seconds++;
-			if (!for_ios || seconds <= 3 || seconds % 30 == 0) {
+			if (!for_darwin || seconds <= 3 || seconds % 30 == 0) {
 				say("mic: second %u: %u frames (%u periods, %u empty), level %d.%d dBFS (rms %u), peak %u, mean %lld; "
 				    "reads %u, errors %u%s%s\n", seconds, frames, periods, empty, db10 / 10, db10 < 0 ? -db10 % 10 : db10 % 10,
 				    rms, peak, sum / (int64_t)frames, reads_done, read_errors, unmuted ? "" : " (muted)",
@@ -1721,11 +1721,11 @@ path_up(void)
 }
 
 /*
- * mic=4: the path up whenever iOS opens /dev/hakios-mic, down when it closes it; after three
+ * mic=4: the path up whenever Darwin opens /dev/hakios-mic, down when it closes it; after three
  * recordings that broke off, no more until the run ends.
  */
 static void
-for_ios(void)
+for_darwin(void)
 {
 	int major = cdevsw_add(-1, &mic_cdevsw);
 	unsigned recordings = 0, failures = 0;
@@ -1736,12 +1736,12 @@ for_ios(void)
 		say("mic: /dev/hakios-mic cannot be made\n");
 		return;
 	}
-	say("mic: THE MICROPHONE IS IOS'S (/dev/hakios-mic) from here on, until the run ends: it listens only while iOS records\n");
+	say("mic: THE MICROPHONE IS DARWIN'S (/dev/hakios-mic) from here on, until the run ends: it listens only while Darwin records\n");
 	while (!stopping) {
 		uint64_t began, ns;
 		bool failed, up;
 
-		if (!ios_wants) {
+		if (!darwin_wants) {
 			sleep_ms(20);
 			continue;
 		}
@@ -1756,16 +1756,16 @@ for_ios(void)
 		ring_skipped = ring_dry = 0;
 		ring_read = __atomic_load_n(&ring_written, __ATOMIC_ACQUIRE);
 		began = mach_absolute_time();
-		say("mic: iOS records (%u): the path up%s\n", recordings, quiet ? " (the lines that say all went well are not said again)" :
+		say("mic: Darwin records (%u): the path up%s\n", recordings, quiet ? " (the lines that say all went well are not said again)" :
 		    "");
 		/*
 		 * (a bring-up or a start that fails without setting `broken' counts as a failure too: otherwise the three-recordings
-		 * limit below never applies and, while iOS keeps the device open, the path is brought up and undone for ever)
+		 * limit below never applies and, while Darwin keeps the device open, the path is brought up and undone for ever)
 		 */
 		up = path_up() && listen(true);
 		failed = broken || !up;
 		absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
-		say("mic: iOS's recording %u %s after %llu.%llu s; last: %s; %llu frames skipped as too late, %llu reads found too little\n",
+		say("mic: Darwin's recording %u %s after %llu.%llu s; last: %s; %llu frames skipped as too late, %llu reads found too little\n",
 		    recordings, failed ? "BROKE OFF" : "ended", ns / NSEC_PER_SEC, ns % NSEC_PER_SEC / (NSEC_PER_SEC / 10), last_write,
 		    ring_skipped, ring_dry);
 		undo();
@@ -1776,8 +1776,8 @@ for_ios(void)
 				say("mic: three recordings broke off: the microphone stays off until the run ends\n");
 				break;
 			}
-			/* (not again until iOS has closed the device and opened it again) */
-			while (ios_wants && !stopping) {
+			/* (not again until Darwin has closed the device and opened it again) */
+			while (darwin_wants && !stopping) {
 				sleep_ms(20);
 			}
 		}
@@ -1790,9 +1790,9 @@ mic_thread(__unused void *parameter, __unused wait_result_t result)
 	say("mic: level %u: %s\n", level, level == 1 ? "a look, after the LPASS's votes and clocks; nothing written to the codec" :
 	    level == 2 ? "the codec brought up to answer on SoundWire, nothing of it set; then all undone" :
 	    level == 3 ? "the main microphone, as Android records from it, listened to; then all undone" :
-	    "the main microphone for iOS (/dev/hakios-mic), up while iOS records");
+	    "the main microphone for Darwin (/dev/hakios-mic), up while Darwin records");
 	if (level == 4) {
-		for_ios();
+		for_darwin();
 	} else {
 		lck_mtx_lock(&mic_lock);
 		if (level == 1) {

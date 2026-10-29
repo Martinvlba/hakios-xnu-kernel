@@ -45,7 +45,7 @@ A file that is not a payload gives `is not a payload (no XNUP at its start)`, an
 ## Limits
 
 - **63 MiB.** The loader's payload region is 64 MiB and its last MiB holds the panic log. The kernel is about 15 MiB;
-  the **big iOS system image (2.5 GB) does not come this way**. It comes over USB (`xl ramdisk`, once per loader
+  the **big Darwin system image (2.5 GB) does not come this way**. It comes over USB (`xl ramdisk`, once per loader
   session) or, in the flash recipe, from the partition `darwin` (`docs/install.md`).
 - **The region has to be free.** The loader takes all 64 MiB of it with `AllocatePages(AllocateAddress)` (not only the
   pages the file fills: a payload sent over USB later, and the panic log, are written into the rest). A firmware that

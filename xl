@@ -11,7 +11,7 @@
 #   xl recording [F]    fetch the screen recording the last run made (rec_secs=N among XL_CMDLINE) and
 #                       make a video of it (default logs/recording.mp4)
 #   xl sound [F]        fetch the sound the last run recorded (rec_sound=N among XL_CMDLINE: the first N
-#                       seconds of what iOS played) and make a WAV file of it (default logs/sound.wav)
+#                       seconds of what Darwin played) and make a WAV file of it (default logs/sound.wav)
 #   xl camera [P]       fetch the frames the last run's camera left (cam=3 and up among XL_CMDLINE) and make
 #                       pictures of them (P-0.png, ...; default prefix logs/camera)
 #   xl selftest         exercise only the kernel->loader return path
@@ -61,7 +61,7 @@ K=hakios-kernel                 # make kernel makes it
 L=xnuloader/loader.efi
 if [ ! -f $L ]; then
 	L=prebuilt/loader.efi
-	echo "xl: no xnuloader/loader.efi: using prebuilt/loader.efi, which has no iPhone identity in it (iOS will not start; make loader builds one from your own IPSW)" >&2
+	echo "xl: no xnuloader/loader.efi: using prebuilt/loader.efi, which has no iPhone identity in it (Darwin will not start; make loader builds one from your own IPSW)" >&2
 fi
 mkdir -p logs
 # There is one phone, whichever working copy (tools/new-workspace.sh) talks to it: the locks are
@@ -191,7 +191,7 @@ run() { # run <oem command> <label>
 		# The resident image: whose it is and how big, when the last upload was not from here.
 		# Both values and not just "not from here", because a foreign image of the same kind
 		# changes nothing, while a foreign one of another kind makes the boot fail in a way that
-		# names neither it nor its owner -- /sbin/launchd.ios: No such file or directory, with a
+		# names neither it nor its owner -- /sbin/launchd.darwin: No such file or directory, with a
 		# perfectly good image on this side. The warning is not a refusal: relying on another
 		# copy's upload is legitimate when you know what it is, and this says what it is.
 		if [ -s $PHONE.ramdisk ]; then

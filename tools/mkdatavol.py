@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The data volume of iOS for the phone: an empty HFS Plus volume in darwin past the iOS volume and the cryptexes,
+"""The data volume of Darwin for the phone: an empty HFS Plus volume in darwin past the Darwin volume and the cryptexes,
 as an Android sparse image of the whole of darwin that writes that volume and nothing else.
 
 usage: mkdatavol.py OUT.simg [MKFS]      (MKFS: mkfs.hfsplus, default the one in $PATH)
@@ -9,13 +9,13 @@ usage: mkdatavol.py OUT.simg [MKFS]      (MKFS: mkfs.hfsplus, default the one in
 The kernel gives that stretch of darwin out as /dev/ufs_darwin_data (drivers/storage/hakios.ufs.c, ufs_write=1) and
 init mounts it on /private/var (userland/src/init.c, var_hfs=ufs_darwin_data). Flashing this again empties it.
 
-The image says DONT_CARE for darwin's blocks before the volume -- the iOS volume and both cryptexes, which the
+The image says DONT_CARE for darwin's blocks before the volume -- the Darwin volume and both cryptexes, which the
 bootloader therefore leaves as they are -- and, inside the volume, for every block the new volume does not use: what
 is in free space does not matter to HFS Plus, and twelve gigabytes of zeros need not go over USB. The blocks it uses
 (the volume headers, the allocation bitmap, the catalog and extents trees, the journal) are written whole, zeros
 included: which those are is read from the volume's own allocation bitmap.
 
-Case-sensitive (HFSX), as iOS's own data volume is, and journaled.
+Case-sensitive (HFSX), as Darwin's own data volume is, and journaled.
 """
 import os
 import struct

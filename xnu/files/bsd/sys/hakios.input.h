@@ -2,7 +2,7 @@
  * /dev/hakios-touch: touch samples on their way from whoever produces them to the
  * program that turns them into HID events for the window server.
  *
- * iOS expects touches from Apple's multitouch driver through IOHIDFamily; neither exists
+ * Darwin expects touches from Apple's multitouch driver through IOHIDFamily; neither exists
  * here. Instead a producer -- a kernel driver for a real touch controller or for an emulated
  * pointer, or a user program replaying a script -- posts samples, and code of ours running
  * inside backboardd reads them and synthesizes the events. Both sides use the same record.
@@ -56,7 +56,7 @@ void hakios_spmi_unlock(void);
 /*
  * How the battery is, as the audio DSP's battery manager says (drivers/audio/hakios.adsp.c, with adsp=1):
  * handed to drivers/power/hakios.battery.c, which keeps it for the sysctls kern.hakios.battery_* and
- * passes it on to drivers/power/hakios.battery.cpp, the power source that iOS reads. The structure
+ * passes it on to drivers/power/hakios.battery.cpp, the power source that Darwin reads. The structure
  * is repeated there (this header is not seen from iokit/), and `size` tells whether the two agree.
  */
 struct hakios_battery_state {

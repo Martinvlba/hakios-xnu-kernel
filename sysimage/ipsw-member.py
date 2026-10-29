@@ -25,7 +25,7 @@ def main():
         try:
             info = archive.getinfo(member)
         except KeyError:
-            sys.exit(f'ipsw-member.py: {member} is not in {ipsw} (is it the iOS 16.5 20F66 IPSW for iPhone10,3/iPhone10,6?)')
+            sys.exit(f'ipsw-member.py: {member} is not in {ipsw} (is it the Darwin userland 16.5 20F66 IPSW for iPhone10,3/iPhone10,6?)')
         with archive.open(info) as stream, open(output, 'wb') as out:
             shutil.copyfileobj(stream, out, 1 << 20)
     print(f'{member}: {info.file_size} bytes')

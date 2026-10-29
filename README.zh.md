@@ -11,7 +11,7 @@ Linux 电脑上的 QEMU（`virt`，aarch64）里运行，不需要任何 Apple �
 它分三层，项目说明自己对哪一层负责（`LEGAL.md`）：
 
 1. **开放核心**：内核移植、引导程序、驱动、工具。全部是本仓库里的源码。
-2. **你自己放在上面的东西**：内核可以启动你自己提供的用户空间。项目的构建方式使它能够启动 iOS 16.5 用户空间，但那是你自己用
+2. **你自己放在上面的东西**：内核可以启动你自己提供的用户空间。项目的构建方式使它能够启动 Darwin userland 16.5 用户空间，但那是你自己用
    从 Apple 下载的文件在本机整理出来的；项目不提供其中任何内容，也不绕过任何限制去获取它。你是否可以这样做、是否愿意这样做，由你自己决定。
 3. **Apple 的服务**（激活、Apple ID、iCloud、App Store）：不支持，也不是目标。
 
@@ -38,7 +38,7 @@ Linux 电脑上的 QEMU（`virt`，aarch64）里运行，不需要任何 Apple �
 
 永远不会有的东西：
 
-- 任何 iOS 文件：没有二进制、镜像、缓存、字体、图片或截图。系统镜像由你在自己机器上用 iOS 16.5
+- 任何 Darwin 文件：没有二进制、镜像、缓存、字体、图片或截图。系统镜像由你在自己机器上用 Darwin userland 16.5
   的 IPSW 构建，IPSW 由你自己获取并交给 `sysimage/unpack.sh`；项目不替你下载、不解密、不绕过任何东西；
 - 手机的固件（GPU、Wi-Fi、音频 DSP、调制解调器、振动、摄像头）：属于厂商，从你自己的手机取到
   `fw-*/`，git 忽略这些目录；
@@ -71,7 +71,7 @@ Linux x86-64，约 12 GB 磁盘，7-Zip 23 或更新，`lz4`，`qemu-system-aarc
 git clone -b hakios https://github.com/oosexgang/hakios-xnu-kernel.git hakios
 cd hakios
 make doctor       # 检查本机缺什么（QEMU 显示设备、UEFI 固件、内存）以及怎么办
-make unpack IPSW=~/your.ipsw  # 你自己获取的 iOS 16.5 IPSW，解包所需部分（7.4 GB）
+make unpack IPSW=~/your.ipsw  # 你自己获取的 Darwin userland 16.5 IPSW，解包所需部分（7.4 GB）
 make images       # APFS 镜像：userland/root.apfs 和 userland/system.apfs
 make loader       # 引导程序，iPhone 的标识取自你自己的 IPSW 副本（需要 clang 和 lld）
 make qemu         # 20 分钟的会话
@@ -80,10 +80,10 @@ make qemu         # 20 分钟的会话
 **你会看到什么。** CPU 是模拟的，所以很慢，窗口一开始是**黑的**，这是正常的：先黑一分钟左右，然后出现 Apple 标志，
 在较快的台式机上约 5 分钟后出现主屏幕（实测：1 分钟出现标志，5 分钟出现主屏幕），较慢的机器更久。按住鼠标键就是手指；`H` 是主屏键，`L` 是电源键，`↑`/`↓` 是音量。
 
-**如果一直是黑屏：** (0) 你运行过 `make loader` 吗？`prebuilt/loader.efi` 里特意不含 Apple 的数据（它只能启动开放内核），用它 iOS 不会启动；没有你自己的 `xnuloader/loader.efi` 时 `qemu/run-ios.sh` 会拒绝运行并说明原因；(1) 在另一个终端运行 `tail -f logs/qemu.log`，几秒内应出现 `== XNULOADER v3 ==`，之后是内核和 launchd 的输出；
+**如果一直是黑屏：** (0) 你运行过 `make loader` 吗？`prebuilt/loader.efi` 里特意不含 Apple 的数据（它只能启动开放内核），用它 Darwin 不会启动；没有你自己的 `xnuloader/loader.efi` 时 `qemu/run-darwin.sh` 会拒绝运行并说明原因；(1) 在另一个终端运行 `tail -f logs/qemu.log`，几秒内应出现 `== XNULOADER v3 ==`，之后是内核和 launchd 的输出；
 没有输出就运行 `make doctor`。(2) `qemu/screendump.sh` 会保存虚拟机屏幕当前的内容（`logs/qemu-screen.png`）。
 (3) 日志在走但没有窗口或窗口全黑：你的 QEMU 可能没有 GTK（例如没有 WSLg 的 WSL），用
-`qemu/run-ios.sh 1200 -display vnc=127.0.0.1:0`，再用 VNC 客户端连接 `127.0.0.1:5900`。
+`qemu/run-darwin.sh 1200 -display vnc=127.0.0.1:0`，再用 VNC 客户端连接 `127.0.0.1:5900`。
 (4) 虚拟机向 QEMU 要 7 GB 内存（至少 6 GB），内存不足时会非常慢。
 
 ## 在手机上
@@ -139,7 +139,7 @@ make images       # 用户空间和镜像
 ## 许可与法律
 
 我的代码遵循它所修改文件的许可：XNU 补丁为 Apple Public Source License 2.0（全文在
-`LICENSE.APSL`；条款已满足：修改以源码形式发布，保留了声明），其余为 MIT（`LICENSE`）。iOS、
+`LICENSE.APSL`；条款已满足：修改以源码形式发布，保留了声明），其余为 MIT（`LICENSE`）。Darwin、
 其镜像、Apple 商标和手机固件属于各自的所有者，不在本仓库中，也不由我分发；每个人从自己的手机和
 自己的 IPSW 取得它们。第三方组件列于 `NOTICE`。若你认为这里的某个文件侵犯了任何人的权利，请开一
 个 issue，我会删除它。

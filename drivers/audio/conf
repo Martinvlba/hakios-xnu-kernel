@@ -3,7 +3,7 @@
 # tools/hakios-config.py reads this file; docs/drivers-config.md says what each word means and how it reaches XNU.
 
 standard bsd/dev/hakios.audio.c
-	help    /dev/hakios-audio, the sound iOS plays, to whatever plays it; and where the camera, flashlight, motor
+	help    /dev/hakios-audio, the sound Darwin plays, to whatever plays it; and where the camera, flashlight, motor
 	help    and speaker drivers are started from
 
 driver ADSP

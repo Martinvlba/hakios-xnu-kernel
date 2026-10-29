@@ -7,7 +7,7 @@
  * driver of the modem (hakios.mpss.c) brings the IPA up; hakios.ipa.c sets up this processor's
  * side of it -- GSI rings, the IPA's endpoints, its tables -- before the modem is started, and
  * then moves packets. hakios.cell.c makes an Ethernet-looking interface (en1) out of that, with
- * an ARP and DHCP responder of its own, so that iOS configures it as it would a USB Ethernet
+ * an ARP and DHCP responder of its own, so that Darwin configures it as it would a USB Ethernet
  * adapter: address, router and DNS come from the modem's data session (QMI WDS), which
  * hakios.mpss.c reports with hakios_cell_session().
  */
