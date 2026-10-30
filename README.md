@@ -42,7 +42,7 @@ back to its own Android. The one thing written by default is the loader's own lo
 ## Quick start
 
 ```sh
-git clone -b hakios https://github.com/oosexgang/hakios-xnu-kernel.git hakios
+git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios
 cd hakios
 make doctor           # what this machine lacks, and what to do
 make qemu-open        # the open kernel in QEMU: nothing of Apple's, nothing of a phone's
@@ -61,7 +61,7 @@ make phone SECS=600      # a 10-minute session on the phone, in RAM
 
 | Repository | What |
 |---|---|
-| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel/tree/hakios) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
+| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel/tree/main) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
 | [hakios-sm7325](https://github.com/oosexgang/hakios-sm7325) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script, and its SoC's layer (`soc/`: the Qualcomm SC7280 family) |
 | [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | the firmware that starts the loader: Mu-Silicium with HakiOS's boot path, banner and name, and HakiOS's U-Boot (`u-boot/`) |
 | [hakios-metal](https://github.com/oosexgang/hakios-metal) | Metal's command model on the Adreno, through the kernel's GPU driver |
@@ -70,7 +70,7 @@ make phone SECS=600      # a 10-minute session on the phone, in RAM
 into `devices/` and `uefi/`. One repository per device: it carries its SoC's layer, and `tools/hakios-device.py new` makes one. [How the repositories fit](docs/porting/repositories.md).
 
 ```sh
-git clone -b hakios https://github.com/oosexgang/hakios-xnu-kernel.git hakios && cd hakios
+git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios && cd hakios
 tools/hakios-device.py sync      # the SoC, device and UEFI repositories, at the revisions the manifest names
 ```
 

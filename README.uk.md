@@ -76,7 +76,7 @@ HakiOS — це адаптація ядра Darwin (відкритий XNU ві�
 Linux x86-64, близько 12 ГБ на диску, 7-Zip 23 або новіший, `lz4`, `qemu-system-aarch64`, `edk2-aarch64`.
 
 ```sh
-git clone -b hakios https://github.com/oosexgang/hakios-xnu-kernel.git hakios
+git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios
 cd hakios
 make doctor       # чого бракує цьому комп'ютеру (дисплей QEMU, UEFI, пам'ять) і що робити
 make unpack IPSW=~/ваш.ipsw   # ваш власний IPSW Darwin userland 16.5, потрібне розпаковується (7,4 ГБ)

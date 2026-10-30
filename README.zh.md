@@ -68,7 +68,7 @@ Linux 电脑上的 QEMU（`virt`，aarch64）里运行，不需要任何 Apple �
 Linux x86-64，约 12 GB 磁盘，7-Zip 23 或更新，`lz4`，`qemu-system-aarch64`，`edk2-aarch64`。
 
 ```sh
-git clone -b hakios https://github.com/oosexgang/hakios-xnu-kernel.git hakios
+git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios
 cd hakios
 make doctor       # 检查本机缺什么（QEMU 显示设备、UEFI 固件、内存）以及怎么办
 make unpack IPSW=~/your.ipsw  # 你自己获取的 Darwin userland 16.5 IPSW，解包所需部分（7.4 GB）
