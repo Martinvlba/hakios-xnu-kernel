@@ -20,7 +20,7 @@ changes to it; the scripts named fetch the release and put the changes on.
 
 - repositories: `main` is the branch of `hakios-xnu-kernel` -- what was `hakios` and then `u-boot`; `hakios` is gone, `git clone` needs no `-b`
 - site: a Changelog page, this file
-- site: the commands to start with clone the public repository (`hakios-xnu-kernel`, branch `hakios`); `oosexgang/hakios` is private and cloned for nobody
+- site: the commands to start with clone the public repository (`hakios-xnu-kernel`); `oosexgang/hakios` is private and cloned for nobody
 - site: the documentation synced, with the guide to installing beside Android and the U-Boot page in the table of contents
 
 ## 2026-10-29
