@@ -244,7 +244,14 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			METAL_GPU="-DHAKIOS_METAL_GPU -I$HM/include $HM/out/darwin/libhakios-metal.a -lc++ -framework IOKit"
 			echo "build.sh: HakiosMetal with hakios-metal ($HM)"
 		fi
-		$DYN -bundle -framework Foundation -framework Metal -lobjc -o obj/HakiosMetal src/HakiosMetal.m src/hakios_metallib.c $METAL_GPU
+		# the plug-in itself is hakios-metal's now (plugin/, where it is tested); the copy in src/ is for a tree without it
+		METAL_SRC=src
+		if [ -f $HM/plugin/HakiosMetal.m ]; then
+			METAL_SRC=$HM/plugin
+			echo "build.sh: HakiosMetal from $HM/plugin"
+		fi
+		$DYN -bundle -framework Foundation -framework Metal -lobjc -I$METAL_SRC -o obj/HakiosMetal $METAL_SRC/HakiosMetal.m \
+			$METAL_SRC/hakios_metallib.c $METAL_GPU
 		if [ -n "$GL" ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
 			# (Mesa says beside the library what it was built from: one from other patches is built again)
