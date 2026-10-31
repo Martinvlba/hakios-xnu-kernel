@@ -16,6 +16,19 @@ changes to it; the scripts named fetch the release and put the changes on.
 - the build tools: Apple's [libdispatch](https://github.com/apple-oss-distributions/libdispatch), [libpthread](https://github.com/apple-oss-distributions/libpthread) and [AvailabilityVersions](https://github.com/apple-oss-distributions/AvailabilityVersions), [bootstrap_cmds](https://github.com/markmentovai/bootstrap_cmds), [unifdef](https://github.com/fanf2/unifdef), the [macOS 13.3 SDK](https://github.com/joseluisq/macosx-sdks) and the [iPhoneOS 16.5 SDK](https://github.com/theos/sdks) -- `xnu-deps/setup.sh`
 - not fetched by anything here: the Darwin 16.5 user space, which you lay out from your own IPSW (`sysimage/`), and the phone's own firmware, pulled from its Android (`fw-*`)
 
+## 2026-10-31
+
+- akita: the first boot on the Pixel 8a: U-Boot, the loader at EL2, the kernel at EL1, `hello`, and back to the loader
+- u-boot: `hakios load` takes the container from behind U-Boot in the boot image's kernel, for a bootloader that never loads boot's ramdisk; U-Boot's load address is noted before it relocates
+- u-boot: `hakios_pstore`: the console kept in a ramoops zone over a restart, read back from Linux's /sys/fs/pstore
+- tools: `mkubootimg.py` makes an LZ4 kernel, the container in the kernel, and an unsigned AVB hash footer, as a device's `u-boot/boot-image` asks
+- loader: started at EL2 (a firmware that enters its payload there, with or without VHE), it starts the kernel at EL1 and takes it back through HVC; PSCI by SMC there, one core only so far (checked in QEMU with `virtualization=on`)
+- loader: a second phone, the Pixel 8a (`platform akita`), known by the `google,zuma` of the device tree the firmware hands over; QEMU's fw_cfg screen is set up on QEMU only
+- loader: the timer's rate from the platform where the firmware leaves `CNTFRQ_EL0` unset; the GIC's redistributor region and stride from the platform (redwood's stride, 0x20000, as its tree says)
+- kernel: the redistributors are walked as Linux walks them: by the device tree's `redistributor-stride`, else by `GICR_TYPER.VLPIS` (0x40000 a core with virtual LPIs)
+- u-boot: `hakios load` finds the container behind the vendor ramdisks of a header version 4 bootloader; `tools/mkubootimg.py` makes the image a device's `u-boot/boot-image` asks for (header version 4, U-Boot as it is)
+- u-boot: exynos-mobile builds without its eMMC set-up (`MISC_INIT_R` off), for a phone whose storage U-Boot cannot reach
+
 ## 2026-10-30
 
 - repositories: `main` is the branch of `hakios-xnu-kernel` -- what was `hakios` and then `u-boot`; `hakios` is gone, `git clone` needs no `-b`
