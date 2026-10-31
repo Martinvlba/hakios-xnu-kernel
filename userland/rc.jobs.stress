@@ -3,7 +3,7 @@
 # about 9 minutes): metal_test (as rc.jobs.metal); unlock; the page swipes, Search, Control Center and Settings of
 # rc.jobs.fps three times; then the applications of rc.jobs.tour, each opened for 20 seconds and closed. A hang under
 # use was seen twice by hand (30 October); this brings it out again with the log fetched every second (XL_FOLLOW=1).
-/redwood/bin/sound_test springboard
+/redwood/bin/rwtouch wait 15
 /redwood/bin/rwtouch wait 25
 /redwood/bin/metal_test
 /redwood/bin/fps_info
