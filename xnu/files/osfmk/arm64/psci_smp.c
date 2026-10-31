@@ -64,6 +64,12 @@ extern unsigned long gVirtBase, gPhysBase;
 
 /* The firmware is called with HVC, not SMC. (start.s reads this too, at its physical address.) */
 uint32_t psci_smp_hvc;
+/*
+ * Where a new core goes when the firmware starts it at EL2 (a loader that was itself started at EL2: the Pixel 8a):
+ * the loader's trampoline (/chosen/el2-trampoline), which takes it down to EL1 and on to the reset vector, given to
+ * it as CPU_ON's context. 0: the reset vector itself, as before.
+ */
+static uint64_t psci_smp_el2_trampoline;
 
 /*
  * Left by a core that took an exception between its first instruction and the kernel's vectors
@@ -123,6 +129,12 @@ psci_smp_init(void)
 	    SecureDTGetProperty(chosen, "psci-method", &prop, &size) == kSuccess &&
 	    size >= 3 && strncmp((const char *)prop, "hvc", 3) == 0) {
 		psci_smp_hvc = 1;
+	}
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	    SecureDTGetProperty(chosen, "el2-trampoline", &prop, &size) == kSuccess && size == sizeof(uint64_t)) {
+		psci_smp_el2_trampoline = *(uint64_t const *)prop;
+		printf("psci: the other cores start at EL2: through the loader's trampoline at 0x%llx\n",
+		    psci_smp_el2_trampoline);
 	}
 }
 
@@ -186,7 +198,11 @@ psci_smp_start_cpu(int cpu)
 	__builtin_arm_dsb(DSB_SY);
 
 	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
-	status = psci_call(PSCI_CPU_ON, phys_id, entry, 0);
+	if (psci_smp_el2_trampoline != 0) {
+		status = psci_call(PSCI_CPU_ON, phys_id, psci_smp_el2_trampoline, entry);
+	} else {
+		status = psci_call(PSCI_CPU_ON, phys_id, entry, 0);
+	}
 	if (status != 0) {
 		os_atomic_store(&psci_smp_cpu_stage[cpu], 0, release);
 		printf("psci: cpu %d (MPIDR 0x%x) was not started: the firmware answers %lld (%s)\n",
