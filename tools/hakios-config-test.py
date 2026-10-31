@@ -59,9 +59,12 @@ try:
     r = run("defconfig", "redwood", "-o", cfg)
     check("defconfig redwood: makes the .config", r.returncode == 0 and os.path.isfile(cfg), r.stdout + r.stderr)
     a = args_of(run("args", "--config", cfg))
-    # the phone line from before there were configurations, plus the two things the SC7280 fragment turns on: the chip's identity and the sensors
-    check("redwood: the project's phone line before configurations, plus socinfo and thermal", sorted(a) == sorted(OLD_PHONE_LINE + ["socinfo=1", "thermal=1"]),
-          "got %s\nwant %s" % (sorted(a), sorted(OLD_PHONE_LINE + ["socinfo=1", "thermal=1"])))
+    # the phone line from before there were configurations, plus the two things the SC7280 fragment turns on (the chip's identity
+    # and the sensors) and the two of redwood.config's panel (120 Hz frames, CoreAnimation clocked by the driver)
+    PANEL = ["fb_hz=120", "ca_vbl=1"]
+    check("redwood: the project's phone line before configurations, plus socinfo and thermal, and the panel's 120 Hz",
+          sorted(a) == sorted(OLD_PHONE_LINE + ["socinfo=1", "thermal=1"] + PANEL),
+          "got %s\nwant %s" % (sorted(a), sorted(OLD_PHONE_LINE + ["socinfo=1", "thermal=1"] + PANEL)))
     check("redwood: kernel.ver carries the SoC", "-sc7280-" in r.stdout, r.stdout)
     check("redwood: the .config is in Linux's form",
           "CONFIG_GPU=y" in open(cfg).read() and "# CONFIG_CAM is not set" in open(cfg).read() and 'CONFIG_FIRMWARE="device"' in open(cfg).read())
@@ -76,7 +79,7 @@ try:
     r = run("defconfig", "redwood", "open", "-o", o)
     check("redwood + open: passes", r.returncode == 0, r.stdout + r.stderr)
     check("redwood + open: nothing of the phone's own is loaded",
-          sorted(args_of(run("args", "--config", o))) == sorted("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1 socinfo=1 thermal=1".split()),
+          sorted(args_of(run("args", "--config", o))) == sorted(("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1 socinfo=1 thermal=1".split() + PANEL)),
           run("args", "--config", o).stdout)
     r = run("needs", "--config", o)
     check("redwood + open: needs nothing", r.returncode == 0 and "nothing of the phone's own" in r.stdout, r.stdout)
@@ -101,7 +104,7 @@ try:
     # the arguments straight from a defconfig, with no .config made (what `make qemu-open` asks for)
     check("args --defconfig defconfig: cpus=1", args_of(run("args", "--defconfig", "defconfig")) == ["cpus=1"], run("args", "--defconfig", "defconfig").stdout)
     check("args --defconfig redwood --fragment open: the open phone",
-          sorted(args_of(run("args", "--defconfig", "redwood", "--fragment", "open"))) == sorted("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1 socinfo=1 thermal=1".split()))
+          sorted(args_of(run("args", "--defconfig", "redwood", "--fragment", "open"))) == sorted(("cpus=8 bootcpu=7 cpufreq=1 ufs=2 touchscreen=1 socinfo=1 thermal=1".split() + PANEL)))
     check("args --defconfig redwood: the same as the .config's", sorted(args_of(run("args", "--defconfig", "redwood"))) == sorted(a))
 
     # the order of the arguments is the table's: cpus first, as in the README's lines
