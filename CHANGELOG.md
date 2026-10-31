@@ -18,6 +18,7 @@ changes to it; the scripts named fetch the release and put the changes on.
 
 ## 2026-10-31
 
+- u-boot: `hakios wdt` shows and stops Samsung watchdogs a bootloader left counting (the Pixel 8a: both clusters, which restarted it two minutes in)
 - akita: the first boot on the Pixel 8a: U-Boot, the loader at EL2, the kernel at EL1, `hello`, and back to the loader
 - u-boot: `hakios load` takes the container from behind U-Boot in the boot image's kernel, for a bootloader that never loads boot's ramdisk; U-Boot's load address is noted before it relocates
 - u-boot: `hakios_pstore`: the console kept in a ramoops zone over a restart, read back from Linux's /sys/fs/pstore
