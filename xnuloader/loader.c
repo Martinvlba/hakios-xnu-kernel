@@ -779,6 +779,8 @@ uint64_t loader_from_el2 __attribute__((aligned(64)));     /* read by the kernel
 void loader_el2_vectors(void);
 void loader_el1_early_vectors(void);
 void loader_return_common(void);
+void loader_el2_secondary(void);
+void loader_el2_secondary_end(void);
 
 __attribute__((noreturn)) static void
 jump_to_kernel_from_el2(uint64_t entry, uint64_t boot_args_pa)
@@ -1107,6 +1109,79 @@ __asm__ (
         "  mov x1, #0\n"
         "  mov x2, #1\n"
         "  b loader_return_stub\n"
+        /*
+         * The kernel's other cores, under a firmware that starts them at EL2 (PSCI CPU_ON from a loader that was itself
+         * started at EL2). The kernel asks for this address instead of its reset vector (/chosen/el2-trampoline; XNU's
+         * psci_smp.c) and passes that as the context: x0. MMU and caches off. EL2 is set up as jump_to_kernel_from_el2()
+         * does for the first core, without VHE (a fresh core's EL2 translates nothing yet), with this core's own MIDR and
+         * MPIDR for EL1, and the core goes on at EL1 at the kernel's reset vector with x0 = 0, as CPU_ON would have
+         * started it there. Anything that reaches EL2 from it afterwards switches it off (PSCI CPU_OFF): there is no
+         * loader on that core to go back to. A core started at EL1 already goes straight on.
+         */
+        ".balign 64\n"
+        ".globl loader_el2_secondary\n"
+        "loader_el2_secondary:\n"
+        "  msr daifset, #0xf\n"
+        "  mov x19, x0\n"
+        "  mrs x1, CurrentEL\n"
+        "  cmp x1, #(2 << 2)\n"
+        "  b.ne 1f\n"
+        "  adr x1, loader_el2_secondary_vectors\n"
+        "  msr vbar_el2, x1\n"
+        "  mov x1, #(1 << 31)\n"                /* HCR_EL2: RW only */
+        "  msr hcr_el2, x1\n"
+        "  isb\n"
+        "  mov x1, #0x32ff\n"                   /* CPTR_EL2: no traps */
+        "  msr cptr_el2, x1\n"
+        "  mrs x1, cnthctl_el2\n"
+        "  orr x1, x1, #3\n"                    /* EL1PCTEN, EL1PCEN */
+        "  msr cnthctl_el2, x1\n"
+        "  msr cntvoff_el2, xzr\n"
+        "  mrs x1, midr_el1\n"
+        "  msr vpidr_el2, x1\n"
+        "  mrs x1, mpidr_el1\n"
+        "  msr vmpidr_el2, x1\n"
+        "  mrs x1, pmcr_el0\n"
+        "  ubfx x1, x1, #11, #5\n"
+        "  msr mdcr_el2, x1\n"
+        "  mrs x1, s3_4_c12_c9_5\n"             /* ICC_SRE_EL2: SRE, Enable */
+        "  orr x1, x1, #0x1\n"
+        "  orr x1, x1, #0x8\n"
+        "  msr s3_4_c12_c9_5, x1\n"
+        "  msr vttbr_el2, xzr\n"
+        "  isb\n"
+        "  mov x1, #0x0800\n"
+        "  movk x1, #0x30d0, lsl #16\n"          /* SCTLR_EL1: fixed bits, M C I clear */
+        "  msr sctlr_el1, x1\n"
+        "  mov x1, #(3 << 20)\n"                 /* CPACR_EL1: floating point allowed */
+        "  msr cpacr_el1, x1\n"
+        "  mov x1, #0x3c5\n"                     /* EL1h, D A I F masked */
+        "  msr spsr_el2, x1\n"
+        "  msr elr_el2, x19\n"
+        "  mov x0, #0\n"
+        "  isb\n"
+        "  eret\n"
+        "1:\n"
+        "  mov x0, #0\n"
+        "  br x19\n"
+        ".balign 0x800\n"
+        "loader_el2_secondary_vectors:\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "loader_el2_secondary_off:\n"
+        "  mov x0, #0x0002\n"
+        "  movk x0, #0x8400, lsl #16\n"          /* PSCI CPU_OFF */
+        "  smc #0\n"
+        "2: wfi\n"
+        "  b 2b\n"
+        ".globl loader_el2_secondary_end\n"
+        "loader_el2_secondary_end:\n"
         );
 
 static uint64_t smc_call(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2);
@@ -3301,14 +3376,13 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		kernel_mpidr = this_mpidr;
 	}
 	/*
-	 * Under a loader at EL2 the kernel is started at EL1 by jump_to_kernel(); a core PSCI starts (bootcpu=, or the
-	 * kernel's own cpus=N) would come up at EL2 and run the kernel there, which XNU cannot. One core until those are
-	 * brought down to EL1 too.
+	 * Under a loader at EL2 the kernel is started at EL1 by jump_to_kernel(). The cores the kernel starts itself (cpus=N)
+	 * come up at EL2 and go down through loader_el2_secondary (/chosen/el2-trampoline); the loader's own way of starting
+	 * the kernel on another core (bootcpu=, run_on_other_cpu()) is not done from EL2 yet.
 	 */
-	if ((READ_SYSREG(CurrentEL) >> 2) == 2 && (kernel_mpidr != this_mpidr || more_cores)) {
-		print("EL2: the kernel runs on this core alone (bootcpu= and cpus= are not done from EL2 yet)\n");
+	if ((READ_SYSREG(CurrentEL) >> 2) == 2 && kernel_mpidr != this_mpidr) {
+		print("EL2: the kernel starts on this core (bootcpu= is not done from EL2 yet; its other cores are, cpus=)\n");
 		kernel_mpidr = this_mpidr;
-		more_cores = 0;
 	}
 
 	/* where the kernel will show its signs of life, and how long it has said it will run */
@@ -3507,6 +3581,11 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u32(&w, "display-rotation", 0);
 	/* how the kernel is to ask the firmware for more cores (PSCI) */
 	dt_prop_str(&w, "psci-method", psci_via_hvc() ? "hvc" : "smc");
+	if ((READ_SYSREG(CurrentEL) >> 2) == 2) {
+		/* the kernel's other cores come up at EL2 too: through here to EL1 (loader_el2_secondary), MMU and caches off */
+		clean_dcache((uint64_t)(uintptr_t)&loader_el2_secondary, (uint64_t)(uintptr_t)&loader_el2_secondary_end);
+		dt_prop_u64(&w, "el2-trampoline", (uint64_t)(uintptr_t)&loader_el2_secondary);
+	}
 	/* the time now, by the firmware's clock (the kernel has no real-time clock driver) */
 	uint64_t epoch = firmware_epoch();
 	if (epoch != 0) {

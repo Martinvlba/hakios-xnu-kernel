@@ -16,6 +16,12 @@ changes to it; the scripts named fetch the release and put the changes on.
 - the build tools: Apple's [libdispatch](https://github.com/apple-oss-distributions/libdispatch), [libpthread](https://github.com/apple-oss-distributions/libpthread) and [AvailabilityVersions](https://github.com/apple-oss-distributions/AvailabilityVersions), [bootstrap_cmds](https://github.com/markmentovai/bootstrap_cmds), [unifdef](https://github.com/fanf2/unifdef), the [macOS 13.3 SDK](https://github.com/joseluisq/macosx-sdks) and the [iPhoneOS 16.5 SDK](https://github.com/theos/sdks) -- `xnu-deps/setup.sh`
 - not fetched by anything here: the Darwin 16.5 user space, which you lay out from your own IPSW (`sysimage/`), and the phone's own firmware, pulled from its Android (`fw-*`)
 
+## 2026-11-01
+
+- loader, kernel: the kernel's other cores from a loader at EL2: CPU_ON goes to the loader's trampoline (`/chosen/el2-trampoline`), which takes each core down to EL1; checked in QEMU (EDK2 and U-Boot, GICv3 and GICv4) and on the Pixel 8a, eight cores
+- u-boot: the instruction cache turned on where a boot loader before U-Boot left it off (Exynos' `enable_caches()`): on the Pixel 8a a run went from five minutes to fifty seconds
+- u-boot: `hakios load` and the loader's start timed (seconds since the SoC's reset) in the console
+
 ## 2026-10-31
 
 - u-boot: `hakios wdt` shows and stops Samsung watchdogs a bootloader left counting (the Pixel 8a: both clusters, which restarted it two minutes in)
