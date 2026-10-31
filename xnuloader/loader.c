@@ -554,6 +554,8 @@ struct platform {
 	const char *name;
 	uint64_t io_base, io_size;       /* one window covering the SoC peripherals */
 	uint64_t gic_dist, gic_redist;   /* GICv3 */
+	uint64_t gic_redist_size;        /* the redistributors' region, 0: 0x100000 (eight cores of 0x20000) */
+	uint64_t gic_redist_stride;      /* the phone's tree's redistributor-stride, 0: none (the kernel reads GICR_TYPER) */
 	uint64_t uart;                   /* PL011, 0 if none */
 	int psci_hvc;                    /* the firmware's power interface is called with HVC, not SMC */
 	int log_other_cpu;               /* keep notes in the log partition while a kernel starts on another core */
@@ -561,6 +563,7 @@ struct platform {
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
+	uint64_t timer_hz;               /* the generic timer's rate when CNTFRQ_EL0 cannot be trusted, 0: CNTFRQ_EL0 */
 };
 
 static const struct platform platform_qemu_virt = {
@@ -579,6 +582,7 @@ static const struct platform platform_redwood = {
 	/* io_base must be non-zero: XNU treats a zero SoC base as "no SoC" and skips clock setup. */
 	.name = "redwood", .io_base = 0x00400000, .io_size = 0x3FC00000,
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.gic_redist_stride = 0x20000,   /* the Android tree's redistributor-stride: the kernel steps by it, as Linux does */
 	.cores = 8, .core_shift = 8,
 	/*
 	 * Cores 0-3 are Cortex-A55s (1.8 GHz at most), 4-7 Cortex-A78s (2.4 GHz): a big one is about
@@ -586,6 +590,30 @@ static const struct platform platform_redwood = {
 	 * (XNU's machine_routines.c, ml_choose_slow_core_partners()).
 	 */
 	.small_cores = 0x0f,
+};
+
+static const struct platform platform_akita = {
+	/*
+	 * The Pixel 8a: Google Tensor G3 (zuma), started by HakiOS's U-Boot (devices/akita/u-boot). Every number is from
+	 * the phone's own device tree (/sys/firmware/fdt of its Android): the GIC's arm,gic-v3 node (distributor
+	 * 0x10400000, redistributors 0x10440000 in a region of 0x200000), cpus cpu@0 ... cpu@800 with enable-method psci, and
+	 * psci { method = "smc" }. The window is the SoC's peripheral block from the chip id (0x10000000) through the
+	 * clock unit (0x26040000), as U-Boot's exynos-mobile maps it, made larger.
+	 *
+	 * Nine cores, numbered in MPIDR's second affinity field: 0-3 Cortex-A510 (capacity-dmips-mhz 0xc1), 4-7
+	 * Cortex-A715 (0x39f), 8 the Cortex-X3 (0x400). The kernel is built for eight (MAX_CPUS, BCM2837's board
+	 * configuration), so the X3 is left out.
+	 *
+	 * The arch timer's node gives clock-frequency = <24576000>: that property is there when the firmware does not
+	 * set CNTFRQ_EL0 (Linux takes the property over the register), so the loader does the same.
+	 *
+	 * Status: written from the device tree, not yet run on the phone.
+	 */
+	.name = "akita", .io_base = 0x10000000, .io_size = 0x20000000,
+	.gic_dist = 0x10400000, .gic_redist = 0x10440000, .gic_redist_size = 0x200000, .uart = 0,
+	.cores = 8, .core_shift = 8,
+	.small_cores = 0x0f,
+	.timer_hz = 24576000,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -674,6 +702,14 @@ __asm__ (
         ".balign 64\n"
         ".globl loader_return_stub\n"
         "loader_return_stub:\n"
+        /* a kernel the loader started from EL2 (jump_to_kernel) comes back up there first: loader_el2_vectors */
+        "  adrp x9, loader_from_el2\n"
+        "  add  x9, x9, :lo12:loader_from_el2\n"
+        "  ldr  x9, [x9]\n"
+        "  cbz  x9, loader_return_common\n"
+        "  hvc  #0x4b52\n"
+        ".globl loader_return_common\n"
+        "loader_return_common:\n"
         "  msr daifset, #0xf\n"
         /* PSTATE bits the kernel may have left set. PAN in particular is fatal:
          * UEFI maps its memory as EL0-accessible, so with PAN every data access
@@ -738,9 +774,113 @@ __asm__ (
         "  ret\n"
         );
 
+uint64_t loader_el2_ctx[6];
+uint64_t loader_from_el2 __attribute__((aligned(64)));     /* read by the kernel's core at EL1, maybe with its MMU off */
+void loader_el2_vectors(void);
+void loader_el1_early_vectors(void);
+void loader_return_common(void);
+
+__attribute__((noreturn)) static void
+jump_to_kernel_from_el2(uint64_t entry, uint64_t boot_args_pa)
+{
+	loader_el2_ctx[0] = READ_SYSREG(VBAR_EL2);
+	loader_el2_ctx[1] = READ_SYSREG(HCR_EL2);
+	loader_el2_ctx[2] = READ_SYSREG(CPTR_EL2);
+	loader_el2_ctx[3] = READ_SYSREG(CNTHCTL_EL2);
+	loader_el2_ctx[4] = READ_SYSREG(MDCR_EL2);
+	loader_el2_ctx[5] = READ_SYSREG(S3_4_C12_C9_5);        /* ICC_SRE_EL2 */
+	loader_from_el2 = 1;
+	/* the kernel's core reads it from EL1, perhaps with its MMU and caches off */
+	__asm__ volatile ("dc civac, %0\n dsb sy" : : "r" (&loader_from_el2) : "memory");
+	__asm__ volatile (
+                "msr daifset, #0xf\n"
+                /* this stack is where the kernel's way back returns to: in RAM, not only in the cache */
+                "mov x2, sp\n"
+                "sub x2, x2, #0x400\n"
+                "bic x2, x2, #63\n"
+                "add x3, x2, #0x4000\n"
+                "1: dc civac, x2\n"
+                "add x2, x2, #64\n"
+                "cmp x2, x3\n"
+                "b.lo 1b\n"
+                "dsb sy\n"
+                "adrp x2, loader_el2_vectors\n"
+                "add  x2, x2, :lo12:loader_el2_vectors\n"
+                "msr vbar_el2, x2\n"
+                /*
+                 * The firmware may run EL2 with VHE (HCR_EL2.E2H: EDK2 does, U-Boot does not). E2H stays as it is: it
+                 * decides how EL2's own page tables are read, and they are live. What differs with it set: TGE must go
+                 * (EL1 runs at all only without it), CNTHCTL_EL2 and CPTR_EL2 have another layout, and the EL1 registers
+                 * are reached from EL2 as *_EL12 (SCTLR_EL1 and the like name EL2's own under VHE).
+                 */
+                "mrs x3, hcr_el2\n"
+                "and x3, x3, #(1 << 34)\n"             /* E2H */
+                "orr x2, x3, #(1 << 31)\n"             /* HCR_EL2: RW (EL1 is AArch64), E2H as it was, nothing else */
+                "msr hcr_el2, x2\n"
+                "isb\n"
+                "cbnz x3, 3f\n"
+                /* without VHE */
+                "mov x2, #0x32ff\n"                    /* CPTR_EL2: its fixed bits; no traps of FP, SVE or tracing */
+                "msr cptr_el2, x2\n"
+                "mrs x2, cnthctl_el2\n"
+                "orr x2, x2, #3\n"                     /* EL1PCTEN, EL1PCEN: EL1 has the physical counter and timer */
+                "msr cnthctl_el2, x2\n"
+                "mov x2, #0x0800\n"
+                "movk x2, #0x30d0, lsl #16\n"          /* SCTLR_EL1: its fixed bits (RES1), M C I clear */
+                "msr sctlr_el1, x2\n"
+                "mov x2, #(3 << 20)\n"                 /* CPACR_EL1: floating point allowed */
+                "msr cpacr_el1, x2\n"
+                "adrp x2, loader_el1_early_vectors\n"
+                "add  x2, x2, :lo12:loader_el1_early_vectors\n"
+                "msr vbar_el1, x2\n"
+                "b 4f\n"
+                /* with VHE */
+                "3:\n"
+                "mov x2, #(3 << 20)\n"                 /* CPTR_EL2 (CPACR's layout): FPEN and ZEN, no traps */
+                "orr x2, x2, #(3 << 16)\n"
+                "msr cptr_el2, x2\n"
+                "mrs x2, cnthctl_el2\n"
+                "orr x2, x2, #(3 << 10)\n"             /* EL1PCTEN, EL1PCEN, where VHE has them */
+                "msr cnthctl_el2, x2\n"
+                "mov x2, #0x0800\n"
+                "movk x2, #0x30d0, lsl #16\n"
+                "msr s3_5_c1_c0_0, x2\n"               /* SCTLR_EL12 */
+                "mov x2, #(3 << 20)\n"
+                "msr s3_5_c1_c0_2, x2\n"               /* CPACR_EL12 */
+                "adrp x2, loader_el1_early_vectors\n"
+                "add  x2, x2, :lo12:loader_el1_early_vectors\n"
+                "msr s3_5_c12_c0_0, x2\n"              /* VBAR_EL12 */
+                "4:\n"
+                "msr cntvoff_el2, xzr\n"               /* the virtual counter is the physical one */
+                "mrs x2, midr_el1\n"
+                "msr vpidr_el2, x2\n"                  /* what EL1 reads as MIDR_EL1 and MPIDR_EL1: this core's */
+                "mrs x2, mpidr_el1\n"
+                "msr vmpidr_el2, x2\n"
+                "mrs x2, pmcr_el0\n"
+                "ubfx x2, x2, #11, #5\n"               /* MDCR_EL2: every counter EL1's, no debug traps */
+                "msr mdcr_el2, x2\n"
+                "mrs x2, s3_4_c12_c9_5\n"              /* ICC_SRE_EL2: SRE, and Enable: EL1 may use the GIC's system registers */
+                "orr x2, x2, #0x1\n"                   /* SRE */
+                "orr x2, x2, #0x8\n"                   /* Enable */
+                "msr s3_4_c12_c9_5, x2\n"
+                "msr vttbr_el2, xzr\n"
+                "isb\n"
+                "mov x2, #0x3c5\n"                     /* SPSR_EL2: EL1h, D A I F masked */
+                "msr spsr_el2, x2\n"
+                "msr elr_el2, %0\n"
+                "mov x0, %1\n"
+                "isb\n"
+                "eret\n"
+                : : "r" (entry), "r" (boot_args_pa) : "x0", "x2", "x3", "memory");
+	__builtin_unreachable();
+}
+
 __attribute__((noreturn)) static void
 jump_to_kernel(uint64_t entry, uint64_t boot_args_pa)
 {
+	if ((READ_SYSREG(CurrentEL) >> 2) == 2) {
+		jump_to_kernel_from_el2(entry, boot_args_pa);
+	}
 	__asm__ volatile (
                 "msr daifset, #0xf\n"
                 /* Last thing before the MMU goes off: write this stack back to RAM
@@ -883,9 +1023,122 @@ __asm__ (
         "  b 1b\n"
         );
 
+/*
+ * A loader started at EL2 (HakiOS's U-Boot on the Pixel 8a, under Google's bootloader, which enters its payload at EL2
+ * for protected KVM; QEMU with virtualization=on). XNU runs at EL1 (its start-up sets TTBR1_EL1, VBAR_EL1, SCTLR_EL1),
+ * so jump_to_kernel() starts it there, with EL2 set up to stay out of its way: no traps (HCR_EL2 only RW: EL1 is
+ * AArch64, no stage 2, interrupts to EL1), EL1 may use the physical timer and counter and the GIC's system registers,
+ * and it sees this core's own MIDR and MPIDR. EL2 keeps this vector table meanwhile. The kernel's way back is the same
+ * loader_return_stub, which at EL1 calls up with HVC #0x4b52 when loader_from_el2 is set; here the firmware's EL2 is put
+ * back as it was and the stub's common part runs at EL2, as it would have at EL1. Anything else that reaches EL2 from
+ * below is reported as an early exception of the kernel (reason 1), with EL2's syndrome.
+ *
+ * loader_el2_ctx: VBAR_EL2, HCR_EL2, CPTR_EL2, CNTHCTL_EL2, MDCR_EL2, ICC_SRE_EL2 as the firmware had them.
+ */
+/* loader_el2_ctx, loader_from_el2 and the vector tables are declared before jump_to_kernel_from_el2() */
+
+__asm__ (
+        ".text\n"
+        ".balign 0x800\n"
+        ".globl loader_el2_vectors\n"
+        "loader_el2_vectors:\n"
+        /* from EL2 itself (nothing of the loader's runs at EL2 while the kernel does): stop here */
+        "  b .\n  .balign 0x80\n  b .\n  .balign 0x80\n  b .\n  .balign 0x80\n  b .\n  .balign 0x80\n"
+        "  b .\n  .balign 0x80\n  b .\n  .balign 0x80\n  b .\n  .balign 0x80\n  b .\n  .balign 0x80\n"
+        /* from EL1, AArch64: synchronous, IRQ, FIQ, SError */
+        "  b loader_el2_sync\n  .balign 0x80\n"
+        "  b loader_el2_other\n  .balign 0x80\n"
+        "  b loader_el2_other\n  .balign 0x80\n"
+        "  b loader_el2_other\n  .balign 0x80\n"
+        /* from EL1, AArch32: never */
+        "  b loader_el2_other\n  .balign 0x80\n  b loader_el2_other\n  .balign 0x80\n"
+        "  b loader_el2_other\n  .balign 0x80\n  b loader_el2_other\n  .balign 0x80\n"
+        "loader_el2_sync:\n"
+        "  mrs x9, esr_el2\n"
+        "  lsr x10, x9, #26\n"
+        "  cmp x10, #0x16\n"                    /* EC 0x16: HVC from AArch64 */
+        "  b.ne loader_el2_other\n"
+        "  and x10, x9, #0xffff\n"
+        "  mov x11, #0x4b52\n"
+        "  cmp x10, x11\n"
+        "  b.eq loader_el2_back\n"              /* the kernel is done: x0..x7 as it left them */
+        "loader_el2_other:\n"                   /* as an early exception in the kernel: reason 1 */
+        "  mrs x3, esr_el2\n"
+        "  mrs x4, elr_el2\n"
+        "  mrs x5, far_el2\n"
+        "  mov x6, x30\n"
+        "  mrs x7, sp_el1\n"
+        "  mov x0, #0\n"
+        "  mov x1, #0\n"
+        "  mov x2, #1\n"
+        "loader_el2_back:\n"
+        "  adrp x10, loader_el2_ctx\n"
+        "  add  x10, x10, :lo12:loader_el2_ctx\n"
+        "  ldr x9, [x10, #0]\n   msr vbar_el2, x9\n"
+        "  ldr x9, [x10, #8]\n   msr hcr_el2, x9\n"
+        "  ldr x9, [x10, #16]\n  msr cptr_el2, x9\n"
+        "  ldr x9, [x10, #24]\n  msr cnthctl_el2, x9\n"
+        "  ldr x9, [x10, #32]\n  msr mdcr_el2, x9\n"
+        "  ldr x9, [x10, #40]\n  msr icc_sre_el2, x9\n"
+        "  isb\n"
+        "  adrp x10, loader_from_el2\n"
+        "  add  x10, x10, :lo12:loader_from_el2\n"
+        "  str xzr, [x10]\n"
+        "  b loader_return_common\n"
+        /* the kernel's EL1 vectors until it sets its own: a fault there goes back to the loader, not into the void */
+        ".balign 0x800\n"
+        ".globl loader_el1_early_vectors\n"
+        "loader_el1_early_vectors:\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "  b loader_el1_fault\n  .balign 0x80\n  b loader_el1_fault\n  .balign 0x80\n"
+        "loader_el1_fault:\n"
+        "  mrs x3, esr_el1\n"
+        "  mrs x4, elr_el1\n"
+        "  mrs x5, far_el1\n"
+        "  mov x6, x30\n"
+        "  mov x7, sp\n"
+        "  mov x0, #0\n"
+        "  mov x1, #0\n"
+        "  mov x2, #1\n"
+        "  b loader_return_stub\n"
+        );
+
 static uint64_t smc_call(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2);
 static uint64_t smc_x3;
 static const struct platform *PLAT;
+
+/*
+ * The generic timer's rate. CNTFRQ_EL0 is only the firmware's to set, and some firmware leaves it alone (a 0 there
+ * would divide by zero below): a platform that says its rate is taken at its word, as Linux takes a timer node's
+ * clock-frequency over the register.
+ */
+static uint64_t
+timer_hz(void)
+{
+	uint64_t hz = READ_SYSREG(CNTFRQ_EL0);
+
+	if (PLAT != NULL && PLAT->timer_hz != 0) {
+		return PLAT->timer_hz;
+	}
+	return hz != 0 ? hz : 24000000;
+}
+
+/*
+ * Is the firmware's power interface (PSCI) called with HVC? Only when this platform's is and the loader runs at EL1,
+ * below a hypervisor that answers it. At EL2 there is nothing above but the secure monitor (an HVC would come back to
+ * EL2 itself), and the kernel the loader starts at EL1 under it (jump_to_kernel) calls the monitor directly: SMC.
+ */
+static int
+psci_via_hvc(void)
+{
+	return PLAT->psci_hvc && (READ_SYSREG(CurrentEL) >> 2) == 1;
+}
 static void clean_dcache(uint64_t start, uint64_t end);
 static void flush_dcache(uint64_t start, uint64_t end);
 
@@ -992,7 +1245,7 @@ static void usb_poll_command(void);
 static uint64_t
 seconds_since(uint64_t then)
 {
-	return (READ_SYSREG(CNTVCT_EL0) - then) / READ_SYSREG(CNTFRQ_EL0);
+	return (READ_SYSREG(CNTVCT_EL0) - then) / timer_hz();
 }
 
 /* Reverse a stretch of memory in place. */
@@ -1259,7 +1512,7 @@ ufs_hash_partition(efi_block_io *bio, const char *name, uint64_t bytes)
 		}
 	}
 	print("ufs: %s: fnv %x over %d bytes, %d ms\n", name, h, bytes,
-	    (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / READ_SYSREG(CNTFRQ_EL0));
+	    (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / timer_hz());
 }
 
 /* CRC-32 as GPT uses it (IEEE 802.3, reflected, 0xedb88320) */
@@ -1724,7 +1977,7 @@ hc_wr(uint32_t off, uint32_t v)
 static uint64_t
 hc_ms_since(uint64_t then)
 {
-	return (READ_SYSREG(CNTVCT_EL0) - then) * 1000 / READ_SYSREG(CNTFRQ_EL0);
+	return (READ_SYSREG(CNTVCT_EL0) - then) * 1000 / timer_hz();
 }
 
 /* UEFI's list in, and running: what UEFI's driver needs to read or write */
@@ -2066,7 +2319,7 @@ block_io2_probe(efi_handle h, efi_block_io *bio)
 	efi_status (EFIAPI *check_event)(void *) = (efi_status (EFIAPI *)(void *))BS->check_event;
 	static efi_block_io2_token tokens[8];
 	efi_block_io2 *bio2 = NULL;
-	uint64_t bs = bio->media->block_size, t0, t_sync, t_issue = 0, t_all, freq = READ_SYSREG(CNTFRQ_EL0);
+	uint64_t bs = bio->media->block_size, t0, t_sync, t_issue = 0, t_all, freq = timer_hz();
 	uint64_t returned_done = 0, pending, polls = 0;
 	efi_status s;
 
@@ -2288,7 +2541,7 @@ psci_call(uint64_t function, uint64_t a1, uint64_t a2, uint64_t a3)
 {
 	int64_t status;
 
-	if (PLAT->psci_hvc) {
+	if (psci_via_hvc()) {
 		register uint64_t x0 __asm__("x0") = function;
 		register uint64_t x1 __asm__("x1") = a1;
 		register uint64_t x2 __asm__("x2") = a2;
@@ -2328,7 +2581,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 	other_cpu_start.boot_args = boot_args_pa;
 	other_cpu_stage = 0;
 	other_cpu_done = 0;
-	psci_by_hvc = PLAT->psci_hvc;
+	psci_by_hvc = psci_via_hvc();
 	/* that core starts with its caches off: all it reads must be in memory, not in this core's cache */
 	clean_dcache((uint64_t)(uintptr_t)&other_cpu_start, (uint64_t)(uintptr_t)&other_cpu_start + sizeof(other_cpu_start));
 	clean_dcache((uint64_t)(uintptr_t)&other_cpu_stage, (uint64_t)(uintptr_t)&other_cpu_stage + 8);
@@ -3047,6 +3300,16 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (checkpoint == CHECKPOINT_SELFTEST) {
 		kernel_mpidr = this_mpidr;
 	}
+	/*
+	 * Under a loader at EL2 the kernel is started at EL1 by jump_to_kernel(); a core PSCI starts (bootcpu=, or the
+	 * kernel's own cpus=N) would come up at EL2 and run the kernel there, which XNU cannot. One core until those are
+	 * brought down to EL1 too.
+	 */
+	if ((READ_SYSREG(CurrentEL) >> 2) == 2 && (kernel_mpidr != this_mpidr || more_cores)) {
+		print("EL2: the kernel runs on this core alone (bootcpu= and cpus= are not done from EL2 yet)\n");
+		kernel_mpidr = this_mpidr;
+		more_cores = 0;
+	}
 
 	/* where the kernel will show its signs of life, and how long it has said it will run */
 	const struct kernel_live *kernel_live = NULL;
@@ -3208,7 +3471,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* --- device tree ---------------------------------------------------- */
 	const struct platform *plat = PLAT;
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .end = (uint8_t *)(dt_pa + dt_max), .depth = 0 };
-	uint64_t cntfrq = READ_SYSREG(CNTFRQ_EL0);
+	uint64_t cntfrq = timer_hz();
 	uint64_t ranges[3] = { 0, plat->io_base, plat->io_size };
 	uint64_t reg2[2];
 	uint8_t seed[64];
@@ -3243,7 +3506,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u32(&w, "display-scale", 3);
 	dt_prop_u32(&w, "display-rotation", 0);
 	/* how the kernel is to ask the firmware for more cores (PSCI) */
-	dt_prop_str(&w, "psci-method", plat->psci_hvc ? "hvc" : "smc");
+	dt_prop_str(&w, "psci-method", psci_via_hvc() ? "hvc" : "smc");
 	/* the time now, by the firmware's clock (the kernel has no real-time clock driver) */
 	uint64_t epoch = firmware_epoch();
 	if (epoch != 0) {
@@ -3428,8 +3691,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
-	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base, 0x100000 };
+	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base,
+	    plat->gic_redist_size ? plat->gic_redist_size : 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	if (plat->gic_redist_stride != 0) {
+		dt_prop_u64(&w, "redistributor-stride", plat->gic_redist_stride);
+	}
 	dt_end(&w);
 	if (plat->uart != 0) {
 		dt_begin(&w, "uart0");
@@ -3709,7 +3976,7 @@ usb_wait(uint8_t endpoint)
 {
 	/* static: a long transfer is many short waits, and the watchdog must be fed across them */
 	static uint64_t last_pet;
-	uint64_t freq = READ_SYSREG(CNTFRQ_EL0), began = READ_SYSREG(CNTVCT_EL0);
+	uint64_t freq = timer_hz(), began = READ_SYSREG(CNTVCT_EL0);
 
 	for (;;) {
 		uint32_t msg = UsbDeviceEventNoEvent;
@@ -3785,6 +4052,72 @@ fb_reply_data(uint64_t len)
 		msg[4 + i] = "0123456789abcdef"[(len >> (28 - 4 * i)) & 0xf];
 	}
 	usb_tx((const uint8_t *)msg, 12);
+}
+
+/*
+ * Does the device tree the firmware handed over (its EFI configuration table, which U-Boot's bootefi installs) say in
+ * its root's compatible that it is `want`? How a phone is known when its screen's address is not (the Pixel 8a under
+ * HakiOS's U-Boot). Every offset is checked against the tree's own size; a tree that is not one answers no.
+ */
+static int
+firmware_tree_is(const char *want)
+{
+	static const efi_guid dtb_guid = { 0xb1b621d5, 0xf19c, 0x41a5, { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
+	const uint8_t *fdt = NULL;
+
+	for (uint64_t i = 0; ST->tables != NULL && i < ST->nr_tables && i < 64; i++) {
+		if (memcmp(&ST->tables[i].guid, &dtb_guid, sizeof(dtb_guid)) == 0) {
+			fdt = ST->tables[i].table;
+		}
+	}
+	if (fdt == NULL || __builtin_bswap32(*(const uint32_t *)fdt) != 0xd00dfeed) {
+		return 0;
+	}
+	uint32_t total = __builtin_bswap32(((const uint32_t *)fdt)[1]), off = __builtin_bswap32(((const uint32_t *)fdt)[2]);
+	uint32_t strings = __builtin_bswap32(((const uint32_t *)fdt)[3]);
+	if (total > 0x400000 || off >= total || strings >= total) {
+		return 0;
+	}
+	/* the root node: FDT_BEGIN_NODE, an empty name padded to 4, then its properties before any child */
+	if (off + 8 > total || __builtin_bswap32(*(const uint32_t *)(fdt + off)) != 1) {
+		return 0;
+	}
+	off += 8;
+	size_t want_len = 0;
+	while (want[want_len]) {
+		want_len++;
+	}
+	while (off + 12 <= total) {
+		uint32_t token = __builtin_bswap32(*(const uint32_t *)(fdt + off));
+		if (token == 4) {               /* FDT_NOP */
+			off += 4;
+			continue;
+		}
+		if (token != 3) {               /* not FDT_PROP: the root's properties are over */
+			return 0;
+		}
+		uint32_t len = __builtin_bswap32(*(const uint32_t *)(fdt + off + 4)), name = __builtin_bswap32(*(const uint32_t *)(fdt + off + 8));
+		off += 12;
+		if (len > total - off || strings + name + 11 > total) {
+			return 0;
+		}
+		if (memcmp(fdt + strings + name, "compatible", 11) == 0) {
+			/* a list of strings, each ended by a 0 */
+			for (uint32_t s = 0; s < len;) {
+				uint32_t n = 0;
+				while (s + n < len && fdt[off + s + n] != 0) {
+					n++;
+				}
+				if (n == want_len && memcmp(fdt + off + s, want, n) == 0) {
+					return 1;
+				}
+				s += n + 1;
+			}
+			return 0;
+		}
+		off = (off + len + 3) & ~3u;
+	}
+	return 0;
 }
 
 static int
@@ -4334,7 +4667,7 @@ efi_main(efi_handle image, efi_system_table *st)
 	print("CurrentEL=%x MIDR=%x MMFR0=%x CNTFRQ=%d image=%x\n", READ_SYSREG(CurrentEL) >> 2, READ_SYSREG(MIDR_EL1),
 	    READ_SYSREG(ID_AA64MMFR0_EL1), READ_SYSREG(CNTFRQ_EL0), (uint64_t)(uintptr_t)&__ImageBase);
 
-	PLAT = &platform_qemu_virt;
+	PLAT = firmware_tree_is("google,zuma") ? &platform_akita : &platform_qemu_virt;
 	if (EFI_ERROR(BS->locate_protocol(&gop_guid, NULL, (void **)&GOP)) || GOP->mode == NULL ||
 	    GOP->mode->info == NULL || GOP->mode->fb_base == 0) {
 		GOP = NULL;                     /* no display (QEMU without -device ramfb) */
@@ -4345,8 +4678,8 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
 		if (SCREEN.base == 0xE1000000ULL) {
 			PLAT = &platform_redwood;
-		} else {
-			ramfb_phone_screen();
+		} else if (PLAT == &platform_qemu_virt) {
+			ramfb_phone_screen();   /* QEMU's fw_cfg: only on QEMU, never on a phone the screen did not name */
 		}
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
