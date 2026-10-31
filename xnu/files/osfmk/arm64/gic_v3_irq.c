@@ -57,6 +57,7 @@
 
 #define GICR_FRAME_SIZE         0x20000     /* RD_base + SGI_base per CPU */
 #define GICR_TYPER              0x0008
+#define GICR_TYPER_VLPIS        (1u << 1)
 #define GICR_TYPER_LAST         (1u << 4)
 #define GICR_WAKER              0x0014
 #define GICR_WAKER_PROCSLEEP    (1u << 1)
@@ -81,6 +82,7 @@
 static vm_offset_t gicd_base, gicr_base;
 static vm_size_t   gicr_size;
 static vm_offset_t gicr_cpu_base[MAX_CPUS]; /* each processor's redistributor frame */
+static uint64_t gicr_stride;                /* from the device tree's redistributor-stride; 0: by GICR_TYPER.VLPIS */
 
 /*
  * Acknowledged, not yet EOI'd; 0: none. The signal between processors is interrupt 0 and reads
@@ -399,7 +401,15 @@ gic_find_redistributor(void)
 	/* GICR_TYPER[63:32] packs Aff3.Aff2.Aff1.Aff0 */
 	uint32_t affinity = (uint32_t)(((mpidr >> 32) & 0xff) << 24 | (mpidr & 0xffffff));
 
-	for (vm_offset_t frame = gicr_base; frame + GICR_FRAME_SIZE <= gicr_base + gicr_size; frame += GICR_FRAME_SIZE) {
+	/*
+	 * A redistributor is two 64 KiB frames (RD_base, SGI_base), and two more (VLPI_base and a reserved one) when it
+	 * has virtual LPIs (GICv4, GICR_TYPER.VLPIS): the next one is that much further on, as Linux's gic-v3 driver
+	 * steps. Unless the device tree gives the stride (redistributor-stride, which the loader passes on from the
+	 * phone's own tree: the SM7325's says 0x20000, whatever its redistributors report). The Pixel 8a's tree gives
+	 * none, so there GICR_TYPER decides, as under Linux.
+	 */
+	vm_offset_t step = gicr_stride ? gicr_stride : GICR_FRAME_SIZE;
+	for (vm_offset_t frame = gicr_base; frame + GICR_FRAME_SIZE <= gicr_base + gicr_size; frame += step) {
 		uint64_t typer = *(volatile uint64_t *)(frame + GICR_TYPER);
 
 		if ((uint32_t)(typer >> 32) == affinity) {
@@ -407,6 +417,9 @@ gic_find_redistributor(void)
 		}
 		if (typer & GICR_TYPER_LAST) {
 			break;
+		}
+		if (gicr_stride == 0) {
+			step = (typer & GICR_TYPER_VLPIS) ? 2 * GICR_FRAME_SIZE : GICR_FRAME_SIZE;
 		}
 	}
 	panic("gic: no redistributor for MPIDR 0x%llx", mpidr);
@@ -437,6 +450,11 @@ gic_v3_irq_cpu_init(void)
 		gicd_base = ml_io_map(soc_base + reg[0], reg[1]);
 		gicr_base = ml_io_map(soc_base + reg[2], reg[3]);
 		gicr_size = reg[3];
+		/* as Linux: a stride the device tree gives wins over what the redistributors say (gic_find_redistributor) */
+		if (SecureDTGetProperty(entry, "redistributor-stride", &prop, &prop_size) == kSuccess &&
+		    prop_size == sizeof(uint64_t)) {
+			gicr_stride = *(uint64_t const *)prop;
+		}
 		if (gicd_base == 0 || gicr_base == 0) {
 			panic("gic: cannot map the distributor/redistributor");
 		}
