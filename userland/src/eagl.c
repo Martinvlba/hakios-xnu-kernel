@@ -61,6 +61,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <IOSurface/IOSurfaceRef.h>
+#include <libkern/OSByteOrder.h>
 #include <mach/mach_time.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
@@ -630,6 +631,17 @@ surface_shared(struct eagl *e, struct image *image)
 	    image->plane != 0 || (size_t)image->width != IOSurfaceGetWidth(surface) ||
 	    (size_t)image->height != IOSurfaceGetHeight(surface) ||
 	    !hakios_gl_surface_texture(e->gl, IOSurfaceGetID(surface))) {
+		/* why a surface is copied rather than its memory used: the first ones of a run, for the copies to be made fewer */
+		if (e->refused < 40) {
+			say("hakios-gl: surface %u ('%.4s' %zu x %zu) copied, not shared: %s%s%s%s%s%s\n", IOSurfaceGetID(surface),
+			    (const char *)&(uint32_t){ OSSwapInt32(IOSurfaceGetPixelFormat(surface)) }, IOSurfaceGetWidth(surface),
+			    IOSurfaceGetHeight(surface), !share_surfaces ? "sharing off; " : "", image->invert ? "turned over; " : "",
+			    image->alpha_first ? "alpha first; " : "",
+			    image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE ? "not BGRA bytes; " : "",
+			    image->plane != 0 ? "a plane; " : "",
+			    (size_t)image->width != IOSurfaceGetWidth(surface) || (size_t)image->height != IOSurfaceGetHeight(surface) ?
+			    "a part of it; " : "(the library refused)");
+		}
 		e->refused++;
 		return false;
 	}
