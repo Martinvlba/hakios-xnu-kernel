@@ -2,7 +2,7 @@
 """Cut a partition of this port's own off the end of Android's userdata: the new GPT, made and checked here.
 
 usage: userdata-carve.py DIR GIB [NAME]
-       userdata-carve.py --wipe DIR GIB [NAME]
+       userdata-carve.py --wipe [--entries N] DIR GIB [NAME]
 
 --wipe: Android's data is to be erased and userdata made again (fastboot -w), so no f2fs is shrunk and none is read:
 userdata ends where NAME begins, NAME being the last GIB of the unit (from a 2 MB boundary). Only gpt-head.bin and
@@ -118,6 +118,11 @@ def main():
     wipe = '--wipe' in args
     if wipe:
         args.remove('--wipe')
+    grow = None
+    if '--entries' in args:
+        i = args.index('--entries')
+        grow = int(args[i + 1])
+        del args[i:i + 2]
     if len(args) not in (2, 3):
         sys.exit(__doc__)
     d, gib = args[0], int(args[1])
@@ -142,6 +147,30 @@ def main():
     if any(e['name'] == name for e in entries):
         sys.exit(f'userdata-carve.py: there is a partition named {name} already')
     free = [i for i, e in enumerate(entries) if e['type'].int == 0]
+    if not free and grow:
+        # --entries N: a table with every entry used (the Pixel 8a's LUN 0: 34 of 34) made longer. Both copies keep
+        # their place; the room for N entries has to be there before the first usable block (the primary) and before
+        # the backup header, and what is there now has to be zeros. Only the count in the two headers changes (their
+        # CRCs are made again with the table's, as for any other change).
+        es = ph['entry_size']
+        if grow <= ph['count'] or ph['count'] != bh['count']:
+            sys.exit(f'userdata-carve.py: --entries {grow}: the table has {ph["count"]} already')
+        if (ph['entries_lba'] * BS + grow * es > ph['first_usable'] * BS or
+                bh['entries_lba'] * BS + grow * es > bh['my'] * BS):
+            sys.exit(f'userdata-carve.py: no room for {grow} entries')
+        for blob, h, base in ((head, ph, 0), (tail, bh, disk - 8)):
+            at = (h['entries_lba'] - base) * BS
+            if any(blob[at + h['count'] * es:at + grow * es]):
+                sys.exit('userdata-carve.py: what follows the table is not zeros; not made longer')
+        head, tail = bytearray(head), bytearray(tail)
+        struct.pack_into('<I', head, BS + 80, grow)
+        struct.pack_into('<I', tail, 7 * BS + 80, grow)
+        head, tail = bytes(head), bytes(tail)
+        ph = header_of(head[BS:2 * BS])
+        bh = header_of(tail[7 * BS:8 * BS])
+        entries = entries_of(head, ph, 0)[1]
+        free = [i for i, e in enumerate(entries) if e['type'].int == 0]
+        print(f'the table made longer: {grow} entries (both headers; made right again with the new table below)')
     if not free or free[0] < max(used):
         sys.exit('userdata-carve.py: no free entry after the used ones')
     slot = free[0]
