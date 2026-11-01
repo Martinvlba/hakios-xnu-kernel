@@ -18,6 +18,10 @@ changes to it; the scripts named fetch the release and put the changes on.
 
 ## 2026-11-01
 
+- u-boot: USB on the Pixel 8a: its eUSB2 PHY and repeater brought up (`eusb`), a DWC_usb31 no longer forced to SuperSpeed, the phone's serial number (`hakios serial`); U-Boot's fastboot answers over USB
+- u-boot: `acpm`: Google's power firmware and its PMIC protocol, from U-Boot (the Pixel 8a's regulators)
+- u-boot: `hakios trace` (registers once a second while U-Boot waits); `hakios wdt` keeps one watchdog as a net
+- loader: under a firmware that gives the phone's serial number, the loader's USB device is the phone's (18d1:4ee0, that serial); a Samsung watchdog left counting is fed while a host talks to the loader, and only then
 - loader, kernel: the kernel's other cores from a loader at EL2: CPU_ON goes to the loader's trampoline (`/chosen/el2-trampoline`), which takes each core down to EL1; checked in QEMU (EDK2 and U-Boot, GICv3 and GICv4) and on the Pixel 8a, eight cores
 - u-boot: the instruction cache turned on where a boot loader before U-Boot left it off (Exynos' `enable_caches()`): on the Pixel 8a a run went from five minutes to fifty seconds
 - u-boot: `hakios load` and the loader's start timed (seconds since the SoC's reset) in the console
