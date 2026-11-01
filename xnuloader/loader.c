@@ -3497,7 +3497,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			ba->commandLine[n++] = *c;
 		}
 	}
-	if (wdt_armed) {
+	/* the Qualcomm hypervisor's watchdog (an SMC to pet): not where the watchdog is Samsung's, which the kernel feeds
+	 * through /chosen/watchdog-samsung instead (on the Pixel 8a the SMC went to a firmware that does not know it) */
+	if (wdt_armed && PLAT->wdt_samsung == 0) {
 		for (const char *c = "hv_wdt_pet=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
 			ba->commandLine[n++] = *c;
 		}
@@ -4327,12 +4329,27 @@ fb_command(char *cmd)
 			} else if (str_eq(var, "result")) {
 				fb_reply("OKAY", last_result);
 			} else if (str_eq(var, "screen") && SCREEN.base != 0) {
-				/* width height bytes-per-row */
-				uint32_t mark = log_len;
-				print("%d %d %d", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, (uint64_t)SCREEN.stride);
-				log_buf[log_len] = 0;
-				fb_reply("OKAY", log_buf + mark);
-				log_len = mark;
+				/* width height bytes-per-row, formatted here: not through print, whose log may be full after a long
+				 * run (32 KB; on the Pixel 8a a Darwin run filled it and the answer came back empty) */
+				char geom[40];
+				uint32_t n = 0;
+				uint64_t v[3] = { SCREEN.width, SCREEN.height, SCREEN.stride };
+				for (int i = 0; i < 3; i++) {
+					char digits[20];
+					int d = 0;
+					do {
+						digits[d++] = (char)('0' + v[i] % 10);
+						v[i] /= 10;
+					} while (v[i] != 0);
+					if (i != 0) {
+						geom[n++] = ' ';
+					}
+					while (d > 0) {
+						geom[n++] = digits[--d];
+					}
+				}
+				geom[n] = 0;
+				fb_reply("OKAY", geom);
 			} else {
 				fb_reply("OKAY", "");
 			}
