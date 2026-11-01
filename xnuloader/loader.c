@@ -564,6 +564,7 @@ struct platform {
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
 	uint64_t timer_hz;               /* the generic timer's rate when CNTFRQ_EL0 cannot be trusted, 0: CNTFRQ_EL0 */
+	uint64_t wdt_samsung;            /* a Samsung watchdog (WTCON, WTDAT +4, WTCNT +8) the firmware left counting, fed here */
 };
 
 static const struct platform platform_qemu_virt = {
@@ -614,6 +615,8 @@ static const struct platform platform_akita = {
 	.cores = 8, .core_shift = 8,
 	.small_cores = 0x0f,
 	.timer_hz = 24576000,
+	/* HakiOS's U-Boot keeps cluster 0's watchdog counting as a net (hakios wdt), about 2.5 minutes: fed while the loader waits */
+	.wdt_samsung = 0x10060000,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -2808,7 +2811,10 @@ smc_call(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2)
 static void
 wdt_pet(void)
 {
-	if (wdt_armed) {
+	if (wdt_armed && PLAT->wdt_samsung != 0) {
+		/* its count back to the full time */
+		*(volatile uint32_t *)(uintptr_t)(PLAT->wdt_samsung + 8) = *(volatile uint32_t *)(uintptr_t)(PLAT->wdt_samsung + 4);
+	} else if (wdt_armed) {
 		smc_call(VIRT_WDT_PET, 0, 0, NULL, NULL);
 	}
 }
@@ -2819,6 +2825,10 @@ wdt_set_ms(uint64_t ms)
 {
 	if (ms > 65000) {
 		ms = 65000;
+	}
+	if (wdt_armed && PLAT->wdt_samsung != 0) {
+		wdt_pet();              /* its time is the firmware's; only fed */
+		return;
 	}
 	if (wdt_armed) {
 		smc_call(VIRT_WDT_SET_TIME, ms, ms, NULL, NULL);
@@ -2831,6 +2841,15 @@ wdt_arm(void)
 {
 	uint64_t ctl = 0, since = 0;
 
+	if (PLAT->wdt_samsung != 0) {
+		uint32_t con = *(volatile uint32_t *)(uintptr_t)PLAT->wdt_samsung;
+
+		wdt_armed = (con & (1u << 5)) != 0;     /* counting: the firmware's net */
+		print("watchdog: Samsung's at %x, WTCON %x: %s\n", PLAT->wdt_samsung, (uint64_t)con,
+		    wdt_armed ? "counting, fed while the loader waits" : "off");
+		wdt_pet();
+		return;
+	}
 	if (PLAT != &platform_redwood) {
 		return; /* SMC is not routed anywhere useful on QEMU virt */
 	}
@@ -3964,8 +3983,8 @@ static int download_to_ramdisk;     /* set by "oem ramdisk" for the one download
 static uint8_t *usb_rx_buf, *usb_tx_buf;
 static int usb_connected;
 
-static const uint8_t usb_dev_desc[18] = { 18, 1, 0x10, 0x02, 0, 0, 0, 64, 0xd1, 0x18, 0x0d, 0xd0, 0x00, 0x01, 1, 2, 3, 1 };
-static const uint8_t usb_ss_dev_desc[18] = { 18, 1, 0x00, 0x03, 0, 0, 0, 9, 0xd1, 0x18, 0x0d, 0xd0, 0x00, 0x01, 1, 2, 3, 1 };
+static uint8_t usb_dev_desc[18] = { 18, 1, 0x10, 0x02, 0, 0, 0, 64, 0xd1, 0x18, 0x0d, 0xd0, 0x00, 0x01, 1, 2, 3, 1 };
+static uint8_t usb_ss_dev_desc[18] = { 18, 1, 0x00, 0x03, 0, 0, 0, 9, 0xd1, 0x18, 0x0d, 0xd0, 0x00, 0x01, 1, 2, 3, 1 };
 static const uint8_t usb_cfg_desc[32] = {
 	9, 2, 32, 0, 1, 1, 0, 0x80, 0x50,
 	9, 4, 0, 0, 2, 0xff, 0x42, 0x03, 4,   /* fastboot interface */
@@ -3988,7 +4007,37 @@ static const uint8_t usb_bos[42] = {
 static const uint8_t usb_str0[4] = { 4, 3, 0x09, 0x04 };
 static const uint8_t usb_str_mfr[8] = { 8, 3, 'X', 0, 'N', 0, 'U', 0 };
 static const uint8_t usb_str_prod[20] = { 20, 3, 'x', 0, 'n', 0, 'u', 0, 'l', 0, 'o', 0, 'a', 0, 'd', 0, 'e', 0, 'r', 0 };
-static const uint8_t usb_str_serial[20] = { 20, 3, 'x', 0, 'n', 0, 'u', 0, 'l', 0, 'o', 0, 'a', 0, 'd', 0, 'e', 0, 'r', 0 };
+static uint8_t usb_str_serial[66] = { 20, 3, 'x', 0, 'n', 0, 'u', 0, 'l', 0, 'o', 0, 'a', 0, 'd', 0, 'e', 0, 'r', 0 };
+static const void *firmware_root_prop(const char *name, uint32_t *len);
+
+/*
+ * On a phone whose firmware gives the loader its serial number (the root's serial-number in the device tree it hands over:
+ * U-Boot writes $serial# there, which HakiOS's U-Boot takes from the phone's bootloader), the loader shows itself on USB as
+ * the phone's bootloader does: Google's 18d1:4ee0 with that serial. A host set up for the phone's fastboot then takes it as
+ * the same device (Windows' usbipd sharing it into WSL, which it does not for a device it has not seen). xl knows the
+ * loader by its answer to getvar product (xnuloader), not by its IDs. Without a serial number: 18d1:d00d, "xnuloader".
+ */
+static void
+usb_identity_from_firmware(void)
+{
+	uint32_t len = 0;
+	const char *sn = firmware_root_prop("serial-number", &len);
+
+	if (sn == NULL || len < 2 || len > 32 || sn[len - 1] != 0) {
+		return;
+	}
+	len--;
+	usb_str_serial[0] = (uint8_t)(2 + 2 * len);
+	usb_str_serial[1] = 3;
+	for (uint32_t i = 0; i < len; i++) {
+		usb_str_serial[2 + 2 * i] = (uint8_t)sn[i];
+		usb_str_serial[3 + 2 * i] = 0;
+	}
+	usb_dev_desc[10] = usb_ss_dev_desc[10] = 0xe0;
+	usb_dev_desc[11] = usb_ss_dev_desc[11] = 0x4e;
+	print("usb: 18d1:4ee0 with the phone's serial number (the firmware's device tree)\n");
+}
+
 static const uint8_t usb_str_iface[18] = { 18, 3, 'f', 0, 'a', 0, 's', 0, 't', 0, 'b', 0, 'o', 0, 'o', 0, 't', 0 };
 
 static void EFIAPI
@@ -4016,6 +4065,7 @@ usb_start(void)
 		print("usb: device protocol not found\n");
 		return 0;
 	}
+	usb_identity_from_firmware();
 	set.device_descriptor = usb_dev_desc;
 	set.descriptors = &cfg;
 	set.ss_device_descriptor = usb_ss_dev_desc;
@@ -4050,6 +4100,7 @@ usb_start(void)
  */
 static uint64_t usb_data_timeout;
 
+static uint64_t usb_last_command;      /* CNTVCT of the host's last command (usb_command_loop): see usb_wait() */
 static int64_t
 usb_wait(uint8_t endpoint)
 {
@@ -4078,7 +4129,13 @@ usb_wait(uint8_t endpoint)
 		if (msg == UsbDeviceEventTransferNotification && data.transfer.endpoint_index == endpoint) {
 			return data.transfer.status == UsbDeviceTransferStatusCompleteOK ? (int64_t)data.transfer.bytes_completed : -1;
 		}
-		if (READ_SYSREG(CNTVCT_EL0) - last_pet > freq) {
+		/*
+		 * Fed while a host talks to the loader, or a kernel runs: a loader that waits for a host which never comes
+		 * (its USB not working, nobody there) stops feeding after two minutes, and the watchdog restarts the phone.
+		 * On a Pixel 8a with no one to hold the power key, it waited for good once (2026-11-01).
+		 */
+		if (READ_SYSREG(CNTVCT_EL0) - last_pet > freq &&
+		    (run_active || READ_SYSREG(CNTVCT_EL0) - usb_last_command < 120 * freq)) {
 			last_pet = READ_SYSREG(CNTVCT_EL0);
 			wdt_pet();
 		}
@@ -4134,38 +4191,38 @@ fb_reply_data(uint64_t len)
 }
 
 /*
- * Does the device tree the firmware handed over (its EFI configuration table, which U-Boot's bootefi installs) say in
- * its root's compatible that it is `want`? How a phone is known when its screen's address is not (the Pixel 8a under
- * HakiOS's U-Boot). Every offset is checked against the tree's own size; a tree that is not one answers no.
+ * A property of the root node of the device tree the firmware handed over (its EFI configuration table, which U-Boot's
+ * bootefi installs, after writing $serial# into its serial-number). NULL when there is no such tree or property. Every
+ * offset is checked against the tree's own size.
  */
-static int
-firmware_tree_is(const char *want)
+static const void *
+firmware_root_prop(const char *name, uint32_t *plen)
 {
 	static const efi_guid dtb_guid = { 0xb1b621d5, 0xf19c, 0x41a5, { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
 	const uint8_t *fdt = NULL;
+	size_t name_len = 0;
 
+	while (name[name_len]) {
+		name_len++;
+	}
 	for (uint64_t i = 0; ST->tables != NULL && i < ST->nr_tables && i < 64; i++) {
 		if (memcmp(&ST->tables[i].guid, &dtb_guid, sizeof(dtb_guid)) == 0) {
 			fdt = ST->tables[i].table;
 		}
 	}
 	if (fdt == NULL || __builtin_bswap32(*(const uint32_t *)fdt) != 0xd00dfeed) {
-		return 0;
+		return NULL;
 	}
 	uint32_t total = __builtin_bswap32(((const uint32_t *)fdt)[1]), off = __builtin_bswap32(((const uint32_t *)fdt)[2]);
 	uint32_t strings = __builtin_bswap32(((const uint32_t *)fdt)[3]);
 	if (total > 0x400000 || off >= total || strings >= total) {
-		return 0;
+		return NULL;
 	}
 	/* the root node: FDT_BEGIN_NODE, an empty name padded to 4, then its properties before any child */
 	if (off + 8 > total || __builtin_bswap32(*(const uint32_t *)(fdt + off)) != 1) {
-		return 0;
+		return NULL;
 	}
 	off += 8;
-	size_t want_len = 0;
-	while (want[want_len]) {
-		want_len++;
-	}
 	while (off + 12 <= total) {
 		uint32_t token = __builtin_bswap32(*(const uint32_t *)(fdt + off));
 		if (token == 4) {               /* FDT_NOP */
@@ -4173,28 +4230,44 @@ firmware_tree_is(const char *want)
 			continue;
 		}
 		if (token != 3) {               /* not FDT_PROP: the root's properties are over */
-			return 0;
+			return NULL;
 		}
-		uint32_t len = __builtin_bswap32(*(const uint32_t *)(fdt + off + 4)), name = __builtin_bswap32(*(const uint32_t *)(fdt + off + 8));
+		uint32_t len = __builtin_bswap32(*(const uint32_t *)(fdt + off + 4));
+		uint32_t nameoff = __builtin_bswap32(*(const uint32_t *)(fdt + off + 8));
 		off += 12;
-		if (len > total - off || strings + name + 11 > total) {
-			return 0;
+		if (len > total - off || strings + nameoff + name_len + 1 > total) {
+			return NULL;
 		}
-		if (memcmp(fdt + strings + name, "compatible", 11) == 0) {
-			/* a list of strings, each ended by a 0 */
-			for (uint32_t s = 0; s < len;) {
-				uint32_t n = 0;
-				while (s + n < len && fdt[off + s + n] != 0) {
-					n++;
-				}
-				if (n == want_len && memcmp(fdt + off + s, want, n) == 0) {
-					return 1;
-				}
-				s += n + 1;
-			}
-			return 0;
+		if (memcmp(fdt + strings + nameoff, name, name_len + 1) == 0) {
+			*plen = len;
+			return fdt + off;
 		}
 		off = (off + len + 3) & ~3u;
+	}
+	return NULL;
+}
+
+/* Does the firmware's device tree say in its root's compatible that it is `want`? (the Pixel 8a under HakiOS's U-Boot) */
+static int
+firmware_tree_is(const char *want)
+{
+	uint32_t len = 0;
+	const char *c = firmware_root_prop("compatible", &len);
+	size_t want_len = 0;
+
+	while (want[want_len]) {
+		want_len++;
+	}
+	/* a list of strings, each ended by a 0 */
+	for (uint32_t s = 0; c != NULL && s < len;) {
+		uint32_t n = 0;
+		while (s + n < len && c[s + n] != 0) {
+			n++;
+		}
+		if (n == want_len && memcmp(c + s, want, n) == 0) {
+			return 1;
+		}
+		s += n + 1;
 	}
 	return 0;
 }
@@ -4459,6 +4532,7 @@ static void
 usb_command_loop(void)
 {
 	screen_quiet = 1;
+	usb_last_command = READ_SYSREG(CNTVCT_EL0);
 	for (;;) {
 		char cmd[128];
 		int64_t n;
@@ -4476,6 +4550,7 @@ usb_command_loop(void)
 		}
 		memcpy(cmd, usb_rx_buf, (size_t)n);
 		cmd[n] = 0;
+		usb_last_command = READ_SYSREG(CNTVCT_EL0);
 		fb_command(cmd);
 	}
 }
