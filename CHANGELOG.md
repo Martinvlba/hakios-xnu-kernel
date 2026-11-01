@@ -18,6 +18,10 @@ changes to it; the scripts named fetch the release and put the changes on.
 
 ## 2026-11-01
 
+- Pixel 8a: the Darwin 16.5 user space runs: launchd, backboardd and SpringBoard to the home screen (drawn in software, no touch yet), from `xl ramdisk userland/system.apfs` and `XL_CMDLINE="debug=0x8 rd=md0 cpus=8"`
+- loader: `getvar screen` answers after a long run too (it was formatted into the 32 KB log, which a Darwin run fills: `xl screenshot` said "no display")
+- loader: no `hv_wdt_pet=1` (the Qualcomm hypervisor's watchdog call) where the watchdog is Samsung's
+- `mkidentity.sh`: its own LZFSE build works (lzfse's Makefile has no target `lzfse`)
 - u-boot: USB on the Pixel 8a: its eUSB2 PHY and repeater brought up (`eusb`), a DWC_usb31 no longer forced to SuperSpeed, the phone's serial number (`hakios serial`); U-Boot's fastboot answers over USB
 - u-boot: `acpm`: Google's power firmware and its PMIC protocol, from U-Boot (the Pixel 8a's regulators)
 - u-boot: `hakios trace` (registers once a second while U-Boot waits); `hakios wdt` keeps one watchdog as a net
