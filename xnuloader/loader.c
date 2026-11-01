@@ -344,11 +344,18 @@ static int hc_log_skips;                /* logs not written this run (said twice
 static void hc_print_state(const char *when);
 static void hc_take_back(const char *when);
 
+/* the log of the kernel that returned last: "oem log" after a run composes it again rather than the loader's alone (a
+ * host that asked for the log so far just as the kernel returned got the loader's 32 KB, and the kernel's was lost) */
+static const char *returned_klog;
+static uint64_t returned_klog_len;
+
 static void
 write_logs(const char *klog, uint64_t klog_len)
 {
 	efi_block_io *bio = find_log_partition();
 
+	returned_klog = klog;
+	returned_klog_len = klog_len;
 	compose_logs(klog, klog_len);
 	if (bio == NULL) {
 		/* No log partition (QEMU): echo the returned kernel log on the console instead. */
@@ -4506,7 +4513,7 @@ fb_command(char *cmd)
 			if (busy && running_live != NULL) {
 				compose_live_log(running_live, running_slide);
 			} else {
-				compose_logs(NULL, 0);
+				compose_logs(returned_klog, returned_klog_len);
 			}
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "reboot") || starts_with(cmd, "oem reboot")) {
