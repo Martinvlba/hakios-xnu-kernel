@@ -7,7 +7,7 @@ Every device with a repository, and how far each part of it works. A device of y
 
 | Device | SoC | display | touch | buttons | cpu | gpu | storage | audio | battery | haptic | camera | torch | wifi | bluetooth | cellular | network | thermal | usb |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [Pixel 8a](akita.md) | `zuma` | partly | yes | partly | partly | no | partly | no | no |  |  |  | no |  | no |  | no | partly |
+| [Pixel 8a](akita.md) | `zuma` | partly | yes | partly | partly | no | yes | no | no |  |  |  | no |  | no |  | no | partly |
 | [QEMU virt (aarch64)](qemu.md) | `none` | yes | yes | yes |  | no | yes | yes |  |  |  |  |  |  |  | yes |  |  |
 | [POCO X5 Pro 5G](redwood.md) | `sc7280` | yes | yes | yes | yes | yes | yes | yes | partly | yes | yes | partly | yes | no | partly |  | partly |  |
 
