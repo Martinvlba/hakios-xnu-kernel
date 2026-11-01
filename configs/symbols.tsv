@@ -105,6 +105,7 @@ GLNO	arg	glno	User space	u	inject.c
 GLNUMBERS	arg	glnumbers	GPU and display	u	eagl.c	
 GLPLAIN	arg	glplain	GPU and display	u	eagl.c	leave such draws as they are; 2: also those without a texture; 3: the two with a colour matrix drawn plainly too
 GLPRECISION	arg	glprecision	GPU and display	u	eagl.c	as the shaders say.
+GLPROF	arg	glprof	GPU and display	u	eagl.c	
 GLSB3	arg	glsb3	User space	u	inject.c	
 GLSHADERS	arg	glshaders	GPU and display	u	eagl.c	
 GLSHOW	arg	glshow	GPU and display	u	eagl.c	the first texture of that size there is (names are handed out afresh every run)
@@ -112,6 +113,7 @@ GLSHOW_PART	arg	glshow_part	GPU and display	u	eagl.c
 GLSHOW_ZOOM	arg	glshow_zoom	GPU and display	u	eagl.c	
 GLSKIP	arg	glskip	GPU and display	u	eagl.c	the draws of those programs are left out of the picture, which says what in it is their work
 GLSLOW	arg	glslow	GPU and display	u	eagl.c	
+GLSTILL	arg	glstill	GPU and display	u	eagl.c	
 GLSYNC	arg	glsync	GPU and display	u	eagl.c	
 GLTRACE	arg	gltrace	GPU and display	u	eagl.c	
 GLTRACE_AT	arg	gltrace_at	GPU and display	u	eagl.c	
@@ -218,6 +220,7 @@ SOUND_PAUSE	arg	sound_pause	Audio and battery	k	hakios.sound.c
 SOUND_SECS	arg	sound_secs	Audio and battery	k	hakios.sound.c	
 SPEAKER_PROBE	arg	speaker_probe	Audio and battery	k	hakios.speaker.c	reads registers and nothing else: the pins, the power names (below)
 SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
+SURF_WRAP	arg	surf_wrap	GPU and display	k	MiniIOSurface.cpp	surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
 SURFTRACE	arg	surftrace	GPU and display	k	MiniIOSurface.cpp	log the first N surfaces created (default 24)
 SURFTRACE_OF	arg	surftrace_of	GPU and display	k	MiniIOSurface.cpp	
 SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c	

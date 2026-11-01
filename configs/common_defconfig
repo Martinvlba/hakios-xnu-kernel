@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 347 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 350 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -335,7 +335,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (71)
+# GPU and display (74)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -450,6 +450,9 @@ CONFIG_GPU=y
 # CONFIG_GLPRECISION is not set
 
 # read by eagl.c (user space)
+# CONFIG_GLPROF is not set
+
+# read by eagl.c (user space)
 # CONFIG_GLSHADERS is not set
 
 # the first texture of that size there is (names are handed out afresh every run)
@@ -466,6 +469,9 @@ CONFIG_GPU=y
 
 # read by eagl.c (user space)
 # CONFIG_GLSLOW is not set
+
+# read by eagl.c (user space)
+# CONFIG_GLSTILL is not set
 
 # read by eagl.c (user space)
 # CONFIG_GLSYNC is not set
@@ -538,6 +544,9 @@ CONFIG_GPU=y
 
 # kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
 # CONFIG_SURF_CLEAR is not set
+
+# surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
+# CONFIG_SURF_WRAP is not set
 
 # log the first N surfaces created (default 24)
 # CONFIG_SURFTRACE is not set
