@@ -240,6 +240,7 @@ TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports t
 TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.goodix.c	the bus at N Hz (Android's device tree gives the chip 5 MHz)
 UFS_BENCH	arg	ufs_bench	Storage and APFS	k	hakios.ufs.c	what one request through the loader costs, by size
 UFS_CHECK	arg	ufs_check	Storage and APFS	k	hakios.ufs.c	
+UFS_HVC	arg	ufs_hvc	Storage and APFS	k	hakios.ufs.c	
 UFS_NATIVE	arg	ufs_native	Storage and APFS	kl	hakios.ufs.c,loader.c	through this kernel's own driver instead, its own transfer list in the controller for the run, if all is as expected; 2: only look; 3: a dry run --
 UFS_NATIVE_BENCH	arg	ufs_native_bench	Storage and APFS	k	hakios.ufs.c	
 UFS_NATIVE_BUFFER	hex	ufs_native_buffer	Storage and APFS	k	hakios.ufshc.c	

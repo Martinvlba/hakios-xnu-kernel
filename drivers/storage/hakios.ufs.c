@@ -62,6 +62,10 @@
 #include <vm/memory_types.h>
 #include "hakios.ufshc.h"
 
+extern processor_t thread_bind(processor_t processor);
+extern processor_t cpu_to_processor(int cpu);
+extern int master_cpu;
+extern wait_result_t thread_block(thread_continue_t continuation);
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern void IOSleep(unsigned int milliseconds);
 extern void loader_return(void);        /* osfmk/arm64/loader_return.c */
@@ -159,6 +163,7 @@ static uint32_t ufs_buffer_size, ufs_parts, ufs_seq;
 static uint32_t ufs_bsize[BLOCK_MAX_PARTS];   /* the block size each device is counted in (spec_open sets 512) */
 static int ufs_bmajor = -1, ufs_cmajor = -1;
 static bool ufs_ready, ufs_dead;
+static uint32_t ufs_hvc;          /* ufs_hvc=1: the loader is called up for each request (ufs_request) */
 static uint64_t ufs_requests, ufs_errors, ufs_bytes, ufs_wait_us;
 static uint64_t ufs_copy_us;                    /* copying out of the loader's buffer */
 static uint64_t ufs_small, ufs_medium, ufs_large; /* requests of <= 4 KB, <= 64 KB, more */
@@ -348,6 +353,33 @@ ufs_request(uint32_t op, uint32_t part, uint64_t lba, uint64_t count, uint8_t *d
 	__asm__ volatile ("dmb sy" ::: "memory");
 	ufs_page->ask.request = seq;
 	__asm__ volatile ("dmb sy" ::: "memory");
+	if (ufs_hvc) {
+		/*
+		 * ufs_hvc=1 (the loader runs this kernel on its own core from EL2: the Pixel 8a): nothing polls the page
+		 * meanwhile, so the loader is called up to serve the request now (HVC #0x4b53, xnuloader/loader.c,
+		 * loader_el2_serve). It keeps every register but x9..x11; the answer is in the page when it returns.
+		 */
+		static uint32_t told;
+		processor_t was;
+
+		/*
+		 * From the boot processor only: the loader's EL2 is set up (vectors, page tables, stack) on the core it entered
+		 * the kernel from, and a secondary core's EL2 switches the core off at anything (loader_el2_secondary_vectors).
+		 * So this thread is moved there for the call, and let go after (XNU's own way: sched_prim.c).
+		 */
+		was = thread_bind(cpu_to_processor(master_cpu));
+		thread_block(THREAD_CONTINUE_NULL);
+		if (told < 4) {
+			printf("ufs: request %u (op %u, part %u, lba %llu, count %llu): calling the loader up\n", seq, op, part,
+			    lba, count);
+		}
+		__asm__ volatile ("hvc #0x4b53" ::: "x9", "x10", "x11", "memory");
+		if (told < 4) {
+			told++;
+			printf("ufs: request %u: back from the loader, answered %u\n", seq, ufs_page->answer.answered);
+		}
+		thread_bind(was);
+	}
 
 	started = mach_absolute_time();
 	while (ufs_page->answer.answered != seq) {
@@ -1713,6 +1745,7 @@ hakios_ufs_init(void)
 	uint32_t check = 0, made = 0;
 	vm_offset_t base;
 
+	PE_parse_boot_argn("ufs_hvc", &ufs_hvc, sizeof(ufs_hvc));
 	if (!PE_parse_boot_argn("ufs_shared_pa", &pa, sizeof(pa)) || pa == 0) {
 		return;                 /* the loader was not asked for ufs=2: there is nothing to read through */
 	}

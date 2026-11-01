@@ -85,7 +85,7 @@ static efi_system_table *ST;
 static efi_boot_services *BS;
 static efi_handle IMAGE;
 
-static char log_buf[32768];
+static char log_buf[256 * 1024];      /* (32 KB was full before a run on the Pixel 8a: its UFS survey) */
 static uint32_t log_len;
 
 void *
@@ -1074,6 +1074,31 @@ __asm__ (
         "  mov x11, #0x4b52\n"
         "  cmp x10, x11\n"
         "  b.eq loader_el2_back\n"              /* the kernel is done: x0..x7 as it left them */
+        "  mov x11, #0x4b53\n"
+        "  cmp x10, x11\n"
+        "  b.eq loader_el2_serve\n"             /* the kernel asks for a block request to be served (ufs_hvc=1) */
+        /*
+         * HVC #0x4b53: serve the kernel's block request on this core, then back to it. Every general register, ELR_EL2
+         * and SPSR_EL2 are kept on EL2's stack (the loader's, idle below where it entered the kernel): U-Boot keeps its
+         * global data in x18 and its EFI calls swap it. x9..x11 are the kernel's to lose (its call says so).
+         */
+        "loader_el2_serve:\n"
+        "  sub sp, sp, #272\n"
+        "  stp x0, x1, [sp, #0]\n    stp x2, x3, [sp, #16]\n   stp x4, x5, [sp, #32]\n   stp x6, x7, [sp, #48]\n"
+        "  stp x8, x9, [sp, #64]\n   stp x10, x11, [sp, #80]\n stp x12, x13, [sp, #96]\n stp x14, x15, [sp, #112]\n"
+        "  stp x16, x17, [sp, #128]\n stp x18, x19, [sp, #144]\n stp x20, x21, [sp, #160]\n stp x22, x23, [sp, #176]\n"
+        "  stp x24, x25, [sp, #192]\n stp x26, x27, [sp, #208]\n stp x28, x29, [sp, #224]\n"
+        "  mrs x0, elr_el2\n  mrs x1, spsr_el2\n"
+        "  stp x30, x0, [sp, #240]\n  str x1, [sp, #256]\n"
+        "  bl loader_el2_service\n"
+        "  ldp x30, x0, [sp, #240]\n  ldr x1, [sp, #256]\n"
+        "  msr elr_el2, x0\n  msr spsr_el2, x1\n"
+        "  ldp x0, x1, [sp, #0]\n    ldp x2, x3, [sp, #16]\n   ldp x4, x5, [sp, #32]\n   ldp x6, x7, [sp, #48]\n"
+        "  ldp x8, x9, [sp, #64]\n   ldp x10, x11, [sp, #80]\n ldp x12, x13, [sp, #96]\n ldp x14, x15, [sp, #112]\n"
+        "  ldp x16, x17, [sp, #128]\n ldp x18, x19, [sp, #144]\n ldp x20, x21, [sp, #160]\n ldp x22, x23, [sp, #176]\n"
+        "  ldp x24, x25, [sp, #192]\n ldp x26, x27, [sp, #208]\n ldp x28, x29, [sp, #224]\n"
+        "  add sp, sp, #272\n"
+        "  eret\n"
         "loader_el2_other:\n"                   /* as an early exception in the kernel: reason 1 */
         "  mrs x3, esr_el2\n"
         "  mrs x4, elr_el2\n"
@@ -2463,6 +2488,28 @@ block_io2_probe(efi_handle h, efi_block_io *bio)
 }
 
 /* one request, if there is one: called from core 0's watch loop while the kernel runs */
+/* HVC #0x4b53 from a kernel on this core (loader_el2_serve): its pending block request, served now */
+static void block_poll(void);
+void loader_el2_service(void);
+void
+loader_el2_service(void)
+{
+	static uint64_t calls;
+	uint64_t t0 = READ_SYSREG(CNTPCT_EL0), us;
+	uint32_t request = block_shared.ask.request;
+
+	if (block_enabled) {
+		block_poll();
+	}
+	us = (READ_SYSREG(CNTPCT_EL0) - t0) * 1000000 / READ_SYSREG(CNTFRQ_EL0);
+	calls++;
+	if (calls <= 8 || us > 100000) {
+		print("ufs: hvc %d: request %d (op %d part %d lba %d count %d) answered %d in %d us\n", calls,
+		    (uint64_t)request, (uint64_t)block_shared.ask.op, (uint64_t)block_shared.ask.part,
+		    block_shared.ask.lba, block_shared.ask.count, (uint64_t)block_shared.answer.answered, us);
+	}
+}
+
 static void
 block_poll(void)
 {
@@ -3523,6 +3570,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			ba->commandLine[n++] = hex[(address >> shift) & 0xf];
 		}
 		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
+	}
+	/*
+	 * A kernel on this very core from EL2 (the Pixel 8a): nothing polls the block page while it runs, so it calls up for
+	 * each request (HVC #0x4b53, loader_el2_service) and the request is served here, at EL2, then.
+	 */
+	if (block_enabled && (READ_SYSREG(CurrentEL) >> 2) == 2 && kernel_mpidr == this_mpidr) {
+		for (const char *c = "ufs_hvc=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+			ba->commandLine[n++] = *c;
+		}
 	}
 	if (battery_requested) {
 		static const char prefix[] = "battery_shared_pa=0x";
