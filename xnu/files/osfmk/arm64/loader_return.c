@@ -23,6 +23,7 @@
 #include <arm64/psci_smp.h>
 #include <arm64/proc_reg.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <pexpert/arm64/board_config.h>
 #include <vm/vm_page.h>
 #include <vm/vm_compressor.h>
@@ -516,6 +517,12 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, loader_stop_poll_init);
 
 static thread_call_t hv_wdt_call;
 static uint32_t hv_wdt_enabled;
+/*
+ * A Samsung watchdog the loader found counting (/chosen/watchdog-samsung: its WTCON's physical address; WTDAT +4, WTCNT
+ * +8): HakiOS's U-Boot on the Pixel 8a keeps one as a net of about two and a half minutes. Fed from the same timer, so
+ * that a healthy kernel runs as long as it likes and a hung one is still restarted.
+ */
+static vm_offset_t samsung_wdt;
 
 #define MEMORY_REPORT_BEATS     6               /* a line about memory every so many heartbeats */
 
@@ -569,6 +576,9 @@ hv_wdt_pet(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
 	uint64_t deadline;
 
+	if (samsung_wdt != 0) {
+		*(volatile uint32_t *)(samsung_wdt + 8) = *(volatile uint32_t *)(samsung_wdt + 4);
+	}
 	if (hv_wdt_enabled) {
 		register uint64_t x0 __asm__("x0") = VIRT_WDT_PET;
 		register uint64_t x1 __asm__("x1") = 0;
@@ -590,7 +600,16 @@ __startup_func
 static void
 hv_wdt_pet_init(void)
 {
+	DTEntry chosen;
+	void const *prop;
+	unsigned int size;
+
 	PE_parse_boot_argn("hv_wdt_pet", &hv_wdt_enabled, sizeof(hv_wdt_enabled));
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	    SecureDTGetProperty(chosen, "watchdog-samsung", &prop, &size) == kSuccess && size == sizeof(uint64_t)) {
+		samsung_wdt = ml_io_map(*(uint64_t const *)prop, PAGE_SIZE);
+		printf("watchdog: Samsung's at 0x%llx, fed every %d s\n", *(uint64_t const *)prop, HV_WDT_PET_SECONDS);
+	}
 	hv_wdt_call = thread_call_allocate(hv_wdt_pet, NULL);
 	hv_wdt_pet(NULL, NULL);
 }
