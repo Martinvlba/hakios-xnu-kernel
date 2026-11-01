@@ -20,7 +20,7 @@
 | buttons | partly | power, volume up, volume down: found, no false presses; a press not yet seen (CONFIG_HAKIOS_AKITA_KEYS, buttons=1) |
 | cpu | partly | 8 of 9 cores (the X3 not used); no frequency control (ACPM's) |
 | usb | partly | the development link only: xl through U-Boot and the loader (44-46 MB/s); nothing for Darwin |
-| storage | partly | Darwin runs from the flash (darwin, 77 GiB); /private/var not kept yet |
+| storage | works | Darwin runs from the flash (darwin, 77 GiB), /private/var kept between starts |
 | gpu | no | Mali-G715: software drawing only |
 | battery | no | behind the AoC and ACPM; the icon is empty, no charging while in HakiOS |
 | audio | no | behind the AoC |
