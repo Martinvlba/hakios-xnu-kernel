@@ -17,7 +17,7 @@
 |---|---|---|
 | display | partly | the bootloader's framebuffer (0xfac00000, 1080 x 2400), drawn in software by Darwin: ~10 frames a second |
 | touch | works | Goodix GT9895 on SPI (HSI0 USI2), polled; taps, swipes, the app switcher (CONFIG_HAKIOS_AKITA_TOUCH, touchscreen=1) |
-| buttons | partly | power, volume up, volume down: found, no false presses; a press not yet seen (CONFIG_HAKIOS_AKITA_KEYS, buttons=1) |
+| buttons | works | power, volume up, volume down: the volume HUD, the screen locked and woken (CONFIG_HAKIOS_AKITA_KEYS, buttons=1) |
 | cpu | partly | 8 of 9 cores (the X3 not used); no frequency control (ACPM's) |
 | usb | partly | the development link only: xl through U-Boot and the loader (44-46 MB/s); nothing for Darwin |
 | storage | works | Darwin runs from the flash (darwin, 77 GiB), /private/var kept between starts |
