@@ -1366,18 +1366,62 @@ apfs_vget(mount_t mp, ino64_t ino, vnode_t *vpp, __unused vfs_context_t ctx)
 	return apfs_node_vnode(APFS_MP(mp), (uint64_t)ino, NULLVP, NULL, vpp);
 }
 
+/*
+ * The data volume beside a read-only root, as one APFS container would have it. On an iPhone the system volume and the
+ * data volume are volumes of one container and share its space, so what "/" says of its size is the whole of the
+ * storage: Settings > General > iPhone Storage (StorageData's STStorageDiskMonitor, the root CacheDeleteVolume) reads
+ * the device's size and free space from it. Here the root is a container of its own (the Darwin volume: 5.6 GB,
+ * full) and /private/var another file system (HFS Plus in darwin, or a memory file system), so "/" said "5.6 GB of
+ * 6 GB" whatever the data volume had (the Pixel 8a, 2026-11-01). With a file system on /private/var, the root
+ * answers: its blocks = its own used blocks + the data volume's, free and available = the data volume's.
+ */
+struct apfs_var_space {
+	uint64_t blocks, bfree, bavail;         /* in bytes */
+	bool found;
+};
+
+static int
+apfs_var_space_of(mount_t m, void *arg)
+{
+	struct apfs_var_space *sp = arg;
+	struct vfsstatfs *st = vfs_statfs(m);
+
+	if (strncmp(st->f_mntonname, "/private/var", MAXPATHLEN) != 0) {
+		return VFS_RETURNED;
+	}
+	(void)vfs_update_vfsstat(m, vfs_context_kernel(), VFS_KERNEL_EVENT);
+	sp->blocks = st->f_blocks * st->f_bsize;
+	sp->bfree = st->f_bfree * st->f_bsize;
+	sp->bavail = st->f_bavail * st->f_bsize;
+	sp->found = true;
+	return VFS_RETURNED_DONE;
+}
+
 static int
 apfs_vfs_getattr(mount_t mp, struct vfs_attr *fsap, __unused vfs_context_t ctx)
 {
 	struct apfs_mount *am = APFS_MP(mp);
 	uint64_t files = am->am_vol.num_files + am->am_vol.num_dirs;
+	uint64_t bs = am->am_nx.block_size, blocks = am->am_nx.block_count, bfree = 0, bavail = 0;
+	struct vfsstatfs *self = vfs_statfs(mp);
+
+	if (vfs_isrdonly(mp) && self->f_mntonname[0] == '/' && self->f_mntonname[1] == '\0') {
+		struct apfs_var_space sp = { 0 };
+
+		vfs_iterate(0, apfs_var_space_of, &sp);
+		if (sp.found && sp.blocks != 0) {
+			blocks = am->am_vol.alloc_count + sp.blocks / bs;
+			bfree = sp.bfree / bs;
+			bavail = sp.bavail / bs;
+		}
+	}
 
 	VFSATTR_RETURN(fsap, f_objcount, files);
 	VFSATTR_RETURN(fsap, f_bsize, am->am_nx.block_size);
 	VFSATTR_RETURN(fsap, f_iosize, am->am_nx.block_size);
-	VFSATTR_RETURN(fsap, f_blocks, am->am_nx.block_count);
-	VFSATTR_RETURN(fsap, f_bfree, 0);
-	VFSATTR_RETURN(fsap, f_bavail, 0);
+	VFSATTR_RETURN(fsap, f_blocks, blocks);
+	VFSATTR_RETURN(fsap, f_bfree, bfree);
+	VFSATTR_RETURN(fsap, f_bavail, bavail);
 	VFSATTR_RETURN(fsap, f_bused, am->am_vol.alloc_count);
 	VFSATTR_RETURN(fsap, f_files, files);
 	VFSATTR_RETURN(fsap, f_ffree, 0);

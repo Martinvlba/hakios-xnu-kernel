@@ -18,6 +18,9 @@ changes to it; the scripts named fetch the release and put the changes on.
 
 ## 2026-11-01
 
+- Darwin: Settings > General > iPhone Storage no longer hangs: fairplayd.H2 is not offered (mkjobs.py DENY; it exits as it starts, and AirFair.syncBundle waited for it on Settings' main thread)
+- kernel: a read-only APFS root with a file system on /private/var reports the size and free space of both, as one container would (iPhone Storage: the whole flash, not the 5.6 GB system volume)
+- tools: mkdatavol.py takes darwin's size (DARWIN_BLOCKS=N): the data volume can fill a larger darwin; qemu/dsc_a2s.py names shared-cache addresses without ipsw (symstack.py uses it when ipsw is missing)
 - Pixel 8a: touch works in Darwin (taps, swipes, the app switcher): the Goodix GT9895 on zuma's HSI0 USI2 SPI, polled (`touchscreen=1`; devices/akita); U-Boot powers it (`hakios_touch`)
 - u-boot: `tspi`, a polled Samsung (s3c64xx/USI) SPI controller from the U-Boot prompt, for trying a chip before its driver is written
 - loader: `oem log` after a run composes the returned kernel's log again (a host asking for the log so far just as the kernel returned got the loader's 32 KB alone)

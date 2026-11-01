@@ -12,6 +12,7 @@ in sysimage/a2s.json. Addresses outside the cache (the program itself) are shown
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -21,6 +22,7 @@ KNOWN = os.path.join(BASE, 'a2s.json')
 CACHE_LOW, CACHE_HIGH = 0x180000000, 0x280000000        # unslid addresses of the shared cache
 
 known = json.load(open(KNOWN)) if os.path.exists(KNOWN) else {}
+own_cache = None
 
 
 def name(address, slide):
@@ -29,9 +31,18 @@ def name(address, slide):
         return f'{address:#x} (not in the shared cache)'
     key = f'{unslid:#x}'
     if key not in known:
-        out = subprocess.run(['ipsw', 'dyld', 'a2s', CACHE, key], capture_output=True, text=True).stdout
-        lines = [line for line in out.splitlines() if key in line]
-        known[key] = re.sub(r'^\S+:\s*', '', lines[-1]).strip() if lines else '?'
+        if shutil.which('ipsw'):
+            out = subprocess.run(['ipsw', 'dyld', 'a2s', CACHE, key], capture_output=True, text=True).stdout
+            lines = [line for line in out.splitlines() if key in line]
+            known[key] = re.sub(r'^\S+:\s*', '', lines[-1]).strip() if lines else '?'
+        else:
+            # no ipsw: the cache read here (dsc_a2s.py: the library, and the nearest exported symbol)
+            global own_cache
+            if own_cache is None:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from dsc_a2s import Cache
+                own_cache = Cache(CACHE)
+            known[key] = own_cache.name(unslid)
         json.dump(known, open(KNOWN, 'w'), indent=0)
     return known[key]
 
