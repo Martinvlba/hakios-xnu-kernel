@@ -3605,6 +3605,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		clean_dcache((uint64_t)(uintptr_t)&loader_el2_secondary, (uint64_t)(uintptr_t)&loader_el2_secondary_end);
 		dt_prop_u64(&w, "el2-trampoline", (uint64_t)(uintptr_t)&loader_el2_secondary);
 	}
+	if (PLAT->wdt_samsung != 0 && wdt_armed) {
+		/* the kernel feeds it from here on (loader_return.c, hv_wdt_pet): a run may take longer than its time */
+		dt_prop_u64(&w, "watchdog-samsung", PLAT->wdt_samsung);
+	}
 	/* the time now, by the firmware's clock (the kernel has no real-time clock driver) */
 	uint64_t epoch = firmware_epoch();
 	if (epoch != 0) {
