@@ -3,6 +3,8 @@
 as an Android sparse image of the whole of darwin that writes that volume and nothing else.
 
 usage: mkdatavol.py OUT.simg [MKFS]      (MKFS: mkfs.hfsplus, default the one in $PATH)
+       DARWIN_BLOCKS=N mkdatavol.py ...  darwin is N blocks of 4096 (default the first phone's 5242875, 20 GiB);
+                                          the volume takes all of it past DATA_FIRST (the Pixel 8a: 20185595)
 
     fastboot flash darwin OUT.simg
 
@@ -24,7 +26,7 @@ import sys
 import tempfile
 
 BS = 4096
-DARWIN_BLOCKS = 5242875            # darwin, in blocks of 4096 (README, "The port's partition")
+DARWIN_BLOCKS = int(os.environ.get('DARWIN_BLOCKS', 5242875))   # darwin, in blocks of 4096 (README, "The port's partition")
 DATA_FIRST = 2042368               # where the volume begins: drivers/storage/hakios.ufs.c, UFS_WRITE_FIRST
 MAGIC, RAW, FILL, DONT_CARE = 0xED26FF3A, 0xCAC1, 0xCAC2, 0xCAC3
 
