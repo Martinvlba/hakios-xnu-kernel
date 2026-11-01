@@ -4150,6 +4150,13 @@ usb_rx(uint8_t *buf, uint64_t len)
 	if (usb_rx_queued) {
 		usb_rx_queued = 0;      /* (every command is received the same way, into the same buffer) */
 	} else if (EFI_ERROR(USB->send(USB_EP_OUT, len, buf))) {
+		/*
+		 * Not configured: the host is gone, whether or not its event has been taken yet. Without this the
+		 * command loop came straight back here, never polled again, and the event that says so stayed queued:
+		 * after a bus reset (Windows' usbipd resets a device it takes over) the control endpoint went
+		 * unanswered and the host failed the device (seen on the Pixel 8a under U-Boot, 2026-11-01).
+		 */
+		usb_connected = 0;
 		return -1;
 	}
 	return usb_wait(USB_EP_OUT);
@@ -4162,6 +4169,7 @@ usb_tx(const uint8_t *data, uint64_t len)
 		memcpy(usb_tx_buf, data, len);
 	}
 	if (EFI_ERROR(USB->send(USB_EP_IN, len, usb_tx_buf))) {
+		usb_connected = 0;      /* as in usb_rx() */
 		return -1;
 	}
 	return usb_wait(USB_EP_IN);
