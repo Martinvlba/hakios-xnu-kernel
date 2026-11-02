@@ -223,6 +223,11 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
         # Darwin userland 16 keeps its power log -- com.apple.powerlog.plxpclogger.xpc and the rest -- that Settings > Battery
         # waits for; it now runs through a session.)
         'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced',
+        # vmd (Visual Voicemail) asks CoreTelephony for the subscriptions over and over, and without CommCenter (denied
+        # above) it never gets an answer: one whole core at rest, all the time, and a third of another in launchd answering
+        # its lookups (cputop on the Pixel 8a: vmd 96%, launchd 34%, with the phone doing nothing). Voicemail needs the
+        # cellular side anyway.
+        'com.apple.voicemail.vmd',
         # fairplayd.H2 exits 0 as it starts (it wants com_apple_driver_FairPlayIOKitUserClient, see above), and what
         # waits for it is relaunched for every ten seconds and never answered: a caller that waits in mach_msg waits
         # for ever. Settings > General > iPhone Storage is one (AirFair.syncBundle, through AirTrafficDevice, on the
