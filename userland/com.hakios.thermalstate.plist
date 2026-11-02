@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.thermalstate</string>
+	<!-- iOS's thermal pressure level from the kernel's sensors (src/thermal_state.c), in thermalmonitord's place; with
+	     thermal=1 among the kernel's arguments, else it ends at once. As root: a com.apple.system key is root's. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/thermal_state</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>
