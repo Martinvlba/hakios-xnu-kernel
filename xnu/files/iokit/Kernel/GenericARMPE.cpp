@@ -322,6 +322,8 @@ static bool gBootEpochKnown;
  * the loader said; drivers/core/hakios.stubs.c answers 0 for a kernel without such a driver.
  */
 extern "C" uint64_t hakios_rtc_epoch(void);
+/* ... and told when the time is set, so that it keeps it over a restart (hakios.stubs.c: nothing) */
+extern "C" void hakios_rtc_set(uint64_t epoch);
 
 static void
 findBootEpoch(void)
@@ -376,6 +378,9 @@ GenericARMPE::setGMTTimeOfDay(long secs)
 	clock_get_system_microtime(&uptime, &usecs);
 	gBootEpoch = secs - (long) uptime;
 	gBootEpochKnown = true;
+	if (secs > 0) {
+		hakios_rtc_set((uint64_t) secs);
+	}
 }
 
 /* Device-tree nodes to drop entirely. */

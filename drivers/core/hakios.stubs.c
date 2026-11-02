@@ -68,6 +68,8 @@ void hakios_battery_report(__unused const struct hakios_battery_state *state) {}
 #if !defined(HAKIOS_AKITA_RTC)
 uint64_t hakios_rtc_epoch(void);
 uint64_t hakios_rtc_epoch(void) { return 0; }
+void hakios_rtc_set(uint64_t epoch);
+void hakios_rtc_set(__unused uint64_t epoch) {}
 #endif
 
 #ifndef HAKIOS_CPUFREQ
