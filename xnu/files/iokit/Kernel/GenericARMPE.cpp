@@ -307,14 +307,21 @@ GenericARMPE::start(IOService * provider)
 }
 
 /*
- * The time of day. There is no driver for a real-time clock here; whoever started the kernel
- * says what time it was then -- the boot-arg epoch= (seconds since 1970, put there by the
- * host scripts) or, failing that, the property boot-epoch of /chosen (the loader, from the
- * firmware's clock) -- and the kernel's own timer counts from there. Without either the
- * calendar starts in 1970, as before.
+ * The time of day. Whoever started the kernel may say what time it was then -- the boot-arg
+ * epoch= (seconds since 1970, put there by the host scripts) or, failing that, the property
+ * boot-epoch of /chosen (the loader, from the firmware's clock) -- else a device's own
+ * real-time clock is asked (hakios_rtc_epoch, where there is a driver), and the kernel's own
+ * timer counts from there. Without any of them the calendar starts in 1970, as before.
  */
 static long gBootEpoch;         /* the calendar time at which the system timer read zero */
 static bool gBootEpochKnown;
+
+/*
+ * A device's own real-time clock, if its kernel has a driver for one (the Pixel 8a's PMIC RTC through ACPM:
+ * devices/akita/drivers/power/hakios.akita_rtc.c): seconds since 1970, UTC, or 0. Asked last, when neither epoch= nor
+ * the loader said; drivers/core/hakios.stubs.c answers 0 for a kernel without such a driver.
+ */
+extern "C" uint64_t hakios_rtc_epoch(void);
 
 static void
 findBootEpoch(void)
@@ -333,6 +340,9 @@ findBootEpoch(void)
 			memcpy(&epoch, data->getBytesNoCopy(), sizeof(epoch));
 		}
 		OSSafeReleaseNULL(chosen);
+	}
+	if (epoch == 0) {
+		epoch = hakios_rtc_epoch();
 	}
 	if (epoch != 0) {
 		clock_sec_t secs;
