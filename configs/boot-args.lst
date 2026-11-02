@@ -290,6 +290,7 @@ ustacks_tname	k
 var_hfs	u
 var_save_ms	k
 var_store	u
+var_sync_s	k
 vblur	u
 virtio_blk	k
 virtio_input	k

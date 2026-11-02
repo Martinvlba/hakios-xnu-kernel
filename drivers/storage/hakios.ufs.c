@@ -863,6 +863,30 @@ ufs_data_ioctl(u_long cmd, caddr_t data)
 	}
 }
 
+/*
+ * The data volume's writes, made to last: every write that reaches this driver is on the flash when it returns (the
+ * loader reads it back), and HFS's own syncer writes its journal and metadata a moment after they change -- but a
+ * file's data stays in the page cache until somebody syncs, and on this phone nobody does (macOS's periodic sync has
+ * no counterpart here). A run that ends without the way back to the loader -- a panic, Power + Volume Down, the
+ * battery -- lost everything written since: lockdownd's pair record (a new file in /private/var/root/Library/Lockdown)
+ * was gone after a panic seven minutes after pairing, and the computer had to be trusted again. So once the data volume
+ * is open for writing, the kernel's own sync (sync_internal, what power management calls) every var_sync_s seconds
+ * (10; 0: never).
+ */
+extern int sync_internal(void);
+static uint32_t ufs_var_sync_s = 10;
+static bool ufs_var_syncer;
+
+static void
+ufs_var_sync_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	printf("hakios-ufs: the data volume is open for writing: synced every %u s\n", ufs_var_sync_s);
+	for (;;) {
+		delay_for_interval(ufs_var_sync_s * 1000, NSEC_PER_MSEC);
+		sync_internal();
+	}
+}
+
 /* ---- the devices ---- */
 
 static int
@@ -876,6 +900,15 @@ ufs_open(dev_t dev, int flags, __unused int devtype, __unused proc_t p)
 				return EBUSY;   /* a saver is writing the packed store into darwin */
 			}
 			ufs_data_used = true;
+			if (!ufs_var_syncer) {
+				thread_t thread;
+
+				ufs_var_syncer = true;
+				PE_parse_boot_argn("var_sync_s", &ufs_var_sync_s, sizeof(ufs_var_sync_s));
+				if (ufs_var_sync_s && kernel_thread_start(ufs_var_sync_thread, NULL, &thread) == KERN_SUCCESS) {
+					thread_deallocate(thread);
+				}
+			}
 			lck_mtx_unlock(&ufs_write_mtx);
 		}
 		return 0;

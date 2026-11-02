@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 351 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 352 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -165,7 +165,7 @@ CONFIG_HAKIOS_WIFI=y
 # CONFIG_XPCPROXY_IDVERSION is not set
 
 #
-# Storage and APFS (45)
+# Storage and APFS (46)
 #
 
 # the phone's storage: 1 a survey, read only; 2 the loader's block service, through which the kernel reads it (the ...
@@ -299,6 +299,9 @@ CONFIG_UFS=2
 
 # read by hakios.ufs.c (kernel)
 # CONFIG_VAR_SAVE_MS is not set
+
+# read by hakios.ufs.c (kernel)
+# CONFIG_VAR_SYNC_S is not set
 
 # read by hakios.virtio_blk.c (kernel)
 # CONFIG_VIRTIO_BLK is not set
