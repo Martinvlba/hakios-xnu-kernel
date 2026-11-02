@@ -101,7 +101,7 @@ CONFIG_HAKIOS_WIFI=y
 # CPU, memory and boot (21)
 #
 
-# CPU cores the kernel uses, 1 to 8; one if not set
+# CPU cores the kernel uses, 1 to 16 (MAX_CPUS); one if not set
 # CONFIG_CPUS is not set
 
 # the core the kernel runs on, 0 to 7; 7 is the biggest core (the loader keeps core 0)

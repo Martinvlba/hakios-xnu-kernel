@@ -49,7 +49,7 @@ SYMBOLS = [
     ("SOC", "meta", None, "the SoC family (sc7280: SM7325, QCM6490); it is part of the kernel's version string", None, None),
     ("FIRMWARE", "meta", None, "\"device\": options may use firmware pulled from your own phone (fw-*/); \"none\": the open "
                                "configuration, nothing of the phone's own is loaded", None, None),
-    ("CPUS", "int", "cpus", "CPU cores the kernel uses, 1 to 8; one if not set", None, None),
+    ("CPUS", "int", "cpus", "CPU cores the kernel uses, 1 to 16 (MAX_CPUS); one if not set", None, None),
     ("BOOTCPU", "int", "bootcpu", "the core the kernel runs on, 0 to 7; 7 is the biggest core (the loader keeps core 0)", None, None),
     ("CPUFREQ", "bool", "cpufreq", "set the boot core to its top speed", None, None),
     ("UFS", "int", "ufs", "the phone's storage: 1 a survey, read only; 2 the loader's block service, through which the kernel "
@@ -326,7 +326,7 @@ def symbols_for(root, files):
         return [s for s in SYMBOLS if not (s[0] in DRIVER_BY_SYMBOL and DRIVER_BY_SYMBOL[s[0]].origin)]
     return SYMBOLS
 FIRMWARE_VALUES = ("device", "none")
-RANGES = {"CPUS": (1, 8), "BOOTCPU": (0, 7), "UFS": (1, 2), "THERMAL_POLL": (200, 60000), "THERMAL_STOP": (0, 160), "BATTERY_STOP": (0, 99), "BATTERY_STOP_POLL": (5, 600)}
+RANGES = {"CPUS": (1, 16), "BOOTCPU": (0, 7), "UFS": (1, 2), "THERMAL_POLL": (200, 60000), "THERMAL_STOP": (0, 160), "BATTERY_STOP": (0, 99), "BATTERY_STOP_POLL": (5, 600)}
 
 
 # ---- reading and writing --------------------------------------------------------------------------------------
