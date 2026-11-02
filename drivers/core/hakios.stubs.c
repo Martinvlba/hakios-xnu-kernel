@@ -64,6 +64,12 @@ int hakios_battery_temperature(void) { return -273; }      /* "not known", as th
 void hakios_battery_report(__unused const struct hakios_battery_state *state) {}
 #endif
 
+/* a device's real-time clock, asked by GenericARMPE for the time of day: none, "not known" */
+#if !defined(HAKIOS_AKITA_RTC)
+uint64_t hakios_rtc_epoch(void);
+uint64_t hakios_rtc_epoch(void) { return 0; }
+#endif
+
 #ifndef HAKIOS_CPUFREQ
 void hakios_cpufreq_init(void) {}
 void hakios_ddr_quiesce(void) {}
