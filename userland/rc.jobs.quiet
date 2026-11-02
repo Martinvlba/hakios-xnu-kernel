@@ -1,0 +1,3 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist): none. For a phone that runs Darwin as
+# its system (the Pixel 8a's boot_b), where the default rc.jobs's test programs would run at every start -- cpu_test 240
+# among them, which loads every core four minutes in. RC_JOBS=rc.jobs.quiet.
