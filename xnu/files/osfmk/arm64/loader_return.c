@@ -73,6 +73,7 @@ static uint64_t loader_l1[512] __attribute__((aligned(4096)));
 static uint64_t loader_l2[512] __attribute__((aligned(4096)));
 
 static uint32_t loader_log_ring_at;      /* where the next character goes in the ring */
+static uint64_t loader_log_total;        /* characters ever written: what loader_log_copy() counts by */
 static bool     loader_log_wrapped;
 static bool     loader_log_linear;       /* the pieces have been put in order: only appending from now on */
 static char     loader_log_scratch[LOADER_LOG_RING];
@@ -139,6 +140,9 @@ loader_log_line(const char *line)
 static void
 loader_log_put_locked(char c)
 {
+	if (!loader_log_linear) {
+		loader_log_total++;
+	}
 	if (loader_log_linear || loader_log_len < LOADER_LOG_HEAD) {
 		if (loader_log_len < LOADER_LOG_SIZE) {
 			loader_log[loader_log_len++] = c;
@@ -153,6 +157,46 @@ loader_log_put_locked(char c)
 			loader_log_len = LOADER_LOG_HEAD + loader_log_ring_at;
 		}
 	}
+}
+
+/*
+ * The console log while the kernel runs, for a reader that follows it (the Pixel 8a's usbmux serves it on its port 1):
+ * the characters from number *cursor on (0: the first ever written), up to max of them, into out; *cursor is moved past
+ * them. Character i lies in the head while i < LOADER_LOG_HEAD, else in the ring at (i - HEAD) % RING, as long as no
+ * more than a ring's worth has come after it; older ones are gone, and the copy goes on from the oldest still there.
+ * Nothing once the log has been put in order for the loader (the way out). Taken under the log's lock.
+ */
+size_t loader_log_copy(uint64_t *cursor, char *out, size_t max);
+
+size_t
+loader_log_copy(uint64_t *cursor, char *out, size_t max)
+{
+	uint64_t daif, i, total;
+	bool locked = false;
+	size_t n = 0;
+
+	daif = __builtin_arm_rsr64("DAIF");
+	__builtin_arm_wsr("DAIFSet", DAIFSC_IRQF | DAIFSC_FIQF);
+	for (uint32_t tries = 0; !locked && tries < 10000000; tries++) {
+		locked = os_atomic_cmpxchg(&loader_log_lock, 0, 1, acquire);
+	}
+	total = loader_log_total;
+	i = *cursor;
+	if (!loader_log_linear) {
+		if (i >= LOADER_LOG_HEAD && total - i > LOADER_LOG_RING) {
+			i = total - LOADER_LOG_RING;
+		}
+		for (; i < total && n < max; i++) {
+			out[n++] = i < LOADER_LOG_HEAD ? loader_log[i] :
+			    loader_log[LOADER_LOG_HEAD + (i - LOADER_LOG_HEAD) % LOADER_LOG_RING];
+		}
+		*cursor = i;
+	}
+	if (locked) {
+		os_atomic_store(&loader_log_lock, 0, release);
+	}
+	__builtin_arm_wsr64("DAIF", daif);
+	return n;
 }
 
 /* Oldest first: the head, a note about what was dropped, then the ring from its oldest character. */

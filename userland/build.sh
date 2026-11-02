@@ -118,6 +118,10 @@ DARWIN_JOBS=${JOBS-"
 # (Count a QEMU run log with its duplicate lines removed: run-darwin.sh prints launchd's log twice.)
 # WIFID=0 leaves it out.
 [ "${WIFID-1}" != 0 ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.wifid"
+# lockdownd, the daemon a computer talks to over USB (usbmuxd, Finder/iTunes): it is reached through launchd's own
+# sockets (TCP 62078, /var/run/lockdown.sock), not a Mach service, so --rest would never take it, and it has to be
+# named. For a phone whose kernel speaks usbmux on its USB port (the Pixel 8a: usbmux=1). LOCKDOWND=1 puts it in.
+[ "${LOCKDOWND-0}" != 0 ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.mobile.lockdown"
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libhakios.dylib, src/inject_sb.c is libhakios.sb.dylib, src/inject_media.c is
 # libhakios.media.dylib).

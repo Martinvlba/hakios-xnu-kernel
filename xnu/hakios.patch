@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..27cccab98c8e 100644
+index 44274016a4cf..896f1ef4ff45 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,51 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,56 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -170,11 +170,16 @@ index 44274016a4cf..27cccab98c8e 100644
 +bsd/dev/hakios.lx.c                      optional hakios_wifi
 +bsd/dev/hakios.sta.c                     optional hakios_wifi
 +bsd/dev/hakios.apple80211.c              optional hakios_wifi
++bsd/dev/hakios.akita_keys.c              optional hakios_akita_keys
++bsd/dev/hakios.akita_touch.c             optional hakios_akita_touch
++bsd/dev/hakios.akita_battery.c           optional hakios_akita_battery
++bsd/dev/hakios.akita_usb.c               optional hakios_akita_usb
++bsd/dev/hakios.akita_usbmux.c            optional hakios_akita_usb
 +# end of the HakiOS drivers
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +200,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +205,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -227,7 +232,7 @@ index 44274016a4cf..27cccab98c8e 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +452,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +457,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -235,7 +240,7 @@ index 44274016a4cf..27cccab98c8e 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +475,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +480,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -945,6 +950,76 @@ index 88adf2dda936..168384889bc1 100644
  	/*
  	 * We first evaluate policies that may deny the granting of
  	 * privilege unilaterally.
+diff --git a/bsd/kern/kern_proc.c b/bsd/kern/kern_proc.c
+index 407a18be752f..cd35bbb4f150 100644
+--- a/bsd/kern/kern_proc.c
++++ b/bsd/kern/kern_proc.c
+@@ -3306,12 +3306,15 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
+ 		size_t length;
+ 		struct cs_blob* blob;
+ 
++		/*
++		 * hakios: no signature is checked here, so no process is CS_VALID and no blob has the OSEntitlements object
++		 * the real AMFI makes for it: asked this way, every process had no entitlements at all, and user space's own
++		 * checks (Security's SecTask, XPC's, a framework testing itself -- lockdownd's RemotePairing refused to pair:
++		 * "Missing required entitlement com.apple.dt.remotepairing.pairingmanagement") all said no. The entitlements
++		 * written in the signature are given as they are instead, as the AMFI stand-in does for the kernel's own
++		 * questions (libkern/amfi/miniamfi_entitlements.cpp). A program without a signature still has none.
++		 */
+ 		proc_lock(pt);
+-		if ((proc_getcsflags(pt) & (CS_VALID | CS_DEBUGGED)) == 0) {
+-			proc_unlock(pt);
+-			error = EINVAL;
+-			goto out;
+-		}
+ 		blob = csproc_get_blob(pt);
+ 		proc_unlock(pt);
+ 
+@@ -3322,6 +3325,9 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
+ 
+ 		void* osent = csblob_os_entitlements_get(blob);
+ 		if (!osent) {
++			if (csblob_get_entitlements(blob, &start, &length) == 0 && start != NULL && length > 0) {
++				error = csops_copy_token(start, length, usize, uaddr);
++			}
+ 			goto out;
+ 		}
+ 		CS_GenericBlob* xmlblob = NULL;
+@@ -3341,12 +3347,8 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
+ 		size_t length;
+ 		struct cs_blob* blob;
+ 
++		/* hakios: as for CS_OPS_ENTITLEMENTS_BLOB above: the DER entitlements of the signature, CS_VALID or not */
+ 		proc_lock(pt);
+-		if ((proc_getcsflags(pt) & (CS_VALID | CS_DEBUGGED)) == 0) {
+-			proc_unlock(pt);
+-			error = EINVAL;
+-			goto out;
+-		}
+ 		blob = csproc_get_blob(pt);
+ 		proc_unlock(pt);
+ 
+@@ -3355,6 +3357,20 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
+ 			goto out;
+ 		}
+ 
++		{
++			const CS_GenericBlob *der = csblob_get_der_entitlements_unsafe(blob);
++			static int said;
++
++			if (der != NULL) {
++				if (said++ < 3) {
++					printf("hakios: csops: the DER entitlements of %s's signature, as they are (%u bytes)\n",
++					    pt->p_comm, ntohl(der->length));
++				}
++				error = csops_copy_token(der, ntohl(der->length), usize, uaddr);
++				goto out;
++			}
++		}
++
+ 		error = csblob_get_der_entitlements(blob, (const CS_GenericBlob **)&start, &length);
+ 		if (error || start == NULL) {
+ 			if (amfi && csblob_os_entitlements_get(blob)) {
 diff --git a/bsd/kern/kern_sig.c b/bsd/kern/kern_sig.c
 index ae4a5f33df1e..986b517dfd18 100644
 --- a/bsd/kern/kern_sig.c
@@ -977,6 +1052,25 @@ index 003cfb074a99..c597065f24f1 100644
  
  	if (sock == NULL) {
  		return EINVAL;
+diff --git a/bsd/kern/subr_log_stream.c b/bsd/kern/subr_log_stream.c
+index e994afaf0d8a..d80cdd8b4db1 100644
+--- a/bsd/kern/subr_log_stream.c
++++ b/bsd/kern/subr_log_stream.c
+@@ -653,7 +653,13 @@ log_stream_teardown(log_stream_t *ls)
+ 		kfree_data(ls->ls_buf, buf_size);
+ 	}
+ 	if (ls->ls_blk) {
+-		kfree_type(uint8_t, ls->ls_blk_count, ls->ls_blk);
++		/*
++		 * hakios: freed as it is allocated (kalloc_data in log_stream_init). Apple's kfree_type(uint8_t, ...) here passes
++		 * on a release kernel; this DEVELOPMENT one checks the heap and panicked at every close of the stream:
++		 * "kfree: ... size 128 found in heap data.* instead of *", in diagnosticd, when idevicesyslog (syslog_relay)
++		 * stopped on the Pixel 8a.
++		 */
++		kfree_data(ls->ls_blk, ls->ls_blk_count);
+ 	}
+ 	bzero(ls, sizeof(*ls));
+ }
 diff --git a/bsd/kern/sys_generic.c b/bsd/kern/sys_generic.c
 index 4ca22ee4371a..e95e618b4cb6 100644
 --- a/bsd/kern/sys_generic.c
@@ -1900,10 +1994,10 @@ index 83259ebf9835..8864e5c7cc41 100644
  DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
  endif
 diff --git a/iokit/conf/files b/iokit/conf/files
-index 5fb0a52062e0..7cfee3142b5b 100644
+index 5fb0a52062e0..6a237306ae02 100644
 --- a/iokit/conf/files
 +++ b/iokit/conf/files
-@@ -79,6 +79,17 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+@@ -79,6 +79,18 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
  iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
  
  iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
@@ -1915,6 +2009,7 @@ index 5fb0a52062e0..7cfee3142b5b 100644
 +iokit/Kernel/hakios.gpu.cpp              optional hakios_adreno iokitcpp
 +iokit/Kernel/hakios.battery.cpp          optional hakios_battery iokitcpp
 +iokit/Kernel/hakios.wlan.cpp             optional hakios_wifi iokitcpp
++iokit/Kernel/hakios.akita_usbmux_iokit.cpp optional hakios_akita_usb iokitcpp
 +# end of the HakiOS drivers
 +iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
 +iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp
@@ -2053,7 +2148,7 @@ index bc39e19b3b8e..0a72a2d43908 100644
  ifeq ($(origin HOST_CODESIGN_ALLOCATE),undefined)
  	export HOST_CODESIGN_ALLOCATE	:= $(shell $(XCRUN) -sdk $(HOST_SDKROOT) -find codesign_allocate)
 diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
-index 5bd6f23dd10c..252d50062da4 100644
+index 5bd6f23dd10c..49f09188d009 100644
 --- a/makedefs/MakeInc.def
 +++ b/makedefs/MakeInc.def
 @@ -60,7 +60,7 @@ MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101			-mcpu=apple-a14
@@ -2077,6 +2172,15 @@ index 5bd6f23dd10c..252d50062da4 100644
  # Link opensource binary library
  ifneq ($(filter T6000 T8101 VMAPPLE T6000 T8101 VMAPPLE,$(CURRENT_MACHINE_CONFIG)),)
  	LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
+@@ -1088,7 +1091,7 @@ STRIP_FLAGS	= $($(addsuffix $(CURRENT_KERNEL_CONFIG),STRIP_FLAGS_))
+ #
+ # dsymutil flags
+ #
+-DSYMUTIL_FLAGS_GEN	= --minimize
++DSYMUTIL_FLAGS_GEN	= 
+ 
+ DSYMUTIL_FLAGS_X86_64	= --arch=x86_64
+ DSYMUTIL_FLAGS_X86_64H	= --arch=x86_64h
 diff --git a/makedefs/MakeInc.top b/makedefs/MakeInc.top
 index 0316792a3f42..b9c195b09cd1 100644
 --- a/makedefs/MakeInc.top
