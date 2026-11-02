@@ -258,6 +258,7 @@ USTACKS_THREADS	arg	ustacks_threads	Debugging	k	user_exception_trace.c
 USTACKS_TNAME	arg	ustacks_tname	Debugging	k	user_exception_trace.c	
 VAR_HFS	arg	var_hfs	User space	u	init.c	
 VAR_SAVE_MS	arg	var_save_ms	Storage and APFS	k	hakios.ufs.c	
+VAR_SYNC_S	arg	var_sync_s	Storage and APFS	k	hakios.ufs.c	
 VBLUR	arg	vblur	GPU and display	u	eagl.c	
 VIRTIO_BLK	arg	virtio_blk	Storage and APFS	k	hakios.virtio_blk.c	
 VIRTIO_INPUT	arg	virtio_input	Touch and buttons	k	hakios.virtio_input.c	
