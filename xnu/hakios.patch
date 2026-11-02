@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..c300712984bc 100644
+index 44274016a4cf..0d78b140a9e9 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,60 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,61 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -177,13 +177,14 @@ index 44274016a4cf..c300712984bc 100644
 +bsd/dev/hakios.akita_thermal.c           optional hakios_akita_thermal
 +bsd/dev/hakios.akita_dvfs.c              optional hakios_akita_dvfs
 +bsd/dev/hakios.akita_rtc.c               optional hakios_akita_rtc
++bsd/dev/hakios.akita_power.c             optional hakios_akita_power
 +bsd/dev/hakios.akita_usb.c               optional hakios_akita_usb
 +bsd/dev/hakios.akita_usbmux.c            optional hakios_akita_usb
 +# end of the HakiOS drivers
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +209,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +210,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -236,7 +237,7 @@ index 44274016a4cf..c300712984bc 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +461,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +462,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -244,7 +245,7 @@ index 44274016a4cf..c300712984bc 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +484,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +485,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -1559,10 +1560,28 @@ index d0476214e5f0..c81cadfab1d4 100644
  	if (dq->dq_id == 0) {
  		dq->dq_flags &= ~DQ_MOD;
 diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
-index f64d8c647365..f2e13c1aa7f3 100644
+index f64d8c647365..f0034b22afc5 100644
 --- a/bsd/vfs/vfs_subr.c
 +++ b/bsd/vfs/vfs_subr.c
-@@ -10995,7 +10995,7 @@ rmdir_remove_orphaned_appleDouble(vnode_t vp, vfs_context_t ctx, int * restart_f
+@@ -4049,6 +4049,17 @@ unmount_callback(mount_t mp, void *arg)
+ 	    && ((mp->mnt_flag & MNT_ROOTFS) || (mp->mnt_kern_flag & MNTK_SYSTEM))) { //MNTK_BACKS_ROOT
+ 		printf("unmount(%d) %s skipped\n", uip->u_only_non_system, mntname);
+ 		mount_iterdrop(mp);     // VFS_ITERATE_CB_DROPREF
++	} else if (!uip->u_only_non_system && ((mp->mnt_flag & MNT_RDONLY) ||
++	    strcmp(mp->mnt_vfsstat.f_fstypename, "devfs") == 0)) {
++		/*
++		 * hakios: on the way down, the system's last pass leaves devfs and every read-only file system mounted. Forced off,
++		 * /dev and then the read-only root never came back on the Pixel 8a -- iOS's Shut Down and Restart hung here, inside
++		 * dounmount, before the file system was even asked -- and neither holds anything to write: every file system with
++		 * data was unmounted in the pass before this one (the data volume among them).
++		 */
++		printf("unmount(%d) %s left mounted (%s)\n", uip->u_only_non_system, mntname,
++		    (mp->mnt_flag & MNT_RDONLY) ? "read-only" : "devfs");
++		mount_iterdrop(mp);     // VFS_ITERATE_CB_DROPREF
+ 	} else {
+ 		printf("unmount(%d) %s\n", uip->u_only_non_system, mntname);
+ 
+@@ -10995,7 +11006,7 @@ rmdir_remove_orphaned_appleDouble(vnode_t vp, vfs_context_t ctx, int * restart_f
  	uio_t auio = NULL;
  	int eofflag, siz = UIO_BUFF_SIZE, alloc_size = 0, nentries = 0;
  	int open_flag = 0, full_erase_flag = 0;
@@ -2500,30 +2519,37 @@ index 94e91306b143..0ec1323086b7 100644
  #endif
  
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index e76e7e70ab9c..828a51171c7e 100644
+index e76e7e70ab9c..3f8e9a343373 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -734,6 +734,9 @@ ml_get_machine_mem(void)
+@@ -734,6 +734,15 @@ ml_get_machine_mem(void)
  	return machine_info.memory_size;
  }
  
 +extern void loader_return(void);
 +extern void hakios_adreno_stop(void);
++/*
++ * A device that can power itself off or restart (the Pixel 8a: PSCI SYSTEM_OFF, a reset into the active slot):
++ * devices/akita/drivers/power/hakios.akita_power.c. Returns when it does not (drivers/core/hakios.stubs.c), and the way
++ * back to the loader is taken as before.
++ */
++extern void hakios_platform_halt(int reboot);
 +
  __attribute__((noreturn))
  void
  halt_all_cpus(boolean_t reboot)
-@@ -745,6 +748,9 @@ halt_all_cpus(boolean_t reboot)
+@@ -745,6 +754,10 @@ halt_all_cpus(boolean_t reboot)
  		printf("CPU halted\n");
  		PEHaltRestart(kPEHaltCPU);
  	}
-+	/* No platform driver powers the machine off: hand control (and the log) back to the loader. */
++	/* the device's own power off or restart, if it has one; else hand control (and the log) back to the loader */
++	hakios_platform_halt(reboot ? 1 : 0);
 +	hakios_adreno_stop();
 +	loader_return();
  	while (1) {
  		;
  	}
-@@ -932,6 +938,99 @@ ml_read_chip_revision(unsigned int *rev __unused)
+@@ -932,6 +945,99 @@ ml_read_chip_revision(unsigned int *rev __unused)
  #endif
  }
  
@@ -2623,7 +2649,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  void
  ml_parse_cpu_topology(void)
  {
-@@ -945,6 +1044,7 @@ ml_parse_cpu_topology(void)
+@@ -945,6 +1051,7 @@ ml_parse_cpu_topology(void)
  	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
  	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
  	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
@@ -2631,7 +2657,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  
  	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
  	// so that we trigger a panic later in the boot process, once serial is enabled.
-@@ -1005,6 +1105,20 @@ ml_parse_cpu_topology(void)
+@@ -1005,6 +1112,20 @@ ml_parse_cpu_topology(void)
  		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
  
  		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
@@ -2652,7 +2678,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
  		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
  		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
-@@ -1107,6 +1221,7 @@ ml_parse_cpu_topology(void)
+@@ -1107,6 +1228,7 @@ ml_parse_cpu_topology(void)
  	cluster_offsets[0] = 0;
  #endif
  	assert(topology_info.boot_cpu != NULL);
@@ -2660,7 +2686,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  	ml_read_chip_revision(&topology_info.chip_revision);
  
  	/*
-@@ -1427,17 +1542,15 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
+@@ -1427,17 +1549,15 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
  	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
  	if (!is_boot_cpu) {
  		processor_init(processor, this_cpu_datap->cpu_number, pset);
@@ -2686,7 +2712,7 @@ index e76e7e70ab9c..828a51171c7e 100644
  
  	*processor_out = processor;
  	*ipi_handler_out = cpu_signal_handler;
-@@ -2237,8 +2350,16 @@ _enable_virtual_timer(void)
+@@ -2237,8 +2357,16 @@ _enable_virtual_timer(void)
  	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
  
  	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);

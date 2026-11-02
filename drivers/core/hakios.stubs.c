@@ -72,6 +72,12 @@ void hakios_rtc_set(uint64_t epoch);
 void hakios_rtc_set(__unused uint64_t epoch) {}
 #endif
 
+/* the way down (osfmk/arm64/machine_routines.c halt_all_cpus): no power off of the device's own, back to the loader */
+#if !defined(HAKIOS_AKITA_POWER)
+void hakios_platform_halt(int reboot);
+void hakios_platform_halt(__unused int reboot) {}
+#endif
+
 #ifndef HAKIOS_CPUFREQ
 void hakios_cpufreq_init(void) {}
 void hakios_ddr_quiesce(void) {}
