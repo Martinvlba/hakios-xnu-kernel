@@ -140,7 +140,7 @@ try:
     refusal("a firmware option in the open profile is refused", 'CONFIG_FIRMWARE="none"\nCONFIG_GPU=y\n', "needs the phone's own firmware")
     refusal("a missing dependency is refused (modem without ufs=2)", "CONFIG_MODEM=y\nCONFIG_UFS=1\n", "requires CONFIG_UFS=2")
     refusal("var_store without ufs_write is refused", "CONFIG_VAR_STORE=y\n", "requires CONFIG_UFS_WRITE")
-    refusal("cpus out of range", "CONFIG_CPUS=9\n", "CONFIG_CPUS is 1 to 8")
+    refusal("cpus out of range", "CONFIG_CPUS=17\n", "CONFIG_CPUS is 1 to 16")
     refusal("a hex that is not hex", "CONFIG_UFS=2\nCONFIG_MODEM=y\nCONFIG_MODEM_BUFFER=a8000000\n", "starts with 0x")
     refusal("a bool that is not y", "CONFIG_GPU=1\n", "is a bool: y, or not set")
     refusal("a string without quotes", "CONFIG_DEVICE=redwood\n", "string in quotes")

@@ -609,8 +609,8 @@ static const struct platform platform_akita = {
 	 * clock unit (0x26040000), as U-Boot's exynos-mobile maps it, made larger.
 	 *
 	 * Nine cores, numbered in MPIDR's second affinity field: 0-3 Cortex-A510 (capacity-dmips-mhz 0xc1), 4-7
-	 * Cortex-A715 (0x39f), 8 the Cortex-X3 (0x400). The kernel is built for eight (MAX_CPUS, BCM2837's board
-	 * configuration), so the X3 is left out.
+	 * Cortex-A715 (0x39f), 8 the Cortex-X3 (0x400). All nine are offered (cpus=9); the kernel is built for up to
+	 * sixteen (MAX_CPUS, BCM2837's board configuration). Until 2026-11-02 it was built for eight and the X3 was left out.
 	 *
 	 * The arch timer's node gives clock-frequency = <24576000>: that property is there when the firmware does not
 	 * set CNTFRQ_EL0 (Linux takes the property over the register), so the loader does the same.
@@ -619,7 +619,7 @@ static const struct platform platform_akita = {
 	 */
 	.name = "akita", .io_base = 0x10000000, .io_size = 0x20000000,
 	.gic_dist = 0x10400000, .gic_redist = 0x10440000, .gic_redist_size = 0x200000, .uart = 0,
-	.cores = 8, .core_shift = 8,
+	.cores = 9, .core_shift = 8,
 	.small_cores = 0x0f,
 	.timer_hz = 24576000,
 	/* HakiOS's U-Boot keeps cluster 0's watchdog counting as a net (hakios wdt), about 2.5 minutes: fed while the loader waits */
@@ -3790,7 +3790,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * 6, 5, 4, then the small ones 3, 2, 1). Only cores that are off are listed: the one
 	 * this loader stays on while it watches is not the kernel's, nor any the firmware runs.
 	 */
-	uint64_t cpu_mpidr[8] = { kernel_mpidr };
+	uint64_t cpu_mpidr[16] = { kernel_mpidr };      /* (plat->cores at most: nine on the Pixel 8a) */
 	int cpu_count = 1, boot_core = (int)(kernel_mpidr >> plat->core_shift);
 
 	if (more_cores) {
