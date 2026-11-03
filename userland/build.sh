@@ -200,6 +200,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/cputop src/cputop.c
 		# iOS's thermal pressure level from the kernel's sensors, in thermalmonitord's place (com.hakios.thermalstate)
 		$DYN -o obj/thermal_state src/thermal_state.c
+		# the photos for a trusted computer over USB, as an iPhone's PTP storage (com.hakios.ptp; /dev/hakios-ptp)
+		$DYN -o obj/ptp_responder src/ptp_responder.c
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework IOSurface -o obj/cg_test src/cg_test.c
 		# what Darwin here believes about Metal, and what CoreImage does without it (src/metal_test.m);
@@ -292,6 +294,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/thermal_state ] && cp obj/thermal_state root/bin/
+	[ -f obj/ptp_responder ] && cp obj/ptp_responder root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
 	[ -f obj/shm_test ] && cp obj/shm_test root/bin/
@@ -399,7 +402,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# the system image, so mkjobs.py judges "is this daemon's program there" by the listing of the volume
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
-	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist root/LaunchDaemons/
+	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist com.hakios.ptp.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
