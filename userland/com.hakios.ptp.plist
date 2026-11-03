@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.ptp</string>
+	<!-- the phone's photos for a trusted computer over USB, as an iPhone's PTP "Internal Storage" (src/ptp_responder.c),
+	     through /dev/hakios-ptp (a kernel with a PTP interface: the Pixel 8a's usbmux=1). Waits for the node; root, as
+	     the node is root's. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/ptp_responder</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>
