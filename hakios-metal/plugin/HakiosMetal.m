@@ -42,6 +42,7 @@ static void
 say(NSString * text)
 {
 	NSLog(@"HakiosMetal: %@", text);
+	fprintf(stderr, "HakiosMetal: %s\n", [text UTF8String]);       /* (and to the console, which the log's flood does not bury) */
 }
 
 /* -initWithAcceleratorPort: the fifth step of how Metal finds a device. */
