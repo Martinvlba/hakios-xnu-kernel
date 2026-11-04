@@ -1,3 +1,5 @@
-# The Pixel 8a's GPU through HakiosGPU (boot-arg mali_keep=1): src/mali_test.c, a compute job submitted three times.
+# The Pixel 8a's GPU through HakiosGPU (boot-arg mali_keep=1): src/mali_test.c, a compute job submitted three times;
+# and Mesa 26.2.5's compiler on the phone itself (tools/mesa/pan, EXTRA=.../pan_compile_test).
 /redwood/bin/rwtouch wait 20
 /redwood/bin/mali_test 3
+/redwood/bin/pan_compile_test /private/var/tmp/store_index.h

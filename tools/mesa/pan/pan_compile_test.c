@@ -59,6 +59,14 @@ main(int argc, char **argv)
 	printf("pan_compile_test: %u bytes for arch %u; work registers %u, preload 0x%llx, FAU %u words, TLS %u, WLS %u\n",
 	    (unsigned)binary.size, pan_arch(GPU_ID), info.work_reg_count, (unsigned long long)info.preload, info.fau.count,
 	    info.tls_size, info.wls_size);
+	{
+		uint32_t h = 2166136261u;       /* FNV-1a of the binary: the host's and the phone's compiles compared */
+
+		for (unsigned i = 0; i < binary.size; i++) {
+			h = (h ^ ((unsigned char *)binary.data)[i]) * 16777619u;
+		}
+		printf("pan_compile_test: the binary's FNV-1a 0x%08x\n", h);
+	}
 	pan_disassemble(stdout, binary.data, binary.size, GPU_ID, false);
 
 	out = fopen(argv[1], "w");
