@@ -21,6 +21,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "mali_store_index.h"      /* Mesa 26.2.5's panfrost compiler for this GPU: tools/mesa/pan/pan_compile_test.c */
+
 struct obj_array { uint32_t stride, count; uint64_t array; };
 struct sync_op { uint32_t flags, handle; uint64_t timeline_value; };
 struct dev_query { uint32_t type, size; uint64_t pointer; };
@@ -237,6 +239,70 @@ main(int argc, char **argv)
 			usleep(200000);
 			printf("mali_test: round %d: 200 ms later: 0x%08x 0x%08x 0x%08x 0x%08x\n", round, target[12], target[8],
 			    target[0], target[4]);
+		}
+	}
+	/*
+	 * Then a shader compiled by Mesa's own compiler (store_index: invocation i stores 3 * i + 7 into buffer[i]): its
+	 * descriptor as the compiler's facts say (32 or 64 registers a thread, the preload of r48..r63 -- r60, the global
+	 * invocation ID), 4 workgroups of 64, and the 256 words checked.
+	 */
+	{
+		volatile uint32_t *out = &data[0x1000 / 4];
+		uint64_t *s = (uint64_t *)&data[0x2000 / 4];
+		unsigned int n = 0, right = 0;
+		struct syncobj_create sc = { 0 };
+		struct sync_op signal;
+		struct queue_submit qs;
+		struct group_submit gs;
+		struct syncobj_wait w;
+
+		memcpy(code + 0x100, store_index_shader, sizeof(store_index_shader));
+		memset((void *)&data[0x200 / 4], 0, 0x100);
+		data[0x200 / 4] = 8 | 1 << 4 | (STORE_INDEX_WORK_REGS <= 32 ? 2u : 0u) << 30;   /* shader program */
+		data[0x200 / 4 + 1] = (uint32_t)(STORE_INDEX_PRELOAD >> 48);                    /* preload r48..r63 */
+		data[0x200 / 4 + 2] = (uint32_t)(CODE_VA + 0x100);
+		data[0x240 / 4 + 1] = 31;                                                       /* local storage */
+		*(uint64_t *)&data[0x280 / 4] = DATA_VA + 0x1000;                               /* push constant 0 */
+		for (int i = 0; i < 256; i++) {
+			out[i] = 0xdeadbeef;
+		}
+		__asm__ volatile ("dsb sy" ::: "memory");
+		s[n++] = 28ULL << 56 | 0ULL << 32 | 3;
+		s[n++] = 28ULL << 56 | 9ULL << 32 | 0x8;
+		s[n++] = 28ULL << 56 | 1ULL << 32 | 0;
+		s[n++] = 28ULL << 56 | 2ULL << 32 | 1;
+		s[n++] = 28ULL << 56 | 8ULL << 32 | 0xf0;
+		s[n++] = 1ULL << 56 | 16ULL << 48 | (DATA_VA + 0x200);
+		s[n++] = 1ULL << 56 | 24ULL << 48 | (DATA_VA + 0x240);
+		s[n++] = 1ULL << 56 | 8ULL << 48 | (DATA_VA + 0x280);
+		s[n++] = 2ULL << 56 | 9ULL << 48 | (uint64_t)STORE_INDEX_FAU_WORDS / 2 << 24;  /* FAU count in 64-bit words */
+		s[n++] = 1ULL << 56 | 0ULL << 48;
+		s[n++] = 2ULL << 56 | 32ULL << 48;
+		s[n++] = 2ULL << 56 | 33ULL << 48 | 63;                                        /* workgroup 64x1x1 */
+		for (int r = 34; r <= 36; r++) {
+			s[n++] = 2ULL << 56 | (uint64_t)r << 48;
+		}
+		s[n++] = 2ULL << 56 | 37ULL << 48 | 4;                                         /* 4 workgroups along X */
+		s[n++] = 2ULL << 56 | 38ULL << 48 | 1;
+		s[n++] = 2ULL << 56 | 39ULL << 48 | 1;
+		s[n++] = 4ULL << 56 | 1;                                                        /* RUN_COMPUTE */
+		s[n++] = 3ULL << 56 | 0xffffULL << 16;                                          /* WAIT */
+		if (call(SYNCOBJ_CREATE, &sc, sizeof(sc), "a sync object") == 0) {
+			signal = (struct sync_op){ .flags = 1u << 31, .handle = sc.handle };
+			qs = (struct queue_submit){ .stream_size = n * 8, .stream_addr = DATA_VA + 0x2000,
+				.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal } };
+			gs = (struct group_submit){ .group_handle = gc.group_handle, .queue_submits = { sizeof(qs), 1,
+				(uint64_t)(uintptr_t)&qs } };
+			w = (struct syncobj_wait){ .handles = (uint64_t)(uintptr_t)&sc.handle, .timeout_nsec = 2000000000LL,
+				.count_handles = 1, .flags = 1 };
+			if (call(GROUP_SUBMIT, &gs, sizeof(gs), "the compiled shader's submission") == 0 &&
+			    call(SYNCOBJ_WAIT, &w, sizeof(w), "its wait") == 0) {
+				for (int i = 0; i < 256; i++) {
+					right += out[i] == (uint32_t)(3 * i + 7);
+				}
+			}
+			printf("mali_test: Mesa's compiled shader: %u of 256 words right (out[0] %u, out[1] %u, out[255] %u; "
+			    "3i+7 wanted)\n", right, out[0], out[1], out[255]);
 		}
 	}
 	{
