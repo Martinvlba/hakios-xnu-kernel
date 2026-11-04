@@ -18,6 +18,16 @@
 
 #include "compiler/shader_enums.h"
 
+/*
+ * Mesa 26 renamed what this frontend was written against (25.0.7): the stage type and its name function, the
+ * builder's exactness, two signatures. meson.build defines AIR_MESA_NEW_NIR for Mesa >= 26 (the Pixel 8a's Mali
+ * build, tools/mesa/pan); redwood's 25.0.7 build sees the old names unchanged.
+ */
+#ifdef AIR_MESA_NEW_NIR
+typedef mesa_shader_stage gl_shader_stage;
+#define gl_shader_stage_name mesa_shader_stage_name
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

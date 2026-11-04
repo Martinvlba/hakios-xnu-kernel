@@ -21,7 +21,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "mali_store_index.h"      /* Mesa 26.2.5's panfrost compiler for this GPU: tools/mesa/pan/pan_compile_test.c */
+#include "mali_store_index.h"
+#include "mali_air_fill_id.h"       /* AIR (hakios-metal's fill_id) -> tools/mesa/air -> Mesa's panfrost: tools/mesa/pan/air_pan.c */      /* Mesa 26.2.5's panfrost compiler for this GPU: tools/mesa/pan/pan_compile_test.c */
 
 struct obj_array { uint32_t stride, count; uint64_t array; };
 struct sync_op { uint32_t flags, handle; uint64_t timeline_value; };
@@ -303,6 +304,74 @@ main(int argc, char **argv)
 			}
 			printf("mali_test: Mesa's compiled shader: %u of 256 words right (out[0] %u, out[1] %u, out[255] %u; "
 			    "3i+7 wanted)\n", right, out[0], out[1], out[255]);
+		}
+	}
+	/*
+	 * And an Apple-format shader: fill_id, AIR bitcode (out[gid] = gid * 0x9E3779B1 + c; out is [[buffer(0)]], c in
+	 * [[buffer(1)]]) through our AIR front end and Mesa's compiler. Metal's buffers are addresses: buffer n's at push
+	 * constant words 2n, 2n+1 (16 buffers' worth of push constants).
+	 */
+	{
+		volatile uint32_t *out = &data[0x1400 / 4];
+		volatile uint32_t *c = &data[0x1800 / 4];
+		uint64_t *s = (uint64_t *)&data[0x2400 / 4];
+		uint64_t *fau = (uint64_t *)&data[0x300 / 4];
+		unsigned int n = 0, right = 0;
+		struct syncobj_create sc = { 0 };
+		struct sync_op signal;
+		struct queue_submit qs;
+		struct group_submit gs;
+		struct syncobj_wait w;
+
+		memcpy(code + 0x200, air_kernel_shader, sizeof(air_kernel_shader));
+		memset((void *)&data[0x380 / 4], 0, 0x80);
+		data[0x380 / 4] = 8 | 1 << 4 | (AIR_KERNEL_WORK_REGS <= 32 ? 2u : 0u) << 30;
+		data[0x380 / 4 + 1] = (uint32_t)(AIR_KERNEL_PRELOAD >> 48);
+		data[0x380 / 4 + 2] = (uint32_t)(CODE_VA + 0x200);
+		memset(fau, 0, 128);
+		fau[0] = DATA_VA + 0x1400;                       /* [[buffer(0)]]: out */
+		fau[1] = DATA_VA + 0x1800;                       /* [[buffer(1)]]: c */
+		*c = 0x1234;
+		for (int i = 0; i < 256; i++) {
+			out[i] = 0xdeadbeef;
+		}
+		__asm__ volatile ("dsb sy" ::: "memory");
+		s[n++] = 28ULL << 56 | 0ULL << 32 | 3;
+		s[n++] = 28ULL << 56 | 9ULL << 32 | 0x8;
+		s[n++] = 28ULL << 56 | 1ULL << 32 | 0;
+		s[n++] = 28ULL << 56 | 2ULL << 32 | 1;
+		s[n++] = 28ULL << 56 | 8ULL << 32 | 0xf0;
+		s[n++] = 1ULL << 56 | 16ULL << 48 | (DATA_VA + 0x380);
+		s[n++] = 1ULL << 56 | 24ULL << 48 | (DATA_VA + 0x240);
+		s[n++] = 1ULL << 56 | 8ULL << 48 | (DATA_VA + 0x300);
+		s[n++] = 2ULL << 56 | 9ULL << 48 | (uint64_t)(AIR_KERNEL_FAU_WORDS / 2) << 24;
+		s[n++] = 1ULL << 56 | 0ULL << 48;
+		s[n++] = 2ULL << 56 | 32ULL << 48;
+		s[n++] = 2ULL << 56 | 33ULL << 48 | 63;
+		for (int r = 34; r <= 36; r++) {
+			s[n++] = 2ULL << 56 | (uint64_t)r << 48;
+		}
+		s[n++] = 2ULL << 56 | 37ULL << 48 | 4;
+		s[n++] = 2ULL << 56 | 38ULL << 48 | 1;
+		s[n++] = 2ULL << 56 | 39ULL << 48 | 1;
+		s[n++] = 4ULL << 56 | 1;
+		s[n++] = 3ULL << 56 | 0xffffULL << 16;
+		if (call(SYNCOBJ_CREATE, &sc, sizeof(sc), "a sync object") == 0) {
+			signal = (struct sync_op){ .flags = 1u << 31, .handle = sc.handle };
+			qs = (struct queue_submit){ .stream_size = n * 8, .stream_addr = DATA_VA + 0x2400,
+				.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal } };
+			gs = (struct group_submit){ .group_handle = gc.group_handle, .queue_submits = { sizeof(qs), 1,
+				(uint64_t)(uintptr_t)&qs } };
+			w = (struct syncobj_wait){ .handles = (uint64_t)(uintptr_t)&sc.handle, .timeout_nsec = 2000000000LL,
+				.count_handles = 1, .flags = 1 };
+			if (call(GROUP_SUBMIT, &gs, sizeof(gs), "the AIR kernel's submission") == 0 &&
+			    call(SYNCOBJ_WAIT, &w, sizeof(w), "its wait") == 0) {
+				for (int i = 0; i < 256; i++) {
+					right += out[i] == (uint32_t)i * 0x9E3779B1u + 0x1234u;
+				}
+			}
+			printf("mali_test: the AIR kernel fill_id: %u of 256 words right (out[0] 0x%x, out[1] 0x%x, out[255] 0x%x)\n",
+			    right, out[0], out[1], out[255]);
 		}
 	}
 	{

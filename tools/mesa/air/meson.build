@@ -19,11 +19,16 @@ files_libair = files(
   'nir_air.h',
 )
 
+air_c_args = [no_override_init_args]
+if meson.project_version().version_compare('>=26')
+  air_c_args += '-DAIR_MESA_NEW_NIR'     # (nir_air.h: Mesa 26's names)
+endif
+
 libair = static_library(
   'air',
   files_libair,
   include_directories : [inc_include, inc_src],
-  c_args : [no_override_init_args],
+  c_args : air_c_args,
   gnu_symbol_visibility : 'hidden',
   dependencies : [idep_nir, idep_mesautil],
   build_by_default : false,
