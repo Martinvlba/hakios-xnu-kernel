@@ -1728,9 +1728,18 @@ publishAccelerator(IOService * provider)
 		 * Metal for the screen; until that device can draw, a screen drawn without it is the working one.
 		 */
 		if (PE_parse_boot_argn("metal", &metal, sizeof(metal)) && metal != 0) {
-			accelerator->setProperty("MetalPluginName", "HakiosMetal");
+			/*
+			 * metal_plugin=NAME: another name for it. A system root without the link
+			 * /System/Library/Extensions/HakiosMetal.bundle -> /redwood/lib/HakiosMetal.bundle (the Pixel 8a's,
+			 * installed on its flash before the link was in the image) is reached with
+			 * metal_plugin=../../../redwood/lib/HakiosMetal: Metal makes the bundle's path of this name.
+			 */
+			static char name[96] = "HakiosMetal";
+
+			PE_parse_boot_arg_str("metal_plugin", name, sizeof(name));
+			accelerator->setProperty("MetalPluginName", name);
 			accelerator->setProperty("MetalPluginClassName", "HakiosMetalDevice");
-			IOLog("MiniIOMobileFramebuffer: metal=1: the accelerator names HakiosMetal as its Metal plug-in\n");
+			IOLog("MiniIOMobileFramebuffer: metal=1: the accelerator names %s as its Metal plug-in\n", name);
 		}
 		accelerator->registerService();
 	}

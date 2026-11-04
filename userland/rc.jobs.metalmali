@@ -1,0 +1,4 @@
+# Metal on the Pixel 8a's Mali (boot-args mali_keep=1 metal=1; HAKIOS_METAL_OUT=ios-mali): metal_test's buffers and
+# blits through hakios-metal's Mali build and HakiosGPU.
+/redwood/bin/rwtouch wait 20
+/redwood/bin/metal_test
