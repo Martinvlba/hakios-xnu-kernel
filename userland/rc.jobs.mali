@@ -1,0 +1,3 @@
+# The Pixel 8a's GPU through HakiosGPU (boot-arg mali_keep=1): src/mali_test.c, a compute job submitted three times.
+/redwood/bin/rwtouch wait 20
+/redwood/bin/mali_test 3
