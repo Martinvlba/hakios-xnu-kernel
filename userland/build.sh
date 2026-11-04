@@ -202,6 +202,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/thermal_state src/thermal_state.c
 		# the photos for a trusted computer over USB, as an iPhone's PTP storage (com.hakios.ptp; /dev/hakios-ptp)
 		$DYN -o obj/ptp_responder src/ptp_responder.c
+		# the Pixel 8a's GPU through HakiosGPU, panthor's interface by hand (src/mali_test.c; rc.jobs.mali)
+		$DYN -framework CoreFoundation -framework IOKit -o obj/mali_test src/mali_test.c
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework IOSurface -o obj/cg_test src/cg_test.c
 		# what Darwin here believes about Metal, and what CoreImage does without it (src/metal_test.m);
@@ -295,6 +297,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/thermal_state ] && cp obj/thermal_state root/bin/
 	[ -f obj/ptp_responder ] && cp obj/ptp_responder root/bin/
+	[ -f obj/mali_test ] && cp obj/mali_test root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
 	[ -f obj/shm_test ] && cp obj/shm_test root/bin/
