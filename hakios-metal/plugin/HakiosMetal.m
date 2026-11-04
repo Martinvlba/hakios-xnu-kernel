@@ -59,10 +59,29 @@ deviceInit(id self, SEL _cmd, unsigned int port)
 	return self;
 }
 
+#ifdef HAKIOS_METAL_GPU
+#include "hakios-metal/hakios_metal.h"
+static hakios_metal_device *gpu(void);
+#endif
+
+/* what the GPU is, by its ID: arch 11 (GPU_ID's top nibble) the Pixel 8a's Mali-G715, else redwood's Adreno */
+static NSString *
+gpuName(void)
+{
+#ifdef HAKIOS_METAL_GPU
+	hakios_metal_device *g = gpu();
+
+	if (g != NULL && hakios_metal_gpu_id(g) >> 28 == 11) {
+		return @"Mali-G715";
+	}
+#endif
+	return @"Adreno 642L";
+}
+
 static id
 deviceName(__unused id self, __unused SEL _cmd)
 {
-	return @"HakiOS Adreno 642L (Metal: a device that exists, nothing more)";
+	return [NSString stringWithFormat:@"HakiOS %@ (Metal: buffers and blits so far)", gpuName()];
 }
 
 static uint64_t
@@ -134,7 +153,8 @@ gpu(void)
 #else
 		gGPU = hakios_metal_open();
 #endif
-		say(gGPU != NULL ? [NSString stringWithFormat:@"the GPU: Adreno %#llx, through hakios-metal", hakios_metal_gpu_id(gGPU)]
+		say(gGPU != NULL ? [NSString stringWithFormat:@"the GPU: %#llx (%s), through hakios-metal", hakios_metal_gpu_id(gGPU),
+		                       hakios_metal_gpu_id(gGPU) >> 28 == 11 ? "Mali-G715" : "Adreno"]
 		                 : [NSString stringWithFormat:@"no GPU (%s): buffers in plain memory, no command buffers", hakios_metal_error()]);
 	});
 	return gGPU;
