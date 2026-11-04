@@ -887,9 +887,9 @@ translate_binop(struct air_ctx *c, const struct air_inst *in)
     * instruction. Without the flags the arithmetic must not be reassociated,
     * so the builder is told to keep it exact.
     */
-   bool was_exact = c->b.exact;
+   bool was_exact = AIR_B_EXACT(c->b);
    if (is_float)
-      c->b.exact = !(in->flags & (AIR_FMF_UNSAFE_ALGEBRA | AIR_FMF_REASSOC));
+      AIR_B_SET_EXACT(c->b, !(in->flags & (AIR_FMF_UNSAFE_ALGEBRA | AIR_FMF_REASSOC)));
 
    switch (in->sub) {
    case AIR_BINOP_ADD: res = is_float ? nir_fadd(&c->b, x, y) : nir_iadd(&c->b, x, y); break;
@@ -906,10 +906,10 @@ translate_binop(struct air_ctx *c, const struct air_inst *in)
    case AIR_BINOP_OR: res = nir_ior(&c->b, x, y); break;
    case AIR_BINOP_XOR: res = nir_ixor(&c->b, x, y); break;
    default:
-      c->b.exact = was_exact;
+      AIR_B_SET_EXACT(c->b, was_exact);
       return air_error(c, "instruction: binary operator %u", in->sub);
    }
-   c->b.exact = was_exact;
+   AIR_B_SET_EXACT(c->b, was_exact);
    air_set(c, &in->base, air_val_ssa(c, res));
    return true;
 }
@@ -1276,7 +1276,7 @@ nir_block_of(struct air_ctx *c, const struct air_block *b)
    struct hash_entry *e = _mesa_hash_table_search(c->blocks, b);
    if (e)
       return e->data;
-   nir_block *n = nir_block_create(c->nir);
+   nir_block *n = AIR_BLOCK_CREATE(c->nir, c->b.impl);
    exec_list_push_tail(&c->b.impl->body, &n->cf_node.node);
    n->cf_node.parent = &c->b.impl->cf_node;
    _mesa_hash_table_insert(c->blocks, b, n);
@@ -2057,7 +2057,7 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
    }
    c.fn = fn;
 
-   c.nir = nir_shader_create(mem_ctx, stage, nir_options, NULL);
+   c.nir = AIR_SHADER_CREATE(mem_ctx, stage, nir_options);
    c.nir->info.name = ralloc_strdup(c.nir, fn->base.name ? fn->base.name : "air");
    c.nir->info.internal = false;
    c.fns = _mesa_pointer_hash_table_create(ctx);

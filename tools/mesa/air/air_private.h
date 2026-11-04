@@ -14,6 +14,18 @@
 #include "nir.h"
 #include "nir_builder.h"
 
+#ifdef AIR_MESA_NEW_NIR         /* (nir_air.h) */
+#define AIR_B_EXACT(b)                  (((b).fp_math_ctrl & nir_fp_exact) == nir_fp_exact)
+#define AIR_B_SET_EXACT(b, on)          ((b).fp_math_ctrl = (on) ? nir_fp_exact : nir_fp_fast_math)
+#define AIR_SHADER_CREATE(ctx, st, opt) nir_shader_create((ctx), (st), (opt))
+#define AIR_BLOCK_CREATE(shader, impl)  nir_block_create(impl)
+#else
+#define AIR_B_EXACT(b)                  ((b).exact)
+#define AIR_B_SET_EXACT(b, on)          ((b).exact = (on))
+#define AIR_SHADER_CREATE(ctx, st, opt) nir_shader_create((ctx), (st), (opt), NULL)
+#define AIR_BLOCK_CREATE(shader, impl)  nir_block_create(shader)
+#endif
+
 /* Where a pointer points. AIR's address spaces say which kind of memory;
  * which buffer, and the byte offset into it, the translator tracks itself
  * (docs/air.md section 3): no pointer in the corpus is ever stored to

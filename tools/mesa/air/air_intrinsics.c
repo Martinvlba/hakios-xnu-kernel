@@ -90,8 +90,8 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
    *handled = true;
 
    /* fast math is what every one of these means: Metal's "fast" library */
-   bool was_exact = c->b.exact;
-   c->b.exact = false;
+   bool was_exact = AIR_B_EXACT(c->b);
+   AIR_B_SET_EXACT(c->b, false);
 
    if (!strcmp(op, "fast_fabs") || !strcmp(op, "fabs")) {
       r = nir_fabs(&c->b, a[0]);
@@ -279,7 +279,7 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
    } else if (!strcmp(op, "convert")) {
       /* air.convert.<dst sign>.<dst type>.<src sign>.<src type> */
       if (n->num < 5) {
-         c->b.exact = was_exact;
+         AIR_B_SET_EXACT(c->b, was_exact);
          return air_error(c, "intrinsic: %s (a convert without both types)", op);
       }
       const struct air_type *dt = in->base.type;
@@ -303,7 +303,7 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
       *handled = false;
    }
 
-   c->b.exact = was_exact;
+   AIR_B_SET_EXACT(c->b, was_exact);
    if (!*handled)
       return true;
    if (!r)
