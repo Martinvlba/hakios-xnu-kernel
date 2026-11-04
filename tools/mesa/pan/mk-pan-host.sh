@@ -58,4 +58,11 @@ HM=${HAKIOS_METAL:-$(cd "$ROOT/.." && pwd)/hakios-metal}
 [ -f "$HM/tools/kernels/fill_id.ll" ] || HM=$HOME/akita/ref/hakios-metal
 llvm-as "$HM/tools/kernels/fill_id.ll" -o fill_id.bc
 ./air_pan fill_id.bc "" "$ROOT/userland/src/mali_air_fill_id.h"
+# hakios-metal's Mali blits (beside this repository): copy and fill shaders
+eval cc $FLAGS -c -o pan_blit_shaders.o "$ROOT/tools/mesa/pan/pan_blit_shaders.c"
+c++ -o pan_blit_shaders pan_blit_shaders.o -Wl,--start-group $LIBS -Wl,--end-group -lm -lpthread -lz -ldl
+if [ -d "$HM/src" ] && [ "$HM" != "$HOME/akita/ref/hakios-metal" ]; then
+	mkdir -p "$HM/src/mali"
+	./pan_blit_shaders "$HM/src/mali/blit_shaders.h"
+fi
 echo "mk-pan-host.sh: $B/build-host/pan_compile_test; userland/src/mali_store_index.h written"
