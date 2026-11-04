@@ -55,7 +55,7 @@ CORE      = src/pm4.cpp src/gpu.cpp src/command.cpp src/compute.cpp src/texture.
 HOST      = $(CORE) src/fake_gpu.cpp
 TESTS     = $(wildcard tests/*_test.cpp) tests/main.cpp
 
-.PHONY: test tsan asan check ios darwin clean sweep
+.PHONY: test tsan asan check ios ios-mali darwin clean sweep
 
 # (and the front end's archive: a test binary linked before the front end changed passed or failed for the old one)
 $(HOSTOUT)/tests: $(HOST) $(TESTS) $(wildcard include/hakios-metal/*.hpp) $(wildcard tests/fixtures/*.hpp) tests/test.hpp \
@@ -88,6 +88,15 @@ check: test
 # (the probe wants the fixtures, which want a host build of Mesa to be made again: with none here the library alone, which is what
 # the kernel's userland/build.sh links)
 ios: out/ios/libhakios-metal.a $(if $(wildcard $(IR3_CMDLINE_C)),out/ios/hakios-metal-probe)
+
+# The Pixel 8a's Mali-G715 (hakios-kernel devices/akita, HakiosGPU with panthor's interface): hakios_metal.h's subset the
+# plug-in uses today, by the Mali (src/mali/c_api_mali.cpp; its blit shaders from hakios-kernel's tools/mesa/pan)
+ios-mali: out/ios-mali/libhakios-metal.a
+
+out/ios-mali/libhakios-metal.a: src/mali/c_api_mali.cpp src/mali/blit_shaders.h include/hakios-metal/hakios_metal.h
+	@mkdir -p out/ios-mali/obj
+	$(IOS_CXX) $(IOS_CXXFLAGS) -Iinclude -c src/mali/c_api_mali.cpp -o out/ios-mali/obj/c_api_mali.o
+	rm -f $@ && $(IOS_AR) $@ out/ios-mali/obj/c_api_mali.o
 
 darwin: ios
 
