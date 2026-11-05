@@ -650,13 +650,15 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
       case 3:
          p.class = AIR_PTR_SHARED;
          rk = AIR_RESOURCE_THREADGROUP_BUFFER;
-         /* a threadgroup argument is sized at dispatch; its base is where the
-          * previous ones end, which only the runtime knows. One is all the
-          * corpus uses, so its base is zero and anything else is refused.
+         /* a threadgroup argument is sized at dispatch and starts past the
+          * static threadgroup arrays: its offset is set once plan_globals has
+          * laid those out (see air_to_nir). One is all the corpus uses, so
+          * anything else is refused.
           */
          if (index != 0)
             return air_error(c, "interface: a second threadgroup buffer (index %u)",
                              (unsigned)index);
+         c->tg_arg_param_plus1 = param + 1;
          break;
       default:
          return air_error(c, "interface: a buffer in address space %u", (unsigned)as);
@@ -2120,6 +2122,14 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
 
    if (!c.error[0])
       plan_globals(&c);
+   if (!c.error[0] && c.tg_arg_param_plus1 && c.params[c.tg_arg_param_plus1 - 1]) {
+      /* the threadgroup argument past the static arrays (at 0 the two would
+       * share their first bytes; hakios-metal's tg_arg is the test) */
+      unsigned base = ALIGN_POT(c.shared_size, 16);
+      c.params[c.tg_arg_param_plus1 - 1]->ptr.offset = base ? nir_imm_int(&c.b, base) : NULL;
+      c.info->has_threadgroup_arg = true;
+      c.info->threadgroup_arg_base = base;
+   }
    if (!c.error[0])
       materialise_globals(&c);
    if (!c.error[0])
