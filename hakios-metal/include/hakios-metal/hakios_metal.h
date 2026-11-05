@@ -511,6 +511,12 @@ int hakios_metal_cb_generate_mipmaps(hakios_metal_cb *cb, hakios_metal_texture *
  * until the command buffer completes, whatever the caller frees meanwhile. */
 int hakios_metal_cb_dispatch(hakios_metal_cb *cb, hakios_metal_kernel *kernel, const unsigned groups[3], const unsigned threads[3],
     hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count);
+/* dispatchThreads:threadsPerThreadgroup:: GRID threads in all, in threadgroups of THREADS, the last ones in each dimension
+ * cut short where GRID is not a multiple of THREADS (Metal's non-uniform threadgroups). The Mali build runs the whole
+ * threadgroups and its kernels return at once in a thread past GRID; the Adreno build takes only a GRID that is a
+ * multiple of THREADS. -1 with the reason, as hakios_metal_cb_dispatch. */
+int hakios_metal_cb_dispatch_threads(hakios_metal_cb *cb, hakios_metal_kernel *kernel, const unsigned grid[3], const unsigned threads[3],
+    hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count);
 /* the same with TEXTURES[n] at Metal texture index n for n < TEXTURE_COUNT (a sampled texture or an image, whichever the
  * kernel declared at n; NULL: nothing there) and SAMPLERS[m] at sampler index m for m < SAMPLER_COUNT. -1 with the reason:
  * a declared texture or sampler missing, a texture whose dimension or element class is not the kernel's, one made without

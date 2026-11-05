@@ -10,6 +10,14 @@
 //                   hakios-kernel's tools/mesa/pan/pan_blit_shaders.c), each after a WAIT for the one before, and is
 //                   submitted with a sync object; the queue's thread waits for it, sets the status, runs the callback
 //
+//   kernel          a compute function's AIR compiled by src/mali/compile_mali.c (AIR -> NIR -> Mesa's panfrost); its
+//                   code goes into a BO of the device the first time it is dispatched there
+//   dispatch        recorded among the blits, in order; at commit a shader program descriptor, push constants (the
+//                   buffers' addresses, the threadgroup's and the grid's sizes, the compiler's constants) and RUN_COMPUTE
+//
+// Kernels and buffers are counted references: a command buffer holds those it uses until the GPU is done with them,
+// whatever their owners free meanwhile.
+//
 // Everything else of hakios_metal.h is not here yet: a plug-in that calls it does not link (on purpose).
 #include "hakios-metal/hakios_metal.h"
 
@@ -17,6 +25,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
@@ -28,6 +37,7 @@
 #include <vector>
 
 #include "blit_shaders.h"
+#include "compile_mali.h"
 
 namespace {
 
@@ -166,19 +176,87 @@ struct hakios_metal_buffer {
     hakios_metal_device *device;
     Bo bo;
     uint64_t length;
+    std::atomic<int> refs{1};       // its owner's, and each command buffer's that uses it
+
+    void retain() { refs.fetch_add(1); }
+    void release()
+    {
+        if (refs.fetch_sub(1) == 1) {
+            device->freeBo(bo);
+            delete this;
+        }
+    }
+};
+
+struct hakios_metal_kernel {
+    mali_kernel_binary binary = {};
+    std::atomic<int> refs{1};
+    std::mutex lock;                // around the code's upload
+    hakios_metal_device *device = nullptr;
+    Bo code;                        // the code, and its program descriptor at spd
+    uint64_t spd = 0;
+
+    void retain() { refs.fetch_add(1); }
+    void release()
+    {
+        if (refs.fetch_sub(1) == 1) {
+            if (device != nullptr) {
+                device->freeBo(code);
+            }
+            mali_kernel_binary_free(&binary);
+            delete this;
+        }
+    }
+
+    unsigned maxThreads() const { return binary.work_regs <= 32 ? 1024 : 512; }
+
+    // the code in the device's memory (once per kernel: one device in a process)
+    bool upload(hakios_metal_device *d)
+    {
+        std::lock_guard<std::mutex> g(lock);
+        if (device == d) {
+            return true;
+        }
+        if (device != nullptr) {
+            fail("%s: compiled for another device", binary.name);
+            return false;
+        }
+        uint64_t at = (binary.size + 0x100 + 0x3f) & ~0x3fULL;     // (the shader core reads ahead of the code's end)
+        if (!d->newBo(code, at + 0x40, BIND_READONLY)) {
+            return false;
+        }
+        auto *bytes = (uint8_t *)code.cpu;
+        memcpy(bytes, binary.code, binary.size);
+        auto *w = (uint32_t *)(bytes + at);
+        w[0] = 8 | 1 << 4 | (binary.work_regs <= 32 ? 2u : 0u) << 30;
+        w[1] = (uint32_t)(binary.preload >> 48);
+        w[2] = (uint32_t)code.va;
+        w[3] = (uint32_t)(code.va >> 32);
+        __asm__ volatile("dsb sy" ::: "memory");
+        spd = code.va + at;
+        device = d;
+        return true;
+    }
 };
 
 namespace {
-struct Blit {
-    unsigned shader;                // 0 copy_u32, 1 fill_u32, 2 copy_u8, 3 fill_u8
+// one piece of work of a command buffer, in the order recorded
+struct Job {
+    unsigned shader;                // a blit: 0 copy_u32, 1 fill_u32, 2 copy_u8, 3 fill_u8; 4 a dispatch
     uint64_t dst, src;
     uint32_t value, count;
+    hakios_metal_kernel *kernel;    // a dispatch's
+    unsigned groups[3], threads[3], grid[3];
+    uint64_t buffers[MALI_KERNEL_BUFFERS];
 };
+constexpr unsigned DISPATCH = 4;
 }  // namespace
 
 struct hakios_metal_cb {
     hakios_metal_queue *queue;
-    std::vector<Blit> blits;
+    std::vector<Job> blits;
+    std::vector<hakios_metal_buffer *> held;    // retained until the GPU is done
+    std::vector<hakios_metal_kernel *> kernels;
     std::string error;
     enum hakios_metal_status status = HAKIOS_METAL_NOT_ENQUEUED;
     Bo stream;
@@ -188,6 +266,23 @@ struct hakios_metal_cb {
     bool freed = false;             // freed by its owner while in flight: the queue's thread frees it after
     std::mutex lock;
     std::condition_variable done;
+
+    void hold(hakios_metal_buffer *b)
+    {
+        b->retain();
+        held.push_back(b);
+    }
+    void letGo()
+    {
+        for (auto *b : held) {
+            b->release();
+        }
+        for (auto *k : kernels) {
+            k->release();
+        }
+        held.clear();
+        kernels.clear();
+    }
 };
 
 struct hakios_metal_queue {
@@ -239,6 +334,7 @@ struct hakios_metal_queue {
                 }
             }
             device->freeBo(cb->stream);
+            cb->letGo();
             cb->done.notify_all();
             if (cb->callback) {
                 cb->callback(cb, cb->context);  // (it may free the command buffer)
@@ -365,7 +461,7 @@ hakios_metal_gpu_id(hakios_metal_device *d)
 int
 hakios_metal_has_compiler(void)
 {
-    return 0;
+    return 1;
 }
 
 hakios_metal_buffer *
@@ -385,8 +481,7 @@ void
 hakios_metal_buffer_free(hakios_metal_buffer *b)
 {
     if (b != nullptr) {
-        b->device->freeBo(b->bo);
-        delete b;
+        b->release();       // (a command buffer that uses it keeps it until the GPU is done)
     }
 }
 
@@ -455,6 +550,7 @@ hakios_metal_cb_free(hakios_metal_cb *cb)
         cb->done.wait(l, [&] { return cb->status == HAKIOS_METAL_COMPLETED || cb->status == HAKIOS_METAL_ERROR; });
     }
     l.unlock();
+    cb->letGo();            // (never committed: what it held)
     delete cb;
 }
 
@@ -467,8 +563,14 @@ hakios_metal_cb_copy(hakios_metal_cb *cb, hakios_metal_buffer *from, uint64_t fr
         return -1;
     }
     bool words = ((from_offset | to_offset | length) & 3) == 0;
-    cb->blits.push_back({ words ? 0u : 2u, to->bo.va + to_offset, from->bo.va + from_offset, 0,
-        (uint32_t)(words ? length / 4 : length) });
+    Job j = {};
+    j.shader = words ? 0u : 2u;
+    j.dst = to->bo.va + to_offset;
+    j.src = from->bo.va + from_offset;
+    j.count = (uint32_t)(words ? length / 4 : length);
+    cb->blits.push_back(j);
+    cb->hold(from);
+    cb->hold(to);
     return 0;
 }
 
@@ -480,8 +582,13 @@ hakios_metal_cb_fill(hakios_metal_cb *cb, hakios_metal_buffer *buffer, uint64_t 
         return -1;
     }
     bool words = ((offset | length) & 3) == 0;
-    cb->blits.push_back({ words ? 1u : 3u, buffer->bo.va + offset, 0, words ? value * 0x01010101u : value,
-        (uint32_t)(words ? length / 4 : length) });
+    Job j = {};
+    j.shader = words ? 1u : 3u;
+    j.dst = buffer->bo.va + offset;
+    j.value = words ? value * 0x01010101u : value;
+    j.count = (uint32_t)(words ? length / 4 : length);
+    cb->blits.push_back(j);
+    cb->hold(buffer);
     return 0;
 }
 
@@ -504,15 +611,19 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
     if (!cb->error.empty()) {
         cb->status = HAKIOS_METAL_ERROR;
     } else if (!cb->blits.empty()) {
-        // the stream (from 0) and each blit's push constants (32 bytes each, from 0x2000 on)
+        // the stream (from 0), then each job's push constants: 32 bytes for a blit, a kernel's fau_words for a dispatch
         size_t words = 8 + cb->blits.size() * 20;
-        if (!d->newBo(cb->stream, 0x2000 + 32 * cb->blits.size() + words * 8, BIND_NOEXEC)) {
+        uint64_t fau_area = (words * 8 + 0xff) & ~0xffULL, fau_size = 0;
+        std::vector<uint64_t> fau_at(cb->blits.size());
+        for (size_t i = 0; i < cb->blits.size(); i++) {
+            fau_at[i] = fau_area + fau_size;
+            fau_size += cb->blits[i].shader == DISPATCH ? (cb->blits[i].kernel->binary.fau_words * 4 + 0x3f) & ~0x3fULL : 0x40;
+        }
+        if (!d->newBo(cb->stream, fau_area + fau_size, BIND_NOEXEC)) {
             cb->error = gError;
             cb->status = HAKIOS_METAL_ERROR;
         } else {
             auto *s = (uint64_t *)cb->stream.cpu;
-            uint64_t fau_area = 0x2000 + ((words * 8 + 0xff) & ~0xffULL);
-            auto *fau = (uint8_t *)cb->stream.cpu + fau_area;
             unsigned n = 0;
             s[n++] = set_state(0, 3);           // v11's scoreboards, as panvk sets them up
             s[n++] = set_state(9, 0x8);
@@ -520,29 +631,51 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
             s[n++] = set_state(2, 1);
             s[n++] = set_state(8, 0xf0);
             for (size_t i = 0; i < cb->blits.size(); i++) {
-                const Blit &b = cb->blits[i];
-                uint8_t *pc = fau + 32 * i;
-                memset(pc, 0, 32);
-                memcpy(pc + 0, &b.dst, 8);
-                memcpy(pc + 8, &b.src, 8);
-                memcpy(pc + 16, &b.value, 4);
-                memcpy(pc + 20, &b.count, 4);
-                uint64_t fau_va = cb->stream.va + fau_area + 32 * i;
-                s[n++] = move48(16, d->spd[b.shader]);
-                s[n++] = move48(24, d->descriptors.va + 0x1200);
+                const Job &b = cb->blits[i];
+                auto *pc = (uint8_t *)cb->stream.cpu + fau_at[i];
+                uint64_t fau_va = cb->stream.va + fau_at[i], spd;
+                unsigned fau_entries, size[3], groups[3];
+                if (b.shader == DISPATCH) {
+                    const mali_kernel_binary &k = b.kernel->binary;
+                    auto *w = (uint32_t *)pc;
+                    memset(pc, 0, k.fau_words * 4);
+                    memcpy(pc, b.buffers, sizeof(b.buffers));                       // words 2n, 2n+1
+                    for (int c = 0; c < 3; c++) {
+                        w[MALI_KERNEL_WORKGROUP_WORD + c] = b.threads[c];
+                        w[MALI_KERNEL_GROUPS_WORD + c] = b.groups[c];
+                        w[MALI_KERNEL_GRID_WORD + c] = b.grid[c];
+                    }
+                    memcpy(w + MALI_KERNEL_RESERVED, k.consts, (k.fau_words - MALI_KERNEL_RESERVED) * 4);
+                    spd = b.kernel->spd;
+                    fau_entries = (k.fau_words + 1) / 2;
+                    memcpy(size, b.threads, sizeof(size));
+                    memcpy(groups, b.groups, sizeof(groups));
+                } else {
+                    memset(pc, 0, 32);
+                    memcpy(pc + 0, &b.dst, 8);
+                    memcpy(pc + 8, &b.src, 8);
+                    memcpy(pc + 16, &b.value, 4);
+                    memcpy(pc + 20, &b.count, 4);
+                    spd = d->spd[b.shader];
+                    fau_entries = 4;                                                // 8 words: 4 of 64 bits
+                    size[0] = 64, size[1] = size[2] = 1;                            // 64 invocations a workgroup
+                    groups[0] = (b.count + 63) / 64, groups[1] = groups[2] = 1;
+                }
+                s[n++] = move48(16, spd);
+                s[n++] = move48(24, d->descriptors.va + 0x1200);                    // local storage: none
                 s[n++] = move48(8, fau_va);
-                s[n++] = move32(9, (uint32_t)(fau_va >> 32) | 4u << 24);    // 8 words: 4 of 64 bits
+                s[n++] = move32(9, (uint32_t)(fau_va >> 32) | fau_entries << 24);
                 s[n++] = move48(0, 0);
                 s[n++] = move32(32, 0);
-                s[n++] = move32(33, 63);                                    // 64 invocations a workgroup
+                s[n++] = move32(33, (size[0] - 1) | (size[1] - 1) << 10 | (size[2] - 1) << 20);
                 s[n++] = move32(34, 0);
                 s[n++] = move32(35, 0);
                 s[n++] = move32(36, 0);
-                s[n++] = move32(37, (b.count + 63) / 64);
-                s[n++] = move32(38, 1);
-                s[n++] = move32(39, 1);
+                s[n++] = move32(37, groups[0]);
+                s[n++] = move32(38, groups[1]);
+                s[n++] = move32(39, groups[2]);
                 s[n++] = RUN_COMPUTE;
-                s[n++] = WAIT_ALL;                                          // in order, as Metal's blits are
+                s[n++] = WAIT_ALL;                                                  // in order, as Metal's encoders are
             }
             __asm__ volatile("dsb sy" ::: "memory");
             syncobj_create sc = {};
@@ -613,6 +746,193 @@ hakios_metal_cb_gpu_nanoseconds(hakios_metal_cb *cb)
 {
     (void)cb;
     return 0;
+}
+
+// ---- kernels (src/mali/compile_mali.c) and their dispatch ----
+
+hakios_metal_kernel *
+hakios_metal_kernel_compile_bitcode_constants(const void *bitcode, size_t size, const hakios_metal_constant *constants,
+    unsigned count)
+{
+    std::vector<mali_constant> values(count);
+    char why[512];
+
+    for (unsigned i = 0; i < count; i++) {
+        values[i] = { constants[i].index, constants[i].bits };
+    }
+    auto *k = new hakios_metal_kernel;
+    if (mali_kernel_compile(bitcode, size, values.data(), count, &k->binary, why, sizeof(why)) != 0) {
+        fail("%s", why);
+        delete k;
+        return nullptr;
+    }
+    return k;
+}
+
+hakios_metal_kernel *
+hakios_metal_kernel_compile_bitcode(const void *bitcode, size_t size)
+{
+    return hakios_metal_kernel_compile_bitcode_constants(bitcode, size, nullptr, 0);
+}
+
+void
+hakios_metal_kernel_free(hakios_metal_kernel *k)
+{
+    if (k != nullptr) {
+        k->release();       // (a command buffer that dispatches it keeps it until the GPU is done)
+    }
+}
+
+const char *
+hakios_metal_kernel_name(hakios_metal_kernel *k)
+{
+    return k ? k->binary.name : "";
+}
+
+unsigned
+hakios_metal_kernel_resource_count(hakios_metal_kernel *k)
+{
+    return k ? k->binary.num_resources : 0;
+}
+
+int
+hakios_metal_kernel_resource(hakios_metal_kernel *k, unsigned i, unsigned *kind, unsigned *index, unsigned *size_bytes)
+{
+    if (k == nullptr || i >= k->binary.num_resources) {
+        return -1;
+    }
+    const mali_kernel_resource &r = k->binary.resources[i];
+    if (kind) {
+        *kind = r.kind;
+    }
+    if (index) {
+        *index = r.index;
+    }
+    if (size_bytes) {
+        *size_bytes = r.size;
+    }
+    return 0;
+}
+
+void
+hakios_metal_kernel_threadgroup_size(hakios_metal_kernel *k, unsigned size[3])
+{
+    for (int i = 0; i < 3; i++) {
+        size[i] = k ? k->binary.workgroup[i] : 0;
+    }
+}
+
+unsigned
+hakios_metal_kernel_max_threads(hakios_metal_kernel *k)
+{
+    return k ? k->maxThreads() : 0;
+}
+
+unsigned
+hakios_metal_kernel_execution_width(hakios_metal_kernel *k)
+{
+    (void)k;
+    return 16;              // Valhall's warp
+}
+
+unsigned
+hakios_metal_kernel_threadgroup_memory(hakios_metal_kernel *k)
+{
+    return k ? k->binary.threadgroup_bytes : 0;
+}
+
+namespace {
+int
+dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[3], const unsigned threads[3],
+    const unsigned grid[3], hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count)
+{
+    Job j = {};
+    unsigned total = 1;
+
+    if (k == nullptr) {
+        fail("dispatch: no kernel");
+        return -1;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (threads[i] == 0 || threads[i] > 1024) {
+            fail("dispatch of %s: a threadgroup of %u x %u x %u", k->binary.name, threads[0], threads[1], threads[2]);
+            return -1;
+        }
+        if (k->binary.workgroup[i] != 0 && k->binary.workgroup[i] != threads[i]) {
+            fail("dispatch of %s: the kernel's threadgroup is %u x %u x %u", k->binary.name, k->binary.workgroup[0],
+                k->binary.workgroup[1], k->binary.workgroup[2]);
+            return -1;
+        }
+        total *= threads[i];
+    }
+    if (total > k->maxThreads()) {
+        fail("dispatch of %s: %u threads a threadgroup, %u at most", k->binary.name, total, k->maxThreads());
+        return -1;
+    }
+    if (groups[0] == 0 || groups[1] == 0 || groups[2] == 0) {
+        return 0;           // nothing to run
+    }
+    for (unsigned r = 0; r < k->binary.num_resources; r++) {
+        const mali_kernel_resource &res = k->binary.resources[r];
+        if (res.kind != HAKIOS_METAL_RESOURCE_CONSTANT_BUFFER && res.kind != HAKIOS_METAL_RESOURCE_DEVICE_BUFFER) {
+            continue;
+        }
+        if (res.index >= count || buffers[res.index] == nullptr) {
+            fail("dispatch of %s: nothing bound at [[buffer(%u)]]", k->binary.name, res.index);
+            return -1;
+        }
+        hakios_metal_buffer *b = buffers[res.index];
+        uint64_t offset = offsets ? offsets[res.index] : 0;
+        if (offset > b->bo.size || (res.size != 0 && offset + res.size > b->bo.size)) {
+            fail("dispatch of %s: [[buffer(%u)]] at offset %llu is past its buffer", k->binary.name, res.index,
+                (unsigned long long)offset);
+            return -1;
+        }
+        j.buffers[res.index] = b->bo.va + offset;
+    }
+    if (!k->upload(cb->queue->device)) {
+        return -1;
+    }
+    j.shader = DISPATCH;
+    j.kernel = k;
+    memcpy(j.groups, groups, sizeof(j.groups));
+    memcpy(j.threads, threads, sizeof(j.threads));
+    memcpy(j.grid, grid, sizeof(j.grid));
+    cb->blits.push_back(j);
+    k->retain();
+    cb->kernels.push_back(k);
+    for (unsigned r = 0; r < k->binary.num_resources; r++) {
+        const mali_kernel_resource &res = k->binary.resources[r];
+        if (res.kind == HAKIOS_METAL_RESOURCE_CONSTANT_BUFFER || res.kind == HAKIOS_METAL_RESOURCE_DEVICE_BUFFER) {
+            cb->hold(buffers[res.index]);
+        }
+    }
+    return 0;
+}
+}  // namespace
+
+int
+hakios_metal_cb_dispatch(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[3], const unsigned threads[3],
+    hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count)
+{
+    unsigned grid[3];
+
+    for (int i = 0; i < 3; i++) {
+        grid[i] = groups[i] * threads[i];
+    }
+    return dispatchGrid(cb, k, groups, threads, grid, buffers, offsets, count);
+}
+
+int
+hakios_metal_cb_dispatch_threads(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned grid[3], const unsigned threads[3],
+    hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count)
+{
+    unsigned groups[3];
+
+    for (int i = 0; i < 3; i++) {
+        groups[i] = threads[i] ? (grid[i] + threads[i] - 1) / threads[i] : 0;
+    }
+    return dispatchGrid(cb, k, groups, threads, grid, buffers, offsets, count);
 }
 
 }  // extern "C"
