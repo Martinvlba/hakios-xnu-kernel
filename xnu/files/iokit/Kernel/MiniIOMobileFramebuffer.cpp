@@ -234,15 +234,18 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 static inline uint32_t refreshHz(void);
 
 /*
- * Double buffering, where a device's display driver can flip (the Pixel 8a's: devices/akita/drivers/display,
- * display_flip=1): it sets hakios_display_ops before IOKit starts. BUFFERS gives two panel-sized buffers (the first the
- * boot framebuffer); FLIP(i) has the panel show buffer i from its next frame on, returning once that is settled. Every
- * frame is then drawn into the buffer that is not being shown and flipped to: no frame is seen half drawn.
+ * Double or triple buffering, where a device's display driver can flip (the Pixel 8a's: devices/akita/drivers/display,
+ * display_flip=1): it sets hakios_display_ops before IOKit starts. BUFFERS gives two or three panel-sized buffers (the
+ * first the boot framebuffer); FLIP(i) queues buffer i to be shown from one of the panel's next frames on (with two
+ * buffers it returns once it is shown, with three at once: a newer FLIP replaces one not shown yet); SHOWN says which
+ * buffer the panel reads. Every frame is drawn into a buffer neither shown nor queued, and flipped to: no frame is seen
+ * half drawn, and with three buffers drawing never waits for the panel.
  */
 extern "C" {
 struct hakios_display_ops {
-	int (*buffers)(vm_offset_t va[2], uint32_t *width, uint32_t *height, uint32_t *row_bytes);
+	int (*buffers)(vm_offset_t va[3], uint32_t *count, uint32_t *width, uint32_t *height, uint32_t *row_bytes);
 	void (*flip)(unsigned index);
+	uint32_t (*shown)(void);
 };
 const struct hakios_display_ops * hakios_display_ops;
 }
@@ -308,8 +311,8 @@ class IOMobileFramebuffer : public IOService
 public:
 	IOLock *        fLock;
 	uint8_t *       fBase;                  /* the boot framebuffer: the panel (with flips: the buffer drawn last) */
-	uint8_t *       fBuffers[2];            /* with flips (hakios_display_ops): the two buffers, and which one is shown */
-	unsigned        fShown;
+	uint8_t *       fBuffers[3];            /* with flips (hakios_display_ops): the buffers, and the one last flipped to */
+	unsigned        fBufferCount, fQueued;
 	bool            fFlipping;
 	uint8_t *       hidden(void);
 	void            flipTo(uint8_t * drawn);
@@ -568,16 +571,19 @@ IOMobileFramebuffer::start(IOService * provider)
 		}
 	}
 	if (hakios_display_ops != NULL && !fDiff && gDiff == 0) {
-		vm_offset_t va[2];
-		uint32_t w, h, rb;
+		vm_offset_t va[3];
+		uint32_t n, w, h, rb;
 
-		if (hakios_display_ops->buffers(va, &w, &h, &rb) == 0 && w == fPanelWidth && h == fPanelHeight && rb == fRowBytes) {
-			fBuffers[0] = (uint8_t *) va[0];
-			fBuffers[1] = (uint8_t *) va[1];
+		if (hakios_display_ops->buffers(va, &n, &w, &h, &rb) == 0 && (n == 2 || n == 3) && w == fPanelWidth &&
+		    h == fPanelHeight && rb == fRowBytes) {
+			for (unsigned i = 0; i < n; i++) {
+				fBuffers[i] = (uint8_t *) va[i];
+			}
+			fBufferCount = n;
 			fBase = fBuffers[0];
-			fShown = 0;
+			fQueued = 0;
 			fFlipping = true;
-			IOLog("MiniIOMobileFramebuffer: double buffered (the device's display driver flips)\n");
+			IOLog("MiniIOMobileFramebuffer: %s buffered (the device's display driver flips)\n", n == 3 ? "triple" : "double");
 		}
 	}
 	fColumn = IONewZero(uint32_t, fPanelWidth);
@@ -1158,16 +1164,34 @@ IOMobileFramebuffer::presenter(void)
 uint8_t *
 IOMobileFramebuffer::hidden(void)
 {
-	return fFlipping && fGraphics ? fBuffers[fShown ^ 1] : fBase;
+	uint32_t shown;
+
+	if (!fFlipping || !fGraphics) {
+		return fBase;
+	}
+	/* (the one last flipped to is shown or queued; the one shown may still be the one before it) */
+	shown = hakios_display_ops->shown();
+	for (unsigned i = 0; i < fBufferCount; i++) {
+		if (i != fQueued && i != shown) {
+			return fBuffers[i];
+		}
+	}
+	return fBase;   /* (not reached: with two buffers the last flipped to is the one shown) */
 }
 
-/* the frame just drawn into DRAWN onto the panel, when that is the hidden buffer */
+/* the frame just drawn into DRAWN onto the panel, when that is a buffer not shown */
 void
 IOMobileFramebuffer::flipTo(uint8_t * drawn)
 {
-	if (fFlipping && fGraphics && drawn == fBuffers[fShown ^ 1]) {
-		hakios_display_ops->flip(fShown ^ 1);
-		fShown ^= 1;
+	if (!fFlipping || !fGraphics || drawn == fBuffers[fQueued]) {
+		return;
+	}
+	for (unsigned i = 0; i < fBufferCount; i++) {
+		if (drawn == fBuffers[i]) {
+			hakios_display_ops->flip(i);
+			fQueued = i;
+			return;
+		}
 	}
 }
 
