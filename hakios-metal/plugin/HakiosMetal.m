@@ -124,7 +124,18 @@ static Class gQueueClass;
 static void **stateOf(id self);
 
 static hakios_metal_device *gGPU;               /* opened once; NULL: the kernel has no GPU to give */
-static Class gCommandBufferClass, gBlitEncoderClass, gPipelineClass, gComputeEncoderClass;
+static Class gCommandBufferClass, gBlitEncoderClass, gPipelineClass, gComputeEncoderClass, gTextureClass, gSamplerClass;
+struct texture {
+	hakios_metal_texture *t;
+	id label;
+};
+
+struct sampler {
+	hakios_metal_sampler *s;
+	id label;
+};
+static hakios_metal_texture *gpuTextureOf(id texture);
+static hakios_metal_sampler *gpuSamplerOf(id sampler);
 struct pipeline {                       /* a compute pipeline state (below) */
 	hakios_metal_kernel *kernel;
 	id function;                            /* retained */
@@ -449,6 +460,8 @@ labelGet(id self, __unused SEL _cmd)
 		label = &((struct blitencoder *)*slot)->label;
 	} else if (object_getClass(self) == gPipelineClass) {
 		label = &((struct pipeline *)*slot)->label;
+	} else if (object_getClass(self) == gTextureClass || object_getClass(self) == gSamplerClass) {
+		label = &((struct texture *)*slot)->label;      /* (struct sampler has the same shape) */
 #endif
 	} else {
 		label = &((struct function *)*slot)->label;
@@ -476,6 +489,8 @@ labelSet(id self, __unused SEL _cmd, id text)
 		label = &((struct blitencoder *)*slot)->label;
 	} else if (object_getClass(self) == gPipelineClass) {
 		label = &((struct pipeline *)*slot)->label;
+	} else if (object_getClass(self) == gTextureClass || object_getClass(self) == gSamplerClass) {
+		label = &((struct texture *)*slot)->label;      /* (struct sampler has the same shape) */
 #endif
 	} else {
 		label = &((struct function *)*slot)->label;
@@ -1454,6 +1469,7 @@ blitNothing(__unused id self, __unused SEL _cmd, __unused id resource)
  * compiler the pipeline is the stub that holds nothing, as before.
  */
 #define COMPUTE_BUFFERS 31
+#define COMPUTE_TEXTURES 16
 
 
 
@@ -1464,6 +1480,8 @@ struct computeencoder {
 	hakios_metal_buffer *gpu[COMPUTE_BUFFERS];
 	uint64_t offsets[COMPUTE_BUFFERS];
 	hakios_metal_buffer **bytes;            /* -setBytes:'s buffers, let go of at the end (dispatches hold their own) */
+	id textures[COMPUTE_TEXTURES];          /* retained */
+	id samplers[COMPUTE_TEXTURES];          /* retained */
 	unsigned nbytes, capbytes;
 	unsigned threadgroupMemory;
 };
@@ -1609,6 +1627,10 @@ computeEncoderFree(void *state)
 	for (unsigned i = 0; i < e->nbytes; i++) {
 		hakios_metal_buffer_free(e->bytes[i]);
 	}
+	for (unsigned i = 0; i < COMPUTE_TEXTURES; i++) {
+		[e->textures[i] release];
+		[e->samplers[i] release];
+	}
 	free(e->bytes);
 	[e->pipeline release];
 	[e->base.commandBuffer release];
@@ -1749,6 +1771,63 @@ computeSetBytes(id self, __unused SEL _cmd, const void *bytes, unsigned long len
 }
 
 static void
+computeSetTexture(id self, __unused SEL _cmd, id texture, unsigned long index)
+{
+	struct computeencoder *e = slotState(self);
+	struct commandbuffer *c = recording(self);
+
+	if (e == NULL || c == NULL) {
+		return;
+	}
+	if (index >= COMPUTE_TEXTURES) {
+		hakios_metal_cb_fail(c->cb, "setTexture: an index past 15");
+		return;
+	}
+	if (texture != nil && gpuTextureOf(texture) == NULL) {
+		hakios_metal_cb_fail(c->cb, "setTexture: a texture that is not the GPU's");
+	}
+	if (texture != e->textures[index]) {
+		[e->textures[index] release];
+		e->textures[index] = [texture retain];
+	}
+}
+
+static void
+computeSetSampler(id self, __unused SEL _cmd, id sampler, unsigned long index)
+{
+	struct computeencoder *e = slotState(self);
+	struct commandbuffer *c = recording(self);
+
+	if (e == NULL || c == NULL) {
+		return;
+	}
+	if (index >= COMPUTE_TEXTURES) {
+		hakios_metal_cb_fail(c->cb, "setSamplerState: an index past 15");
+		return;
+	}
+	if (sampler != e->samplers[index]) {
+		[e->samplers[index] release];
+		e->samplers[index] = [sampler retain];
+	}
+}
+
+static void
+computeSetTextures(id self, SEL _cmd, const id *textures, NSRange range)
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		computeSetTexture(self, _cmd, textures[i], range.location + i);
+	}
+}
+
+static void
+computeSetSamplers(id self, SEL _cmd, const id *samplers, NSRange range)
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		computeSetSampler(self, _cmd, samplers[i], range.location + i);
+	}
+}
+
+static void
 computeSetThreadgroupMemory(id self, __unused SEL _cmd, unsigned long length, __unused unsigned long index)
 {
 	struct computeencoder *e = slotState(self);
@@ -1776,8 +1855,16 @@ computeDispatch(id self, BOOL threads, MTLSize size, MTLSize perGroup)
 		return;
 	}
 	hakios_metal_cb_set_threadgroup_length(c->cb, e->threadgroupMemory);     /* ([[threadgroup(0)]]: past the static arrays) */
-	r = threads ? hakios_metal_cb_dispatch_threads(c->cb, p->kernel, a, t, e->gpu, e->offsets, COMPUTE_BUFFERS)
-	            : hakios_metal_cb_dispatch(c->cb, p->kernel, a, t, e->gpu, e->offsets, COMPUTE_BUFFERS);
+	hakios_metal_texture *tex[COMPUTE_TEXTURES];
+	hakios_metal_sampler *smp[COMPUTE_TEXTURES];
+	for (unsigned i = 0; i < COMPUTE_TEXTURES; i++) {
+		tex[i] = gpuTextureOf(e->textures[i]);
+		smp[i] = gpuSamplerOf(e->samplers[i]);
+	}
+	r = threads ? hakios_metal_cb_dispatch_threads2(c->cb, p->kernel, a, t, e->gpu, e->offsets, COMPUTE_BUFFERS, tex, COMPUTE_TEXTURES,
+	                  smp, COMPUTE_TEXTURES)
+	            : hakios_metal_cb_dispatch2(c->cb, p->kernel, a, t, e->gpu, e->offsets, COMPUTE_BUFFERS, tex, COMPUTE_TEXTURES, smp,
+	                  COMPUTE_TEXTURES);
 	if (r != 0) {
 		say([NSString stringWithFormat:@"dispatch: %s", hakios_metal_error()]);
 		hakios_metal_cb_fail(c->cb, hakios_metal_error());
@@ -1828,6 +1915,12 @@ registerComputeClasses(void)
 		class_addMethod(gComputeEncoderClass, sel_registerName("setBytes:length:atIndex:"), (IMP)computeSetBytes, "v@:r^vQQ");
 		class_addMethod(gComputeEncoderClass, sel_registerName("setThreadgroupMemoryLength:atIndex:"), (IMP)computeSetThreadgroupMemory,
 		    "v@:QQ");
+		class_addMethod(gComputeEncoderClass, sel_registerName("setTexture:atIndex:"), (IMP)computeSetTexture, "v@:@Q");
+		class_addMethod(gComputeEncoderClass, sel_registerName("setSamplerState:atIndex:"), (IMP)computeSetSampler, "v@:@Q");
+		class_addMethod(gComputeEncoderClass, sel_registerName("setTextures:withRange:"), (IMP)computeSetTextures,
+		    "v@:r^@{_NSRange=QQ}");
+		class_addMethod(gComputeEncoderClass, sel_registerName("setSamplerStates:withRange:"), (IMP)computeSetSamplers,
+		    "v@:r^@{_NSRange=QQ}");
 		class_addMethod(gComputeEncoderClass, sel_registerName("dispatchThreadgroups:threadsPerThreadgroup:"), (IMP)computeDispatchGroups,
 		    "v@:{?=QQQ}{?=QQQ}");
 		class_addMethod(gComputeEncoderClass, sel_registerName("dispatchThreads:threadsPerThreadgroup:"), (IMP)computeDispatchThreads,
@@ -1847,6 +1940,199 @@ registerComputeClasses(void)
 	}
 }
 
+/*
+ * ---- textures and samplers of the GPU's (hakios-metal): what a compute kernel reads, samples and writes ----
+ *
+ * A texture is hakios_metal_texture's memory (linear rows the CPU sees too); -replaceRegion: and -getBytes: copy rows in
+ * and out. A sampler state is hakios_metal_sampler's descriptor. Without a GPU they are the stubs that hold nothing.
+ */
+
+
+static void
+textureFree(void *state)
+{
+	struct texture *t = state;
+
+	hakios_metal_texture_free(t->t);
+	[t->label release];
+	free(t);
+}
+
+static void
+textureDealloc(id self, SEL _cmd)
+{
+	deallocWith(self, _cmd, gTextureClass, textureFree);
+}
+
+static hakios_metal_texture *
+gpuTextureOf(id texture)
+{
+	struct texture *t = texture != nil && object_getClass(texture) == gTextureClass ? slotState(texture) : NULL;
+
+	return t != NULL ? t->t : NULL;
+}
+
+static unsigned long textureWidth(id self, __unused SEL _cmd) { return hakios_metal_texture_width(gpuTextureOf(self)); }
+static unsigned long textureHeight(id self, __unused SEL _cmd) { return hakios_metal_texture_height(gpuTextureOf(self)); }
+static unsigned long textureOne(__unused id self, __unused SEL _cmd) { return 1; }
+static unsigned long textureFormat(id self, __unused SEL _cmd) { return hakios_metal_texture_format(gpuTextureOf(self)); }
+static unsigned long textureType(id self, __unused SEL _cmd) { return hakios_metal_texture_type(gpuTextureOf(self)); }
+static unsigned long textureUsage(id self, __unused SEL _cmd) { return hakios_metal_texture_usage(gpuTextureOf(self)); }
+static unsigned long textureShared(__unused id self, __unused SEL _cmd) { return MTLStorageModeShared; }
+
+static void
+textureReplace(id self, __unused SEL _cmd, MTLRegion region, unsigned long level, const void *bytes, unsigned long bytesPerRow)
+{
+	if (level != 0 || region.origin.z != 0 || region.size.depth > 1 ||
+	    hakios_metal_texture_replace(gpuTextureOf(self), (unsigned)region.origin.x, (unsigned)region.origin.y,
+	        (unsigned)region.size.width, (unsigned)region.size.height, bytes, bytesPerRow) != 0) {
+		say([NSString stringWithFormat:@"replaceRegion: not done (%s)", level ? "a level past 0" : hakios_metal_error()]);
+	}
+}
+
+static void
+textureGetBytes(id self, __unused SEL _cmd, void *bytes, unsigned long bytesPerRow, MTLRegion region, unsigned long level)
+{
+	if (level != 0 || region.origin.z != 0 || region.size.depth > 1 ||
+	    hakios_metal_texture_read(gpuTextureOf(self), (unsigned)region.origin.x, (unsigned)region.origin.y,
+	        (unsigned)region.size.width, (unsigned)region.size.height, bytes, bytesPerRow) != 0) {
+		say([NSString stringWithFormat:@"getBytes: not done (%s)", level ? "a level past 0" : hakios_metal_error()]);
+	}
+}
+
+static id
+deviceNewTexture(id self, SEL _cmd, id descriptor)
+{
+	unsigned long (*get)(id, SEL) = (unsigned long (*)(id, SEL))objc_msgSend;
+	id (*plain)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+	unsigned long type, format, width, height, usage;
+	struct texture *t;
+	hakios_metal_texture *g;
+	id texture;
+	void **slot;
+
+	if (gpu() == NULL || gTextureClass == Nil || descriptor == nil) {
+		return stubFactory(self, _cmd);
+	}
+	type = get(descriptor, sel_registerName("textureType"));
+	format = get(descriptor, sel_registerName("pixelFormat"));
+	width = get(descriptor, sel_registerName("width"));
+	height = get(descriptor, sel_registerName("height"));
+	usage = get(descriptor, sel_registerName("usage"));
+	if ((g = hakios_metal_texture_new(gGPU, (unsigned)type, (unsigned)format, (unsigned)width, (unsigned)height, (unsigned)usage)) == NULL) {
+		say([NSString stringWithFormat:@"newTextureWithDescriptor: %lux%lu format %lu type %lu: %s", width, height, format, type,
+		    hakios_metal_error()]);
+		return nil;
+	}
+	texture = plain(plain((id)gTextureClass, sel_registerName("alloc")), sel_registerName("init"));
+	t = calloc(1, sizeof(*t));
+	slot = texture != nil ? stateOf(texture) : NULL;
+	if (t == NULL || slot == NULL) {
+		free(t);
+		[texture release];
+		hakios_metal_texture_free(g);
+		return nil;
+	}
+	t->t = g;
+	*slot = t;
+	return texture;
+}
+
+static void
+samplerFree(void *state)
+{
+	struct sampler *s = state;
+
+	hakios_metal_sampler_free(s->s);
+	[s->label release];
+	free(s);
+}
+
+static void
+samplerDealloc(id self, SEL _cmd)
+{
+	deallocWith(self, _cmd, gSamplerClass, samplerFree);
+}
+
+static hakios_metal_sampler *
+gpuSamplerOf(id sampler)
+{
+	struct sampler *s = sampler != nil && object_getClass(sampler) == gSamplerClass ? slotState(sampler) : NULL;
+
+	return s != NULL ? s->s : NULL;
+}
+
+static id
+deviceNewSampler(id self, SEL _cmd, id descriptor)
+{
+	unsigned long (*get)(id, SEL) = (unsigned long (*)(id, SEL))objc_msgSend;
+	BOOL (*flag)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
+	id (*plain)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+	struct hakios_metal_sampler_desc d = { 0 };
+	struct sampler *s;
+	hakios_metal_sampler *g;
+	id sampler;
+	void **slot;
+
+	if (gpu() == NULL || gSamplerClass == Nil || descriptor == nil) {
+		return stubFactory(self, _cmd);
+	}
+	d.min_filter = (unsigned)get(descriptor, sel_registerName("minFilter"));
+	d.mag_filter = (unsigned)get(descriptor, sel_registerName("magFilter"));
+	d.mip_filter = (unsigned)get(descriptor, sel_registerName("mipFilter"));
+	d.s_address = (unsigned)get(descriptor, sel_registerName("sAddressMode"));
+	d.t_address = (unsigned)get(descriptor, sel_registerName("tAddressMode"));
+	d.r_address = (unsigned)get(descriptor, sel_registerName("rAddressMode"));
+	d.normalized_coordinates = flag(descriptor, sel_registerName("normalizedCoordinates"));
+	d.max_anisotropy = 1;
+	d.border_color = (unsigned)get(descriptor, sel_registerName("borderColor"));
+	if ((g = hakios_metal_sampler_new(gGPU, &d)) == NULL) {
+		say([NSString stringWithFormat:@"newSamplerStateWithDescriptor: %s", hakios_metal_error()]);
+		return nil;
+	}
+	sampler = plain(plain((id)gSamplerClass, sel_registerName("alloc")), sel_registerName("init"));
+	s = calloc(1, sizeof(*s));
+	slot = sampler != nil ? stateOf(sampler) : NULL;
+	if (s == NULL || slot == NULL) {
+		free(s);
+		[sampler release];
+		hakios_metal_sampler_free(g);
+		return nil;
+	}
+	s->s = g;
+	*slot = s;
+	return sampler;
+}
+
+static void
+registerTextureClasses(Class device)
+{
+	static const char *const texture[] = { "MTLTexture", "MTLResource", NULL }, *const sampler[] = { "MTLSamplerState", NULL };
+
+	if ((gTextureClass = objectClass("HakiosMetalGPUTexture", "_MTLTexture", texture, (IMP)textureDealloc)) != Nil) {
+		class_addMethod(gTextureClass, sel_registerName("width"), (IMP)textureWidth, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("height"), (IMP)textureHeight, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("depth"), (IMP)textureOne, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("mipmapLevelCount"), (IMP)textureOne, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("arrayLength"), (IMP)textureOne, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("sampleCount"), (IMP)textureOne, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("pixelFormat"), (IMP)textureFormat, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("textureType"), (IMP)textureType, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("usage"), (IMP)textureUsage, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("storageMode"), (IMP)textureShared, "Q@:");
+		class_addMethod(gTextureClass, sel_registerName("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), (IMP)textureReplace,
+		    "v@:{?={?=QQQ}{?=QQQ}}Qr^vQ");
+		class_addMethod(gTextureClass, sel_registerName("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), (IMP)textureGetBytes,
+		    "v@:^vQ{?={?=QQQ}{?=QQQ}}Q");
+		objc_registerClassPair(gTextureClass);
+		class_replaceMethod(device, sel_registerName("newTextureWithDescriptor:"), (IMP)deviceNewTexture, "@@:@");
+	}
+	if ((gSamplerClass = objectClass("HakiosMetalGPUSampler", "_MTLSamplerState", sampler, (IMP)samplerDealloc)) != Nil) {
+		objc_registerClassPair(gSamplerClass);
+		class_replaceMethod(device, sel_registerName("newSamplerStateWithDescriptor:"), (IMP)deviceNewSampler, "@@:@");
+	}
+}
+
 /* the device's pipeline factories, over the stub's (registerStubClasses) */
 static void
 registerComputePipelines(Class device)
@@ -1858,6 +2144,7 @@ registerComputePipelines(Class device)
 	    (IMP)deviceNewComputePipelineDescriptor, "@@:@Q^@^@");
 	class_replaceMethod(device, sel_registerName("newComputePipelineStateWithFunction:completionHandler:"),
 	    (IMP)deviceNewComputePipelineAsync, "v@:@@?");
+	registerTextureClasses(device);
 }
 
 static void

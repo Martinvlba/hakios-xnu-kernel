@@ -517,6 +517,11 @@ int hakios_metal_cb_dispatch(hakios_metal_cb *cb, hakios_metal_kernel *kernel, c
  * multiple of THREADS. -1 with the reason, as hakios_metal_cb_dispatch. */
 int hakios_metal_cb_dispatch_threads(hakios_metal_cb *cb, hakios_metal_kernel *kernel, const unsigned grid[3], const unsigned threads[3],
     hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count);
+/* the same with textures and samplers, as hakios_metal_cb_dispatch2 */
+int hakios_metal_cb_dispatch_threads2(hakios_metal_cb *cb, hakios_metal_kernel *kernel, const unsigned grid[3], const unsigned threads[3],
+    hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count,
+    hakios_metal_texture *const *textures, unsigned texture_count,
+    hakios_metal_sampler *const *samplers, unsigned sampler_count);
 /* the same with TEXTURES[n] at Metal texture index n for n < TEXTURE_COUNT (a sampled texture or an image, whichever the
  * kernel declared at n; NULL: nothing there) and SAMPLERS[m] at sampler index m for m < SAMPLER_COUNT. -1 with the reason:
  * a declared texture or sampler missing, a texture whose dimension or element class is not the kernel's, one made without

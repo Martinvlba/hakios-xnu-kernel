@@ -1121,6 +1121,21 @@ int hakios_metal_cb_dispatch_threads(hakios_metal_cb* cb, hakios_metal_kernel* k
     return hakios_metal_cb_dispatch(cb, k, groups, threads, buffers, offsets, count);
 }
 
+int hakios_metal_cb_dispatch_threads2(hakios_metal_cb* cb, hakios_metal_kernel* k, const unsigned grid[3], const unsigned threads[3],
+                                      hakios_metal_buffer* const* buffers, const uint64_t* offsets, unsigned count,
+                                      hakios_metal_texture* const* textures, unsigned textureCount,
+                                      hakios_metal_sampler* const* samplers, unsigned samplerCount) {
+    unsigned groups[3];
+    for (int i = 0; i < 3; i++) {
+        if (threads[i] == 0 || grid[i] % threads[i] != 0) {
+            failed("dispatchThreads: a grid that is not a multiple of the threadgroup (non-uniform threadgroups are the Mali build's only)");
+            return -1;
+        }
+        groups[i] = grid[i] / threads[i];
+    }
+    return hakios_metal_cb_dispatch2(cb, k, groups, threads, buffers, offsets, count, textures, textureCount, samplers, samplerCount);
+}
+
 static hakios_metal_program* programOf(std::shared_ptr<CompiledStage> vs, std::shared_ptr<CompiledStage> fs, unsigned colorPixelFormat) {
     std::string why;
     std::unique_ptr<CompiledProgram> p = linkProgram(std::move(vs), std::move(fs), PixelFormat(colorPixelFormat), &why);
