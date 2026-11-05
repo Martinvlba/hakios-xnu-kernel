@@ -28,6 +28,7 @@
 #include "compiler/glsl_types.h"
 #include "compiler/air/nir_air.h"
 #include "panfrost/compiler/pan_compiler.h"
+#include "panfrost/compiler/pan_nir.h"
 #include "panfrost/model/pan_model.h"
 #include "util/ralloc.h"
 #include "util/u_dynarray.h"
@@ -131,6 +132,82 @@ lower_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
 	return true;
 }
 
+/*
+ * Textures, samplers and images as Valhall addresses them: a handle `table << 24 | index` into the resource table the
+ * dispatch gives in r0 -- gallium panfrost's pan_nir_lower_res_indices.c for arch >= 9 (MIT), with its numbering of the
+ * tables. A texel fetch needs no sampler, but the hardware wants a valid one: sampler 0 (the dispatch binds one).
+ */
+static bool
+lower_res_indices(nir_builder *b, nir_instr *instr, void *data)
+{
+	(void)data;
+	b->cursor = nir_before_instr(instr);
+	if (instr->type == nir_instr_type_tex) {
+		nir_tex_instr *tex = nir_instr_as_tex(instr);
+		nir_def *tex_offset = nir_steal_tex_src(tex, nir_tex_src_texture_offset);
+		nir_def *samp_offset = nir_steal_tex_src(tex, nir_tex_src_sampler_offset);
+
+		if (tex_offset != NULL) {
+			nir_tex_instr_add_src(tex, nir_tex_src_texture_offset,
+			    pan_nir_res_handle(b, MALI_TABLE_TEXTURE, tex->texture_index, tex_offset));
+		} else {
+			tex->texture_index = pan_res_handle(MALI_TABLE_TEXTURE, tex->texture_index);
+		}
+		if (!nir_tex_instr_need_sampler(tex)) {
+			tex->sampler_index = pan_res_handle(MALI_TABLE_SAMPLER, 0);
+		} else if (samp_offset != NULL) {
+			nir_tex_instr_add_src(tex, nir_tex_src_sampler_offset,
+			    pan_nir_res_handle(b, MALI_TABLE_SAMPLER, tex->sampler_index, samp_offset));
+		} else {
+			tex->sampler_index = pan_res_handle(MALI_TABLE_SAMPLER, tex->sampler_index);
+		}
+		return true;
+	}
+	if (instr->type != nir_instr_type_intrinsic) {
+		return false;
+	}
+	nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+	switch (in->intrinsic) {
+	case nir_intrinsic_image_load:
+	case nir_intrinsic_image_store:
+	case nir_intrinsic_image_atomic:
+	case nir_intrinsic_image_atomic_swap:
+	case nir_intrinsic_image_size:
+	case nir_intrinsic_image_samples:
+		nir_src_rewrite(&in->src[0], pan_nir_res_handle(b, MALI_TABLE_IMAGE, 0, in->src[0].ssa));
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * Image stores as Mesa's Valhall lowering takes them: a 32-bit source type (the front end gives the base type alone, and
+ * half-precision writes 16-bit values), the data widened to match.
+ */
+static bool
+widen_image_stores(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+	(void)data;
+	if (in->intrinsic != nir_intrinsic_image_store) {
+		return false;
+	}
+	nir_alu_type type = nir_intrinsic_src_type(in), base = nir_alu_type_get_base_type(type);
+	nir_def *value = in->src[3].ssa;
+
+	if (nir_alu_type_get_type_size(type) == 32 && value->bit_size == 32) {
+		return false;
+	}
+	b->cursor = nir_before_instr(&in->instr);
+	if (value->bit_size != 32) {
+		value = base == nir_type_float ? nir_f2f32(b, value) : base == nir_type_int ? nir_i2i32(b, value)
+		                                                                         : nir_u2u32(b, value);
+		nir_src_rewrite(&in->src[3], value);
+	}
+	nir_intrinsic_set_src_type(in, base | 32);
+	return true;
+}
+
 /* if (any(global_id >= grid)) return; at the top of the entry point */
 static void
 bound_to_grid(nir_shader *s)
@@ -154,9 +231,6 @@ refusal(nir_shader *s)
 	nir_foreach_function_impl(impl, s) {
 		nir_foreach_block(block, impl) {
 			nir_foreach_instr(instr, block) {
-				if (instr->type == nir_instr_type_tex) {
-					return "textures and samplers (not on the Mali yet)";
-				}
 				if (instr->type != nir_instr_type_intrinsic) {
 					continue;
 				}
@@ -167,23 +241,20 @@ refusal(nir_shader *s)
 						return "a buffer chosen at run time (an argument buffer, or a buffer index computed by the kernel)";
 					}
 					break;
+				/* (a load_ssbo here is Mesa's own: a descriptor read through table 62, the resource table
+				 * itself, for an image's size; Metal's buffers were made addresses before Mesa's passes) */
 				case nir_intrinsic_load_ubo:
-				case nir_intrinsic_load_ssbo:
 				case nir_intrinsic_store_ssbo:
 				case nir_intrinsic_ssbo_atomic:
 				case nir_intrinsic_ssbo_atomic_swap:
 				case nir_intrinsic_get_ssbo_size:
 				case nir_intrinsic_get_ubo_size:
 					return "a buffer access left as a descriptor (a buffer's length asked, or an unusual form)";
-				case nir_intrinsic_image_load:
-				case nir_intrinsic_image_store:
-				case nir_intrinsic_image_size:
 				case nir_intrinsic_image_deref_load:
 				case nir_intrinsic_image_deref_store:
 				case nir_intrinsic_image_deref_size:
-				case nir_intrinsic_image_atomic:
 				case nir_intrinsic_image_deref_atomic:
-					return "textures written by a kernel (not on the Mali yet)";
+					return "an image left as a variable (not lowered to an index)";
 				default:
 					break;
 				}
@@ -246,9 +317,10 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 			say(error, error_size, "%s: more than %u resources", out->name, MALI_KERNEL_MAX_RESOURCES);
 			goto done;
 		}
-		/* (before Mesa's passes: its image lowering asserts on what it cannot take, and NDEBUG makes that bad code) */
-		if (r->kind == AIR_RESOURCE_TEXTURE || r->kind == AIR_RESOURCE_IMAGE || r->kind == AIR_RESOURCE_SAMPLER) {
-			say(error, error_size, "%s: textures and samplers (not on the Mali yet)", out->name);
+		if ((r->kind == AIR_RESOURCE_TEXTURE || r->kind == AIR_RESOURCE_IMAGE || r->kind == AIR_RESOURCE_SAMPLER) &&
+		    r->index >= MALI_KERNEL_TEXTURES) {
+			say(error, error_size, "%s: a texture or sampler at index %u (the Mali build binds 0 to %u)", out->name,
+			    r->index, MALI_KERNEL_TEXTURES - 1);
 			goto done;
 		}
 		if ((r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER) &&
@@ -266,8 +338,10 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 	}
 
 	NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_buffers, nir_metadata_control_flow, NULL);
+	NIR_PASS(_, s, nir_shader_intrinsics_pass, widen_image_stores, nir_metadata_control_flow, NULL);
 	bound_to_grid(s);
 	pan_preprocess_nir(s, GPU_ID);
+	NIR_PASS(_, s, nir_shader_instructions_pass, lower_res_indices, nir_metadata_control_flow, NULL);
 	memset(&info, 0, sizeof(info));
 	pan_postprocess_nir(s, &inputs, &info);
 	NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_sysvals, nir_metadata_control_flow, NULL);
