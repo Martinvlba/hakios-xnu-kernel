@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "mali_store_index.h"
+#include "mali_draw_shaders.h"   /* the triangle's: tools/mesa/pan/pan_draw_shaders.c */
 #include "mali_air_fill_id.h"       /* AIR (hakios-metal's fill_id) -> tools/mesa/air -> Mesa's panfrost: tools/mesa/pan/air_pan.c */      /* Mesa 26.2.5's panfrost compiler for this GPU: tools/mesa/pan/pan_compile_test.c */
 
 struct obj_array { uint32_t stride, count; uint64_t array; };
@@ -375,6 +376,14 @@ main(int argc, char **argv)
 		}
 	}
 	/*
+	 * The frames' tiler heap: one for the queue, set once (HEAP_SET), as panvk does -- a second heap set on the same queue
+	 * was not taken: the triangle's tiling wrote into the first one's context after it was freed (a page fault there).
+	 */
+	struct { uint32_t vm_id, initial, chunk_size, max_chunks, in_flight, handle; uint64_t ctx, first; } frame_heap =
+	    { .vm_id = vc.id, .initial = 5, .chunk_size = 2u << 20, .max_chunks = 64, .in_flight = 65535 };
+	int frame_heap_made = call(0x4b, &frame_heap, sizeof(frame_heap), "the frames' tiler heap") == 0;
+
+	/*
 	 * A frame with no draws, only a clear: the first fragment job. A 64 x 64 RGBA8 render target (linear) filled with junk,
 	 * a tiler heap (panvk's sizes), its descriptor with a 64 KiB geometry buffer after it, a tiler context (empty polygon
 	 * list), a framebuffer descriptor with one render target whose clear colour is 0xff3366cc (r 0xcc, g 0x66, b 0x33,
@@ -383,7 +392,7 @@ main(int argc, char **argv)
 	 */
 	{
 		struct bo_create desc_bo = { .size = 0x14000 }, rt_bo = { .size = 0x4000 };
-		struct { uint32_t vm_id, initial, chunk_size, max_chunks, in_flight, handle; uint64_t ctx, first; } th;
+		typeof(frame_heap) th;
 		struct { uint32_t handle, pad; } td;
 		const uint64_t DESC_VA = 0x10200000ULL, RT_VA = 0x10300000ULL;
 		const unsigned W = 64, H = 64, levels = (info.tiler_features >> 8) & 0xf;
@@ -393,11 +402,11 @@ main(int argc, char **argv)
 		uint32_t *d, *rt;
 		unsigned right = 0, n = 0;
 
-		th = (typeof(th)){ .vm_id = vc.id, .initial = 5, .chunk_size = 2u << 20, .max_chunks = 64, .in_flight = 65535 };
+		th = frame_heap;
 		if (call(BO_CREATE, &desc_bo, sizeof(desc_bo), "the frame's descriptors") != 0 ||
 		    call(BO_CREATE, &rt_bo, sizeof(rt_bo), "the render target") != 0 ||
 		    (d = map_bo(desc_bo.handle, desc_bo.size)) == NULL || (rt = map_bo(rt_bo.handle, rt_bo.size)) == NULL ||
-		    call(0x4b, &th, sizeof(th), "the frame's tiler heap") != 0) {
+		    !frame_heap_made) {
 			printf("mali_test: the clear: no buffers or no tiler heap\n");
 		} else {
 			memset(rops, 0, sizeof(rops));
@@ -492,8 +501,197 @@ main(int argc, char **argv)
 			}
 			printf("mali_test: the clear (a fragment job, no draws; tiler levels %u): %u of %u pixels 0xff3366cc "
 			    "(rt[0] 0x%x, rt[%u] 0x%x)\n", levels, right, W * H, rt[0], W * H - 1, rt[W * H - 1]);
+			(void)td;
+		}
+	}
+	/*
+	 * The first draw: a triangle (tools/mesa/pan/pan_draw_shaders.c: a vertex shader with no inputs putting vertices 0-2 at
+	 * pixels (16,16), (48,16), (32,48) of a 64 x 64 target, a fragment shader writing red) over the clear, through RUN_IDVS
+	 * then RUN_FRAGMENT. Registers in v10's layout (Mesa has no v11; cs_builder.h's PAN_ARCH <= 11 names say v10's): vertex
+	 * SRT r0, fragment SRT r4, FAU r8/r12, position SPD r16, varying SPD r18, fragment SPD r20, TSD r24, index count r33,
+	 * instance count r34, tiler context r40, scissor r42/43, depth clamps r44/45, VARY_SIZE r48, blend r50, ZSD r52,
+	 * tiler flags r56, DCD0 r57, DCD1 r58, primitive size r60.
+	 */
+	{
+		struct bo_create desc_bo = { .size = 0x14000 }, rt_bo = { .size = 0x4000 }, code_bo2 = { .size = 0x4000 };
+		typeof(frame_heap) th;
+		struct { uint32_t handle, pad; } td;
+		const uint64_t DESC_VA = 0x10400000ULL, RT_VA = 0x10500000ULL, SH_VA = 0x10600000ULL;
+		const unsigned W = 64, H = 64, levels = (info.tiler_features >> 8) & 0xf;
+		static const uint32_t spread[8] = { 0, 0x80, 0x82, 0xa2, 0xaa, 0xea, 0xee, 0xfe };
+		struct bind_op rops[3];
+		struct vm_bind rvb;
+		uint32_t *d, *rt;
+		uint8_t *sh;
+		unsigned red = 0, cleared = 0, other = 0, n = 0;
+
+		th = frame_heap;
+		if (call(BO_CREATE, &desc_bo, sizeof(desc_bo), "the draw's descriptors") != 0 ||
+		    call(BO_CREATE, &rt_bo, sizeof(rt_bo), "the draw's render target") != 0 ||
+		    call(BO_CREATE, &code_bo2, sizeof(code_bo2), "the draw's shaders") != 0 ||
+		    (d = map_bo(desc_bo.handle, desc_bo.size)) == NULL || (rt = map_bo(rt_bo.handle, rt_bo.size)) == NULL ||
+		    (sh = map_bo(code_bo2.handle, code_bo2.size)) == NULL || !frame_heap_made) {
+			printf("mali_test: the triangle: no buffers or no tiler heap\n");
+		} else {
+			memset(rops, 0, sizeof(rops));
+			rops[0] = (struct bind_op){ .flags = 2, .bo_handle = desc_bo.handle, .va = DESC_VA, .size = desc_bo.size };
+			rops[1] = (struct bind_op){ .flags = 2, .bo_handle = rt_bo.handle, .va = RT_VA, .size = rt_bo.size };
+			rops[2] = (struct bind_op){ .flags = 1, .bo_handle = code_bo2.handle, .va = SH_VA, .size = code_bo2.size };
+			rvb = (struct vm_bind){ .vm_id = vc.id, .ops = { sizeof(rops[0]), 3, (uint64_t)(uintptr_t)rops } };
+			call(VM_BIND, &rvb, sizeof(rvb), "the draw's binds");
+			memset(d, 0, desc_bo.size);
+			for (unsigned i = 0; i < W * H; i++) {
+				rt[i] = 0xdeadbeef;
+			}
+			memcpy(sh, mali_tri_vs.code, mali_tri_vs.size);                  /* the vertex shader at 0 */
+			memcpy(sh + 0x800, mali_tri_fs.code, mali_tri_fs.size);         /* the fragment shader at 0x800 */
+			/* the heap, its geometry buffer, the tiler context, the FBD and its render target: as the clear's */
+			d[0] = 9 | 2 << 4;
+			d[1] = 2u << 20;
+			*(uint64_t *)&d[2] = th.first;
+			*(uint64_t *)&d[4] = th.first + 64;
+			*(uint64_t *)&d[6] = th.first + (2u << 20);
+			uint32_t *tc = &d[0x11000 / 4];
+			tc[2] = (levels >= 8 ? 0xff : spread[levels]) | 1u << 17;      /* (and no sample test, for now) */
+			tc[3] = (W - 1) | (H - 1) << 16;
+			*(uint64_t *)&tc[6] = DESC_VA;
+			*(uint64_t *)&tc[8] = (DESC_VA + 0x1000) | (0x10000 >> 12);
+			uint32_t *fb = &d[0x11100 / 4], *rtd = &d[0x11180 / 4];
+			*(uint64_t *)&fb[4] = DESC_VA + 0x11200;
+			fb[8] = (W - 1) | (H - 1) << 16;
+			fb[10] = (W - 1) | (H - 1) << 16;
+			fb[11] = 2 << 6 | 8 << 9 | 1u << 15 | 1u << 24;
+			fb[12] = 1u << 29;
+			*(uint64_t *)&fb[14] = DESC_VA + 0x11000;
+			rtd[0] = 1u << 26;
+			rtd[1] = 1 | 19 << 3 | 2 << 8 | (0 | 1 << 3 | 2 << 6 | 3 << 9) << 16 | 1u << 31;
+			*(uint64_t *)&rtd[8] = RT_VA;
+			rtd[10] = W * 4;
+			rtd[11] = W * H * 4;
+			rtd[12] = rtd[13] = rtd[14] = rtd[15] = 0xff3366cc;
+			d[0x11200 / 4] = 128 | 128 << 16;
+			d[0x11200 / 4 + 32] = 128 | 128 << 16;
+			/* the shader program descriptors: the position shader (vertex), the fragment shader */
+			uint32_t *pos = &d[0x11600 / 4], *frag = &d[0x11640 / 4];
+			pos[0] = 8 | 3 << 4 | (mali_tri_vs.work_regs <= 32 ? 2u : 0u) << 30;
+			pos[1] = (uint32_t)(mali_tri_vs.preload >> 48);
+			*(uint64_t *)&pos[2] = SH_VA;
+			frag[0] = 8 | 2 << 4 | (mali_tri_fs.work_regs <= 32 ? 2u : 0u) << 30;
+			frag[1] = (uint32_t)(mali_tri_fs.preload >> 48);
+			*(uint64_t *)&frag[2] = SH_VA + 0x800;
+			d[0x11680 / 4 + 1] = 31;                                        /* local storage: none */
+			/* the blend descriptor (64-aligned): on, replace (A src + B dest * C zero) for RGBA, fixed function into RGBA8 */
+			uint32_t *bl = &d[0x11700 / 4];
+			bl[0] = 1u << 9;
+			bl[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
+			bl[2] = 1 | 3 << 3 | 0 << 16;                                   /* opaque (a replace), 4 components, RT 0 */
+			bl[3] = 237u << 12;                                             /* the tile buffer's format: RGBA8 TB, RGBA */
+			/* the depth/stencil descriptor: everything passes, nothing written */
+			uint32_t *zs = &d[0x11740 / 4];
+			zs[0] = 7 | 7 << 4 | 7 << 16;
+			zs[4] = 1u << 21 | 1u << 22 | 7u << 29;                         /* separated dependency tracking (v11), depth cull */
+			/* the stream at 0x11800 */
+			uint64_t *st = (uint64_t *)&d[0x11800 / 4];
+			st[n++] = 28ULL << 56 | 0ULL << 32 | 3;
+			st[n++] = 28ULL << 56 | 9ULL << 32 | 0x8;
+			st[n++] = 28ULL << 56 | 1ULL << 32 | 0;
+			st[n++] = 28ULL << 56 | 2ULL << 32 | 1;
+			st[n++] = 28ULL << 56 | 8ULL << 32 | 0xf0;
+			st[n++] = 34ULL << 56 | 0xf;                                    /* REQ_RESOURCE */
+			st[n++] = 1ULL << 56 | 0ULL << 48 | th.ctx;
+			st[n++] = 48ULL << 56 | 0ULL << 40;                             /* HEAP_SET */
+			st[n++] = 1ULL << 56 | 0ULL << 48;                              /* vertex SRT: none */
+			st[n++] = 1ULL << 56 | 4ULL << 48;                              /* fragment SRT: none */
+			st[n++] = 1ULL << 56 | 8ULL << 48;                              /* vertex FAU: none */
+			st[n++] = 1ULL << 56 | 12ULL << 48;                             /* fragment FAU: none */
+			st[n++] = 1ULL << 56 | 16ULL << 48 | (DESC_VA + 0x11600);       /* position shader */
+			/* (v11's layout is v10's plus TILER_FLAGS2 at r61: upstream Mesa's genxml v11.xml, commit 06efd854) */
+			st[n++] = 1ULL << 56 | 18ULL << 48;                             /* varying shader: none */
+			st[n++] = 2ULL << 56 | 61ULL << 48;                             /* TILER_FLAGS2: VRS 1x1, keep */
+			st[n++] = 1ULL << 56 | 20ULL << 48 | (DESC_VA + 0x11640);       /* fragment shader */
+			st[n++] = 1ULL << 56 | 24ULL << 48 | (DESC_VA + 0x11680);       /* local storage */
+			st[n++] = 2ULL << 56 | 32ULL << 48;                             /* global attribute offset */
+			st[n++] = 2ULL << 56 | 33ULL << 48 | 3;                         /* three vertices */
+			st[n++] = 2ULL << 56 | 34ULL << 48 | 1;                         /* one instance */
+			st[n++] = 2ULL << 56 | 35ULL << 48;
+			st[n++] = 2ULL << 56 | 36ULL << 48;
+			st[n++] = 2ULL << 56 | 37ULL << 48;
+			st[n++] = 2ULL << 56 | 38ULL << 48 | (1u << 12 | 1u << 24 | 1u << 25);  /* DCD2: RT 0 written; no Z/S read (v11) */
+			st[n++] = 2ULL << 56 | 39ULL << 48;                             /* index buffer size */
+			st[n++] = 1ULL << 56 | 40ULL << 48 | (DESC_VA + 0x11000);       /* the tiler context */
+			st[n++] = 2ULL << 56 | 42ULL << 48;                             /* scissor: (0, 0) .. */
+			st[n++] = 2ULL << 56 | 43ULL << 48 | ((W - 1) | (H - 1) << 16); /* .. (63, 63) */
+			st[n++] = 2ULL << 56 | 44ULL << 48;                             /* depth clamp 0.0 .. */
+			st[n++] = 2ULL << 56 | 45ULL << 48 | 0x3f800000;                /* .. 1.0 */
+			st[n++] = 1ULL << 56 | 46ULL << 48;                             /* no occlusion query */
+			st[n++] = 2ULL << 56 | 48ULL << 48;                             /* no varyings */
+			st[n++] = 1ULL << 56 | 50ULL << 48 | ((DESC_VA + 0x11700) | 1); /* one blend descriptor */
+			st[n++] = 1ULL << 56 | 52ULL << 48 | (DESC_VA + 0x11740);       /* depth/stencil */
+			st[n++] = 2ULL << 56 | 56ULL << 48 | (8 | 1u << 22);            /* triangles, basic FIFO (no depth culls, for now) */
+			st[n++] = 2ULL << 56 | 57ULL << 48 | (1u << 23 | 1u << 26);     /* DCD0: scissor to bbox, cull zero area (v11) */
+			st[n++] = 2ULL << 56 | 58ULL << 48 | (0xffff | 1u << 16);       /* DCD1: all samples, render target 0 */
+			st[n++] = 2ULL << 56 | 60ULL << 48 | 0x3f800000;                /* primitive size 1.0 */
+			st[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                 /* RUN_IDVS: malloc, the fragment's own SRT */
+			st[n++] = 3ULL << 56 | 0xffffULL << 16;                         /* WAIT */
+			st[n++] = 9ULL << 56;                                           /* FINISH_TILING: the polygon lists out */
+			st[n++] = 3ULL << 56 | 0xffffULL << 16;                         /* WAIT */
+			st[n++] = 1ULL << 56 | 40ULL << 48 | ((DESC_VA + 0x11100) | 1); /* the FBD */
+			st[n++] = 2ULL << 56 | 42ULL << 48 | 0;
+			st[n++] = 2ULL << 56 | 43ULL << 48 | ((W - 1) | (H - 1) << 16);
+			st[n++] = 7ULL << 56;                                           /* RUN_FRAGMENT */
+			st[n++] = 3ULL << 56 | 0xffffULL << 16;                         /* WAIT */
+			{
+				struct syncobj_create sc = { 0 };
+				struct sync_op signal;
+				struct queue_submit qs;
+				struct group_submit gs;
+				struct syncobj_wait w;
+				uint64_t nothing = 0;
+
+				__asm__ volatile ("dsb sy" ::: "memory");
+				if (call(SYNCOBJ_CREATE, &sc, sizeof(sc), "a sync object") == 0) {
+					signal = (struct sync_op){ .flags = 1u << 31, .handle = sc.handle };
+					qs = (struct queue_submit){ .stream_size = n * 8, .stream_addr = DESC_VA + 0x11800,
+						.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal } };
+					gs = (struct group_submit){ .group_handle = gc.group_handle, .queue_submits = { sizeof(qs), 1,
+						(uint64_t)(uintptr_t)&qs } };
+					w = (struct syncobj_wait){ .handles = (uint64_t)(uintptr_t)&sc.handle, .timeout_nsec = 2000000000LL,
+						.count_handles = 1, .flags = 1 };
+					if (call(GROUP_SUBMIT, &gs, sizeof(gs), "the triangle's submission") == 0) {
+						call(SYNCOBJ_WAIT, &w, sizeof(w), "its wait");
+					}
+				}
+				call(0x7f, &nothing, sizeof(nothing), "the GPU's state after the triangle");
+			}
+			for (unsigned i = 0; i < W * H; i++) {
+				red += rt[i] == 0xff0000ff;
+				cleared += rt[i] == 0xff3366cc;
+			}
+			other = W * H - red - cleared;
+			for (unsigned i = 0; i < 32; i += 8) {
+				printf("mali_test:   tiler context +%02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", i * 4, tc[i], tc[i + 1],
+				    tc[i + 2], tc[i + 3], tc[i + 4], tc[i + 5], tc[i + 6], tc[i + 7]);
+			}
+			for (unsigned i = 0; i < 16; i += 8) {
+				const uint32_t *g = &d[0x1000 / 4];
+
+				printf("mali_test:   geometry buffer +%02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", i * 4, g[i], g[i + 1],
+				    g[i + 2], g[i + 3], g[i + 4], g[i + 5], g[i + 6], g[i + 7]);
+			}
+			printf("mali_test:   fragments shaded (the fragment shader's count): %u\n", d[0x12000 / 4]);
+			printf("mali_test: the triangle: %u red pixels (about 512 wanted), %u of the clear colour, %u else; centre "
+			    "(32, 28) 0x%x, corner 0x%x\n", red, cleared, other, rt[28 * W + 32], rt[0]);
+			for (unsigned y = 0; y < H; y += 4) {
+				char row[W / 2 + 1];
+
+				for (unsigned x = 0; x < W; x += 2) {
+					row[x / 2] = rt[y * W + x] == 0xff0000ff ? '#' : rt[y * W + x] == 0xff3366cc ? '.' : '?';
+				}
+				row[W / 2] = 0;
+				printf("mali_test:   %s\n", row);
+			}
 			td = (typeof(td)){ .handle = th.handle };
-			call(0x4c, &td, sizeof(td), "the frame's heap's destruction");
+			call(0x4c, &td, sizeof(td), "the frames' heap's destruction");
 		}
 	}
 	{
