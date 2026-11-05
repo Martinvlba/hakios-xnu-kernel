@@ -375,6 +375,26 @@ main(int argc, char **argv)
 		}
 	}
 	{
+		/* tiler heaps (panthor's TILER_HEAP_CREATE 0x4b, DESTROY 0x4c), with panvk's sizes: five 2 MiB chunks of 64 */
+		struct { uint32_t vm_id, initial, chunk_size, max_chunks, in_flight, handle; uint64_t ctx, first; } th;
+		struct { uint32_t handle, pad; } td;
+		int heap_ok = 0;
+
+		for (int round = 0; round < 2; round++) {
+			th = (typeof(th)){ .vm_id = vc.id, .initial = 5, .chunk_size = 2u << 20, .max_chunks = 64, .in_flight = 65535 };
+			if (call(0x4b, &th, sizeof(th), "a tiler heap") == 0 && th.handle != 0 && th.ctx >= 0x800000000000ULL &&
+			    th.first >= 0x800000000000ULL && (th.first & ((2u << 20) - 1)) == 0) {
+				printf("mali_test: tiler heap %u: context 0x%llx, first chunk 0x%llx\n", th.handle,
+				    (unsigned long long)th.ctx, (unsigned long long)th.first);
+				td = (typeof(td)){ .handle = th.handle };
+				heap_ok += call(0x4c, &td, sizeof(td), "the heap's destruction") == 0;
+			}
+		}
+		th = (typeof(th)){ .vm_id = vc.id, .initial = 1, .chunk_size = 3u << 20, .max_chunks = 1, .in_flight = 1 };
+		printf("mali_test: tiler heaps: %d of 2 made and destroyed, a chunk size of 3 MiB %s\n", heap_ok,
+		    call(0x4b, &th, sizeof(th), "a heap that must be refused") != 0 ? "refused (right)" : "ACCEPTED (wrong)");
+	}
+	{
 		uint64_t nothing = 0;
 
 		call(0x7f, &nothing, sizeof(nothing), "the queues' state into the kernel's log");
