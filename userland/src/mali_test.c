@@ -374,6 +374,128 @@ main(int argc, char **argv)
 			    right, out[0], out[1], out[255]);
 		}
 	}
+	/*
+	 * A frame with no draws, only a clear: the first fragment job. A 64 x 64 RGBA8 render target (linear) filled with junk,
+	 * a tiler heap (panvk's sizes), its descriptor with a 64 KiB geometry buffer after it, a tiler context (empty polygon
+	 * list), a framebuffer descriptor with one render target whose clear colour is 0xff3366cc (r 0xcc, g 0x66, b 0x33,
+	 * a 0xff) and the sample positions (single-sampled); the stream: REQ_RESOURCE, HEAP_SET, RUN_FRAGMENT, WAIT. Layouts:
+	 * Mesa 26.2.5's genxml v10.xml and panvk's CSF path (the port's log, "render pipelines").
+	 */
+	{
+		struct bo_create desc_bo = { .size = 0x14000 }, rt_bo = { .size = 0x4000 };
+		struct { uint32_t vm_id, initial, chunk_size, max_chunks, in_flight, handle; uint64_t ctx, first; } th;
+		struct { uint32_t handle, pad; } td;
+		const uint64_t DESC_VA = 0x10200000ULL, RT_VA = 0x10300000ULL;
+		const unsigned W = 64, H = 64, levels = (info.tiler_features >> 8) & 0xf;
+		static const uint32_t spread[8] = { 0, 0x80, 0x82, 0xa2, 0xaa, 0xea, 0xee, 0xfe };
+		struct bind_op rops[2];
+		struct vm_bind rvb;
+		uint32_t *d, *rt;
+		unsigned right = 0, n = 0;
+
+		th = (typeof(th)){ .vm_id = vc.id, .initial = 5, .chunk_size = 2u << 20, .max_chunks = 64, .in_flight = 65535 };
+		if (call(BO_CREATE, &desc_bo, sizeof(desc_bo), "the frame's descriptors") != 0 ||
+		    call(BO_CREATE, &rt_bo, sizeof(rt_bo), "the render target") != 0 ||
+		    (d = map_bo(desc_bo.handle, desc_bo.size)) == NULL || (rt = map_bo(rt_bo.handle, rt_bo.size)) == NULL ||
+		    call(0x4b, &th, sizeof(th), "the frame's tiler heap") != 0) {
+			printf("mali_test: the clear: no buffers or no tiler heap\n");
+		} else {
+			memset(rops, 0, sizeof(rops));
+			rops[0] = (struct bind_op){ .flags = 2, .bo_handle = desc_bo.handle, .va = DESC_VA, .size = desc_bo.size };
+			rops[1] = (struct bind_op){ .flags = 2, .bo_handle = rt_bo.handle, .va = RT_VA, .size = rt_bo.size };
+			rvb = (struct vm_bind){ .vm_id = vc.id, .ops = { sizeof(rops[0]), 2, (uint64_t)(uintptr_t)rops } };
+			call(VM_BIND, &rvb, sizeof(rvb), "the frame's binds");
+			memset(d, 0, desc_bo.size);
+			for (unsigned i = 0; i < W * H; i++) {
+				rt[i] = 0xdeadbeef;
+			}
+			/* the tiler heap descriptor at 0: a buffer, of the tiler heap type; its geometry buffer at 0x1000 */
+			d[0] = 9 | 2 << 4;
+			d[1] = th.initial ? (2u << 20) : 0;
+			*(uint64_t *)&d[2] = th.first;
+			*(uint64_t *)&d[4] = th.first + 64;
+			*(uint64_t *)&d[6] = th.first + (2u << 20);
+			/* the tiler context at 0x11000 */
+			uint32_t *tc = &d[0x11000 / 4];
+			tc[2] = levels >= 8 ? 0xff : spread[levels];                    /* hierarchy mask; single-sampled */
+			tc[3] = (W - 1) | (H - 1) << 16;
+			tc[4] = 0;                                                      /* one layer */
+			*(uint64_t *)&tc[6] = DESC_VA;                                  /* the heap descriptor */
+			*(uint64_t *)&tc[8] = (DESC_VA + 0x1000) | (0x10000 >> 12);     /* the geometry buffer, 64 KiB */
+			/* the framebuffer descriptor at 0x11100, its render target after its 128 bytes */
+			uint32_t *fb = &d[0x11100 / 4], *rtd = &d[0x11180 / 4];
+			*(uint64_t *)&fb[4] = DESC_VA + 0x11200;                        /* sample locations */
+			fb[8] = (W - 1) | (H - 1) << 16;
+			fb[9] = 0;                                                      /* bound min 0, 0 */
+			fb[10] = (W - 1) | (H - 1) << 16;                               /* bound max */
+			fb[11] = 0 /* 1 sample */ | 0 << 3 | 2 << 6 /* tie-break -180 in 0 out */ | 8 << 9 /* 16x16 tiles */ |
+			    1u << 15 | 0 << 19 /* one render target */ | 1u << 24 /* colour buffer: 1 KiB */;
+			fb[12] = 1u << 29;                                              /* empty tiles written too (no draws: all are) */
+			*(uint64_t *)&fb[14] = DESC_VA + 0x11000;                       /* the tiler context */
+			rtd[0] = 1u << 26;                                              /* internal format R8G8B8A8 */
+			rtd[1] = 1 | 19 << 3 | 2 << 8 | (0 | 1 << 3 | 2 << 6 | 3 << 9) << 16 |  /* write, RGBA8, linear, identity, */
+			    1u << 31;                                                   /* clean tiles written (the clear) */
+			*(uint64_t *)&rtd[8] = RT_VA;
+			rtd[10] = W * 4;                                                /* row stride */
+			rtd[11] = W * H * 4;                                            /* surface stride */
+			rtd[12] = rtd[13] = rtd[14] = rtd[15] = 0xff3366cc;             /* the clear colour */
+			/* the sample positions at 0x11200: one sample, at the centre (and the origin, entry 32) */
+			d[0x11200 / 4] = 128 | 128 << 16;
+			d[0x11200 / 4 + 32] = 128 | 128 << 16;
+			/* the stream at 0x11400 */
+			uint64_t *st = (uint64_t *)&d[0x11400 / 4];
+			st[n++] = 28ULL << 56 | 0ULL << 32 | 3;
+			st[n++] = 28ULL << 56 | 9ULL << 32 | 0x8;
+			st[n++] = 28ULL << 56 | 1ULL << 32 | 0;
+			st[n++] = 28ULL << 56 | 2ULL << 32 | 1;
+			st[n++] = 28ULL << 56 | 8ULL << 32 | 0xf0;
+			st[n++] = 34ULL << 56 | 0xf;                                    /* REQ_RESOURCE: compute, fragment, tiler, IDVS */
+			st[n++] = 1ULL << 56 | 0ULL << 48 | th.ctx;                     /* r0:r1 <- the heap context ... */
+			st[n++] = 48ULL << 56 | 0ULL << 40;                             /* ... HEAP_SET */
+			st[n++] = 1ULL << 56 | 40ULL << 48 | ((DESC_VA + 0x11100) | 1); /* r40 <- the FBD | (it is one), 1 RT */
+			st[n++] = 2ULL << 56 | 42ULL << 48 | 0;                         /* bounding box min */
+			st[n++] = 2ULL << 56 | 43ULL << 48 | ((W - 1) | (H - 1) << 16); /* max */
+			st[n++] = 7ULL << 56;                                           /* RUN_FRAGMENT, Z order */
+			st[n++] = 3ULL << 56 | 0xffffULL << 16;                         /* WAIT */
+			{
+				struct syncobj_create sc = { 0 };
+				struct sync_op signal;
+				struct queue_submit qs;
+				struct group_submit gs;
+				struct syncobj_wait w;
+
+				uint64_t nothing = 0;
+
+				__asm__ volatile ("dsb sy" ::: "memory");
+				printf("mali_test: the clear: the GPU's state before it (kernel log)\n");
+				call(0x7f, &nothing, sizeof(nothing), "the GPU's state before the clear");
+				if (call(SYNCOBJ_CREATE, &sc, sizeof(sc), "a sync object") == 0) {
+					signal = (struct sync_op){ .flags = 1u << 31, .handle = sc.handle };
+					qs = (struct queue_submit){ .stream_size = n * 8, .stream_addr = DESC_VA + 0x11400,
+						.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal } };
+					gs = (struct group_submit){ .group_handle = gc.group_handle, .queue_submits = { sizeof(qs), 1,
+						(uint64_t)(uintptr_t)&qs } };
+					w = (struct syncobj_wait){ .handles = (uint64_t)(uintptr_t)&sc.handle, .timeout_nsec = 2000000000LL,
+						.count_handles = 1, .flags = 1 };
+					if (call(GROUP_SUBMIT, &gs, sizeof(gs), "the clear's submission") == 0 &&
+					    call(SYNCOBJ_WAIT, &w, sizeof(w), "its wait") == 0) {
+						for (unsigned i = 0; i < W * H; i++) {
+							right += rt[i] == 0xff3366cc;
+						}
+					}
+				}
+			}
+			{
+				uint64_t nothing = 0;
+
+				call(0x7f, &nothing, sizeof(nothing), "the GPU's state after the clear");
+			}
+			printf("mali_test: the clear (a fragment job, no draws; tiler levels %u): %u of %u pixels 0xff3366cc "
+			    "(rt[0] 0x%x, rt[%u] 0x%x)\n", levels, right, W * H, rt[0], W * H - 1, rt[W * H - 1]);
+			td = (typeof(td)){ .handle = th.handle };
+			call(0x4c, &td, sizeof(td), "the frame's heap's destruction");
+		}
+	}
 	{
 		/* tiler heaps (panthor's TILER_HEAP_CREATE 0x4b, DESTROY 0x4c), with panvk's sizes: five 2 MiB chunks of 64 */
 		struct { uint32_t vm_id, initial, chunk_size, max_chunks, in_flight, handle; uint64_t ctx, first; } th;
