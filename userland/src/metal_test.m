@@ -738,6 +738,107 @@ compute(void)
 	    (unsigned long long)((t3 - t2) / 1000));
 	printf("metal_test:   threadgroup memory and spills %s\n", cb2.status == MTLCommandBufferStatusCompleted && tgright == 512 &&
 	    pvright == 1024 ? "WORK" : "FAILED");
+
+	/*
+	 * Textures (hakios-metal's tex_fill, tex_copy, tex_sample_gid), 16 x 16 each: a kernel writing a texture
+	 * (out(x, y) = (i * 0x9E3779B1 + c, x, y, 0xdead), i = 16 y + x, c by setBytes:), one copying a texture into another
+	 * texel for texel, and one sampling an RGBA8Unorm texture at its texels' centres (nearest, clamped: each result is its
+	 * texel / 255).
+	 */
+	const unsigned W = 16;
+	id<MTLFunction> ff = [library newFunctionWithName:@"tex_fill"], cf = [library newFunctionWithName:@"tex_copy"],
+	    sf = [library newFunctionWithName:@"tex_sample_gid"];
+	id<MTLComputePipelineState> fp = ff ? [device newComputePipelineStateWithFunction:ff error:&error] : nil;
+	id<MTLComputePipelineState> cp = cf ? [device newComputePipelineStateWithFunction:cf error:&error] : nil;
+	id<MTLComputePipelineState> sp = sf ? [device newComputePipelineStateWithFunction:sf error:&error] : nil;
+	MTLTextureDescriptor *u32 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Uint width:W height:W
+	    mipmapped:NO];
+	u32.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	MTLTextureDescriptor *u8 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W height:W
+	    mipmapped:NO];
+	u8.usage = MTLTextureUsageShaderRead;
+	id<MTLTexture> filled = [device newTextureWithDescriptor:u32], src = [device newTextureWithDescriptor:u32],
+	    copied = [device newTextureWithDescriptor:u32], sampled = [device newTextureWithDescriptor:u8];
+	MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+	id<MTLSamplerState> nearest = [device newSamplerStateWithDescriptor:sd];
+	id<MTLBuffer> samples = [device newBufferWithLength:W * W * 16 options:MTLResourceStorageModeShared];
+	if (fp == nil || cp == nil || sp == nil || filled == nil || src == nil || copied == nil || sampled == nil || nearest == nil ||
+	    ![filled respondsToSelector:@selector(replaceRegion:mipmapLevel:withBytes:bytesPerRow:)]) {
+		printf("metal_test:   textures FAILED (pipelines %p %p %p, textures %s %s, sampler %s: %s)\n", fp, cp, sp,
+		    filled ? object_getClassName(filled) : "nil", sampled ? object_getClassName(sampled) : "nil",
+		    nearest ? object_getClassName(nearest) : "nil", error ? [error.localizedDescription UTF8String] : "");
+		return;
+	}
+	uint32_t in[W * W * 4], zero[W * W * 4], back[W * W * 4];
+	uint8_t px[W * W * 4];
+	memset(zero, 0, sizeof(zero));
+	for (uint32_t y = 0; y < W; y++) {
+		for (uint32_t x = 0; x < W; x++) {
+			uint32_t *t = &in[(y * W + x) * 4];
+			uint8_t *p = &px[(y * W + x) * 4];
+
+			t[0] = x + 16 * y, t[1] = 0x100 + x, t[2] = 0x200 + y, t[3] = 0x300;
+			p[0] = (uint8_t)(x * 16), p[1] = (uint8_t)(y * 16), p[2] = (uint8_t)(x + y), p[3] = 255;
+		}
+	}
+	MTLRegion all = MTLRegionMake2D(0, 0, W, W);
+	[src replaceRegion:all mipmapLevel:0 withBytes:in bytesPerRow:W * 16];
+	[filled replaceRegion:all mipmapLevel:0 withBytes:zero bytesPerRow:W * 16];
+	[copied replaceRegion:all mipmapLevel:0 withBytes:zero bytesPerRow:W * 16];
+	[sampled replaceRegion:all mipmapLevel:0 withBytes:px bytesPerRow:W * 4];
+	memset(samples.contents, 0, W * W * 16);
+	uint32_t c3 = 0x1234;
+	id<MTLCommandBuffer> cb3 = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e3 = [cb3 computeCommandEncoder];
+	[e3 setComputePipelineState:fp];
+	[e3 setTexture:filled atIndex:0];
+	[e3 setBytes:&c3 length:sizeof(c3) atIndex:0];
+	[e3 dispatchThreads:MTLSizeMake(W, W, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e3 setComputePipelineState:cp];
+	[e3 setTexture:copied atIndex:0];
+	[e3 setTexture:src atIndex:1];
+	[e3 dispatchThreadgroups:MTLSizeMake(2, 2, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e3 setComputePipelineState:sp];
+	[e3 setTexture:sampled atIndex:0];
+	[e3 setSamplerState:nearest atIndex:0];
+	[e3 setBuffer:samples offset:0 atIndex:0];
+	[e3 dispatchThreads:MTLSizeMake(W, W, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e3 endEncoding];
+	t2 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	[cb3 commit];
+	[cb3 waitUntilCompleted];
+	t3 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	unsigned fillright = 0, copyright = 0, sampleright = 0;
+	[filled getBytes:back bytesPerRow:W * 16 fromRegion:all mipmapLevel:0];
+	for (uint32_t y = 0; y < W; y++) {
+		for (uint32_t x = 0; x < W; x++) {
+			const uint32_t *t = &back[(y * W + x) * 4];
+
+			fillright += t[0] == (y * W + x) * 0x9E3779B1u + 0x1234u && t[1] == x && t[2] == y && t[3] == 0xdead;
+		}
+	}
+	uint32_t first[4] = { back[0], back[1], back[2], back[3] };
+	[copied getBytes:back bytesPerRow:W * 16 fromRegion:all mipmapLevel:0];
+	for (unsigned i = 0; i < W * W; i++) {
+		copyright += memcmp(&back[i * 4], &in[i * 4], 16) == 0;
+	}
+	const float *f = samples.contents;
+	for (unsigned i = 0; i < W * W; i++) {
+		int ok = 1;
+
+		for (int ch = 0; ch < 4; ch++) {
+			float want = px[i * 4 + ch] / 255.0f, d = f[i * 4 + ch] - want;
+			ok = ok && d < 0.002f && d > -0.002f;
+		}
+		sampleright += ok;
+	}
+	printf("metal_test:   textures: written %u of 256 (texel 0: %#x %u %u %#x), copied %u of 256, sampled %u of 256 (texel 1: %.3f %.3f "
+	    "%.3f %.3f); status %lu%s, %llu us\n", fillright, first[0], first[1], first[2], first[3], copyright, sampleright, f[4], f[5],
+	    f[6], f[7], (unsigned long)cb3.status,
+	    cb3.error ? [[NSString stringWithFormat:@" (%@)", cb3.error.localizedDescription] UTF8String] : "",
+	    (unsigned long long)((t3 - t2) / 1000));
+	printf("metal_test:   textures %s\n", cb3.status == MTLCommandBufferStatusCompleted && fillright == 256 && copyright == 256 &&
+	    sampleright == 256 ? "WORK" : "FAILED");
 }
 
 int
