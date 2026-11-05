@@ -514,8 +514,9 @@ main(int argc, char **argv)
 	 */
 	{
 		static const char *const variant[] = {
-			"as is", "no malloc (DATA_INVALID_FAULT: last)", "FIFO auto", "hierarchy 0x01", "hierarchy 0xaa", "DCD0 0", "no fragment SRT select",
+			"as is", "no malloc (DATA_INVALID_FAULT)", "FIFO auto", "hierarchy 0x01", "hierarchy 0xaa", "DCD0 0", "no fragment SRT select",
 			"no geometry buffer", "heap bottom = base", "triangle strip", "rotating primitives", "vertex warp limit 1",
+			"as is, again (the first on the heap no more)",
 		};
 		const unsigned VARIANTS = sizeof(variant) / sizeof(variant[0]);
 		struct bo_create desc_bo = { .size = 0x20000 }, rt_bo = { .size = 0x40000 }, code_bo2 = { .size = 0x4000 };
@@ -579,6 +580,8 @@ main(int argc, char **argv)
 			uint32_t *zs = &d[0x11740 / 4];
 			zs[0] = 7 | 7 << 4 | 7 << 16;
 			zs[4] = 1u << 21 | 1u << 22 | 7u << 29;
+			printf("mali_test:   before the triangles: heap descriptor %08x %08x %08x %08x %08x %08x %08x %08x\n", d[0], d[1],
+			    d[2], d[3], d[4], d[5], d[6], d[7]);
 			for (unsigned v = 0; v < VARIANTS; v++) {
 				/* this variant's: tiler context, FBD + RT, counter (at 0x12000 + 0x800 v), push constants, stream */
 				uint64_t base = 0x12000 + 0x800 * (uint64_t)v, rtva = RT_VA + 0x4000 * (uint64_t)v;
@@ -688,6 +691,14 @@ main(int argc, char **argv)
 				for (unsigned i = 0; i < W * H; i++) {
 					red += rt[i] == 0xff0000ff;
 					cleared += rt[i] == 0xff3366cc;
+				}
+				if (v <= 2) {
+					const uint32_t *g = &d[0x1000 / 4];
+
+					printf("mali_test:   after variant %u: heap descriptor %08x %08x %08x %08x %08x %08x %08x %08x; geometry "
+					    "buffer %08x %08x %08x %08x %08x %08x %08x %08x; tiler context +40: %08x %08x %08x %08x\n", v, d[0], d[1],
+					    d[2], d[3], d[4], d[5], d[6], d[7], g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7], tc[16], tc[17],
+					    tc[18], tc[19]);
 				}
 				printf("mali_test: triangle variant %2u (%s): %u fragments shaded, %u red pixels, %u cleared, %u else; "
 				    "polygon list 0x%x%08x\n", v, variant[v], *count, red, cleared, W * H - red - cleared, tc[1], tc[0]);
