@@ -609,6 +609,87 @@ blits(void)
 	printf("metal_test:   blits %s\n", cb.status == MTLCommandBufferStatusCompleted && handled == 1 && same && filled && edges ? "WORK" : "FAILED");
 }
 
+/*
+ * Compute through Metal's own API: a library (hakios-metal's fill_id kernel, AIR, in a .metallib made by
+ * tools/mesa/pan/mk-metallib.py), a compute pipeline (the plug-in compiles the AIR for the GPU in this process: on the
+ * Mali AIR -> NIR -> Mesa's panfrost), and one encoder with two dispatches: dispatchThreadgroups: of 4 x 64 threads with
+ * c in a buffer, and dispatchThreads: of 1000 threads (not a multiple of the threadgroup's 64) with c from setBytes:.
+ * fill_id: out[gid] = gid * 0x9E3779B1 + c. What lies past each grid must be left as it was.
+ */
+#include "metal_kernels_lib.h"
+
+static void
+compute(void)
+{
+	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+	NSError *error = nil;
+
+	if (device == nil) {
+		printf("metal_test:   no device\n");
+		return;
+	}
+	dispatch_data_t data = dispatch_data_create(metal_kernels_lib, sizeof(metal_kernels_lib), NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+	id<MTLLibrary> library = [device newLibraryWithData:data error:&error];
+	id<MTLFunction> function = [library newFunctionWithName:@"fill_id"];
+	uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	id<MTLComputePipelineState> pipeline = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
+	uint64_t t1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+
+	printf("metal_test:   library %s, function %s, pipeline %s (%llu ms)%s%s\n", library ? "made" : "nil", function ? "found" : "nil",
+	    pipeline ? object_getClassName(pipeline) : "nil", (unsigned long long)((t1 - t0) / 1000000), error ? ": " : "",
+	    error ? [error.localizedDescription UTF8String] : "");
+	if (pipeline == nil || ![pipeline respondsToSelector:@selector(threadExecutionWidth)]) {
+		printf("metal_test:   compute FAILED (no pipeline of the GPU's)\n");
+		return;
+	}
+	printf("metal_test:   pipeline: up to %lu threads a threadgroup, SIMD width %lu\n", (unsigned long)pipeline.maxTotalThreadsPerThreadgroup,
+	    (unsigned long)pipeline.threadExecutionWidth);
+	id<MTLCommandQueue> queue = [device newCommandQueue];
+	id<MTLBuffer> a = [device newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+	id<MTLBuffer> b = [device newBufferWithLength:8192 options:MTLResourceStorageModeShared];
+	id<MTLBuffer> c = [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+	if (queue == nil || a == nil || b == nil || c == nil || cb == nil || encoder == nil) {
+		printf("metal_test:   compute FAILED (queue %p, command buffer %p, encoder %p)\n", queue, cb, encoder);
+		return;
+	}
+	memset(a.contents, 0xee, 4096);
+	memset(b.contents, 0xee, 8192);
+	*(uint32_t *)c.contents = 0x1234;
+	uint32_t c2 = 0xabcd;
+	[encoder setComputePipelineState:pipeline];
+	[encoder setBuffer:a offset:0 atIndex:0];
+	[encoder setBuffer:c offset:0 atIndex:1];
+	[encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	[encoder setBuffer:b offset:0 atIndex:0];
+	[encoder setBytes:&c2 length:sizeof(c2) atIndex:1];
+	[encoder dispatchThreads:MTLSizeMake(1000, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	[encoder endEncoding];
+	uint64_t t2 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	[cb commit];
+	[cb waitUntilCompleted];
+	uint64_t t3 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	const uint32_t *pa = a.contents, *pb = b.contents;
+	unsigned righta = 0, rightb = 0, past = 1;
+	for (uint32_t i = 0; i < 256; i++) {
+		righta += pa[i] == i * 0x9E3779B1u + 0x1234u;
+	}
+	for (uint32_t i = 0; i < 1000; i++) {
+		rightb += pb[i] == i * 0x9E3779B1u + 0xabcdu;
+	}
+	for (unsigned i = 256; i < 1024; i++) {
+		past = past && pa[i] == 0xeeeeeeeeu;
+	}
+	for (unsigned i = 1000; i < 2048; i++) {
+		past = past && pb[i] == 0xeeeeeeeeu;
+	}
+	printf("metal_test:   compute: status %lu%s, dispatchThreadgroups %u of 256, dispatchThreads %u of 1000, past the grids %s, %llu us\n",
+	    (unsigned long)cb.status, cb.error ? [[NSString stringWithFormat:@" (%@)", cb.error.localizedDescription] UTF8String] : "",
+	    righta, rightb, past ? "untouched" : "CHANGED", (unsigned long long)((t3 - t2) / 1000));
+	printf("metal_test:   compute %s\n", cb.status == MTLCommandBufferStatusCompleted && righta == 256 && rightb == 1000 && past ? "WORKS" : "FAILED");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -644,6 +725,8 @@ main(int argc, char **argv)
 			device_objects();
 		} else if (strcmp(argv[1], "blits") == 0) {
 			blits();
+		} else if (strcmp(argv[1], "compute") == 0) {
+			compute();
 		} else {
 			printf("metal_test: no such question: %s\n", argv[1]);
 			return 2;
@@ -659,6 +742,7 @@ main(int argc, char **argv)
 	the_device();
 	in_a_new_process("what the device makes: buffers, a library", "objects", 60);
 	in_a_new_process("blits through Metal: copy and fill, done by the GPU", "blits", 60);
+	in_a_new_process("compute through Metal: fill_id compiled for the GPU and dispatched", "compute", 60);
 	printf("metal_test: what Darwin publishes about graphics (artwork, not rendering)\n");
 	gestalt();
 	printf("metal_test: CoreImage, which has a path without Metal\n");

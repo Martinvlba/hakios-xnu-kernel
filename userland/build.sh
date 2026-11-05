@@ -258,7 +258,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# (HAKIOS_METAL_OUT=ios-mali: the Pixel 8a's Mali build of it, `make ios-mali`)
 		for HM_OUT in ${HAKIOS_METAL_OUT:+$HM/out/$HAKIOS_METAL_OUT} $HM/out/ios $HM/out/darwin; do
 			if [ -f $HM_OUT/libhakios-metal.a ]; then
-				METAL_GPU="-DHAKIOS_METAL_GPU -I$HM/include $HM_OUT/libhakios-metal.a -lc++ -framework IOKit -framework IOSurface"
+				METAL_GPU="-DHAKIOS_METAL_GPU -I$HM/include $HM_OUT/libhakios-metal.a -lc++ -lz -framework IOKit -framework IOSurface"
 				echo "build.sh: HakiosMetal with hakios-metal ($HM_OUT)"
 				break
 			fi
