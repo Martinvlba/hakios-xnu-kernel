@@ -91,12 +91,23 @@ ios: out/ios/libhakios-metal.a $(if $(wildcard $(IR3_CMDLINE_C)),out/ios/hakios-
 
 # The Pixel 8a's Mali-G715 (hakios-kernel devices/akita, HakiosGPU with panthor's interface): hakios_metal.h's subset the
 # plug-in uses today, by the Mali (src/mali/c_api_mali.cpp; its blit shaders from hakios-kernel's tools/mesa/pan)
+# Its compiler (src/mali/compile_mali.c: AIR -> NIR -> Mesa 26.2.5's panfrost) is built with the flags of Mesa's iOS build
+# and Mesa's archives go into the library with it, all written by hakios-kernel's tools/mesa/pan/mk-pan-ios.sh into
+# MALI_MESA (HAKIOS= that tree: make ios-mali HAKIOS=../hackios-kernel). The plug-in that links the library adds -lz.
 ios-mali: out/ios-mali/libhakios-metal.a
 
-out/ios-mali/libhakios-metal.a: src/mali/c_api_mali.cpp src/mali/blit_shaders.h include/hakios-metal/hakios_metal.h
+MALI_MESA    ?= $(HAKIOS)/xnu-deps/build/mesa26/out-ios
+IOS_CC       ?= $(patsubst %clang++,%clang,$(firstword $(IOS_CXX))) $(wordlist 2,99,$(IOS_CXX))
+IOS_LIBTOOL  ?= $(if $(filter Darwin,$(shell uname)),xcrun libtool,$(abspath $(HAKIOS))/xnu-deps/host/bin/libtool)
+
+out/ios-mali/libhakios-metal.a: src/mali/c_api_mali.cpp src/mali/blit_shaders.h src/mali/compile_mali.c src/mali/compile_mali.h \
+		include/hakios-metal/hakios_metal.h $(MALI_MESA)/cflags $(MALI_MESA)/archives
 	@mkdir -p out/ios-mali/obj
 	$(IOS_CXX) $(IOS_CXXFLAGS) -Iinclude -c src/mali/c_api_mali.cpp -o out/ios-mali/obj/c_api_mali.o
-	rm -f $@ && $(IOS_AR) $@ out/ios-mali/obj/c_api_mali.o
+	eval $(IOS_CC) $$(cat $(MALI_MESA)/cflags) -DAIR_MESA_NEW_NIR -Werror -Wno-unused-command-line-argument \
+		-c src/mali/compile_mali.c -o out/ios-mali/obj/compile_mali.o
+	rm -f $@ && $(IOS_LIBTOOL) -static -no_warning_for_no_symbols -o $@ out/ios-mali/obj/c_api_mali.o \
+		out/ios-mali/obj/compile_mali.o $$(cat $(MALI_MESA)/archives)
 
 darwin: ios
 
