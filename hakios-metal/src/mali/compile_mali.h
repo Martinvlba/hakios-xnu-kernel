@@ -44,9 +44,10 @@ struct mali_kernel_binary {
 	uint64_t preload;
 	unsigned fau_words;     /* push constant words the code reads: MALI_KERNEL_RESERVED and the constants after */
 	uint32_t consts[MALI_KERNEL_MAX_FAU];   /* words MALI_KERNEL_RESERVED .. fau_words - 1 */
-	unsigned tls_size, wls_size;
+	unsigned tls_size, wls_size;    /* bytes a thread spills; bytes of static threadgroup arrays */
 	unsigned workgroup[3];  /* fixed by the kernel, or 0 0 0 */
 	unsigned threadgroup_bytes;
+	unsigned threadgroup_arg_base;  /* where a [[threadgroup(0)]] argument starts; ~0u when there is none */
 	char name[128];
 	unsigned num_resources;
 	struct mali_kernel_resource resources[MALI_KERNEL_MAX_RESOURCES];

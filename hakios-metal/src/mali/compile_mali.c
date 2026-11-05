@@ -11,6 +11,9 @@
  *       -> threads_per_threadgroup and threadgroups_per_grid from push constants (as panvk's sysvals)
  *       -> pan_shader_compile, GPU_ID 0xb8a21020, the first MALI_KERNEL_RESERVED push-constant words the driver's
  *
+ * Threadgroup memory (wls_size, the static arrays; a [[threadgroup(0)]] argument lies past them, sized by the encoder)
+ * and spilled registers (tls_size, per thread) are the dispatch's to provide: c_api_mali.cpp's local storage descriptor.
+ *
  * Built with Mesa's own flags for its iOS build (hakios-kernel's xnu-deps/build/mesa26/out-ios/cflags, written by
  * tools/mesa/pan/mk-pan-ios.sh) plus -DAIR_MESA_NEW_NIR; `make ios-mali` reads them.
  */
@@ -257,6 +260,7 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 		out->resources[out->num_resources++] = (struct mali_kernel_resource){ r->kind, r->index, r->size, r->read, r->write };
 	}
 	out->threadgroup_bytes = air_info.threadgroup_bytes;
+	out->threadgroup_arg_base = air_info.has_threadgroup_arg ? air_info.threadgroup_arg_base : ~0u;
 	for (unsigned i = 0; i < 3; i++) {
 		out->workgroup[i] = s->info.workgroup_size_variable ? 0 : s->info.workgroup_size[i];
 	}
@@ -280,12 +284,6 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 	if (binary.size == 0) {
 		util_dynarray_fini(&binary);
 		say(error, error_size, "%s: the panfrost compiler gave no code", out->name);
-		goto done;
-	}
-	if (info.tls_size != 0 || info.wls_size != 0) {
-		util_dynarray_fini(&binary);
-		say(error, error_size, "%s: %s memory (%u bytes; not on the Mali yet)", out->name,
-		    info.wls_size ? "threadgroup" : "spilled registers'", info.wls_size ? info.wls_size : info.tls_size);
 		goto done;
 	}
 	if (info.fau.count > MALI_KERNEL_MAX_FAU) {

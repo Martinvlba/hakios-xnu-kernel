@@ -108,6 +108,9 @@ struct Bo {
 struct hakios_metal_device {
     io_connect_t connection = 0;
     uint64_t gpu_id = 0, shaders = 0, tiler = 0;
+    uint32_t max_threads = 0, max_tasks = 0, core_range = 0;   // a core's threads and tasks; highest core id + 1
+    Bo wls, tls;                                // threadgroup memory and spill space, grown as dispatches need
+    std::vector<Bo> retired;                    // grown out of (a command buffer in flight may use one): freed at close
     uint32_t vm = 0, group = 0;
     uint64_t next_va = 0x100000000ULL;          // our addresses: the lower half is the program's
     std::mutex lock;                            // around the service's calls and next_va
@@ -138,6 +141,9 @@ struct hakios_metal_device {
         bo.handle = c.handle;
         bo.size = c.size;
         bo.cpu = (void *)(uintptr_t)address;
+        if (next_va >> 32 != (next_va + c.size - 1) >> 32) {
+            next_va = (next_va + c.size - 1) & ~0xffffffffULL;  // (none across 4 GB: the local storage's must not)
+        }
         bo.va = next_va;
         next_va += c.size + 0x4000;             // a page between them
         bind_op op = {};
@@ -171,6 +177,30 @@ struct hakios_metal_device {
         bo = Bo();
     }
 };
+
+namespace {
+// DEVICE's buffer B at least SIZE bytes (the old one kept until the device closes); false with the reason
+bool
+grow(hakios_metal_device *d, Bo &b, uint64_t size)
+{
+    if (b.size >= size) {
+        return true;
+    }
+    Bo bigger;
+    if (!d->newBo(bigger, size, BIND_NOEXEC)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> g(d->lock);
+    if (b.handle != 0) {
+        d->retired.push_back(b);
+    }
+    b = bigger;
+    return true;
+}
+
+inline uint32_t npot(uint32_t v) { uint32_t p = 1; while (p < v) p <<= 1; return p; }
+inline uint32_t log2u(uint32_t v) { uint32_t l = 0; while ((1u << l) < v) l++; return l; }
+}  // namespace
 
 struct hakios_metal_buffer {
     hakios_metal_device *device;
@@ -248,6 +278,7 @@ struct Job {
     hakios_metal_kernel *kernel;    // a dispatch's
     unsigned groups[3], threads[3], grid[3];
     uint64_t buffers[MALI_KERNEL_BUFFERS];
+    uint32_t wls_size, wls_instances;   // a dispatch's threadgroup memory: bytes an instance (a power of two), instances
 };
 constexpr unsigned DISPATCH = 4;
 }  // namespace
@@ -257,6 +288,7 @@ struct hakios_metal_cb {
     std::vector<Job> blits;
     std::vector<hakios_metal_buffer *> held;    // retained until the GPU is done
     std::vector<hakios_metal_kernel *> kernels;
+    unsigned threadgroup_length = 0;            // setThreadgroupMemoryLength:atIndex: 0, for the dispatches after
     std::string error;
     enum hakios_metal_status status = HAKIOS_METAL_NOT_ENQUEUED;
     Bo stream;
@@ -392,6 +424,10 @@ hakios_metal_open(void)
     d->gpu_id = info.gpu_id;
     d->shaders = info.shader_present;
     d->tiler = info.tiler_present;
+    d->max_threads = info.max_threads;
+    d->max_tasks = info.thread_features >> 24;
+    for (d->core_range = 64; d->core_range > 0 && !(info.shader_present >> (d->core_range - 1) & 1); d->core_range--) {
+    }
     d->vm = vc.id;
     // the blit shaders (code read only and executable), their program descriptors and the local storage
     if (!d->newBo(d->descriptors, 0x4000, BIND_READONLY)) {
@@ -446,6 +482,11 @@ hakios_metal_close(hakios_metal_device *d)
         return;
     }
     d->freeBo(d->descriptors);
+    d->freeBo(d->wls);
+    d->freeBo(d->tls);
+    for (Bo &b : d->retired) {
+        d->freeBo(b);
+    }
     if (d->connection) {
         IOServiceClose(d->connection);
     }
@@ -617,7 +658,9 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
         std::vector<uint64_t> fau_at(cb->blits.size());
         for (size_t i = 0; i < cb->blits.size(); i++) {
             fau_at[i] = fau_area + fau_size;
-            fau_size += cb->blits[i].shader == DISPATCH ? (cb->blits[i].kernel->binary.fau_words * 4 + 0x3f) & ~0x3fULL : 0x40;
+            // (a dispatch: its push constants, then its local storage descriptor, 64-byte aligned)
+            fau_size += cb->blits[i].shader == DISPATCH ? ((cb->blits[i].kernel->binary.fau_words * 4 + 0x3f) & ~0x3fULL) + 0x40
+                                                        : 0x40;
         }
         if (!d->newBo(cb->stream, fau_area + fau_size, BIND_NOEXEC)) {
             cb->error = gError;
@@ -635,6 +678,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                 auto *pc = (uint8_t *)cb->stream.cpu + fau_at[i];
                 uint64_t fau_va = cb->stream.va + fau_at[i], spd;
                 unsigned fau_entries, size[3], groups[3];
+                uint64_t local_storage = d->descriptors.va + 0x1200;            // none
                 if (b.shader == DISPATCH) {
                     const mali_kernel_binary &k = b.kernel->binary;
                     auto *w = (uint32_t *)pc;
@@ -646,6 +690,26 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                         w[MALI_KERNEL_GRID_WORD + c] = b.grid[c];
                     }
                     memcpy(w + MALI_KERNEL_RESERVED, k.consts, (k.fau_words - MALI_KERNEL_RESERVED) * 4);
+                    if (k.tls_size != 0 || b.wls_size != 0) {
+                        // the local storage descriptor (Mesa's genxml v10 "Local Storage"): spill space, packed, per thread
+                        // 16 << word 0 bytes; threadgroup memory 2^(word 1 & 31) instances of 2^((word 1 >> 8) - 1) bytes
+                        uint64_t at = (k.fau_words * 4 + 0x3f) & ~0x3fULL;
+                        auto *ls = (uint32_t *)(pc + at);
+                        memset(ls, 0, 32);
+                        if (k.tls_size != 0) {
+                            ls[0] = log2u((k.tls_size + 15) / 16);
+                            ls[2] = (uint32_t)(d->tls.va >> 8);
+                            ls[3] = (uint32_t)(d->tls.va >> 40) | 1u << 28;
+                        }
+                        if (b.wls_size != 0) {
+                            ls[1] = log2u(b.wls_instances) | (log2u(b.wls_size) + 1) << 8;
+                            ls[4] = (uint32_t)d->wls.va;
+                            ls[5] = (uint32_t)(d->wls.va >> 32);
+                        } else {
+                            ls[1] = 31;                                         // no threadgroup memory
+                        }
+                        local_storage = fau_va + at;
+                    }
                     spd = b.kernel->spd;
                     fau_entries = (k.fau_words + 1) / 2;
                     memcpy(size, b.threads, sizeof(size));
@@ -662,7 +726,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                     groups[0] = (b.count + 63) / 64, groups[1] = groups[2] = 1;
                 }
                 s[n++] = move48(16, spd);
-                s[n++] = move48(24, d->descriptors.va + 0x1200);                    // local storage: none
+                s[n++] = move48(24, local_storage);
                 s[n++] = move48(8, fau_va);
                 s[n++] = move32(9, (uint32_t)(fau_va >> 32) | fau_entries << 24);
                 s[n++] = move48(0, 0);
@@ -890,7 +954,29 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
         }
         j.buffers[res.index] = b->bo.va + offset;
     }
-    if (!k->upload(cb->queue->device)) {
+    hakios_metal_device *d = cb->queue->device;
+    if (!k->upload(d)) {
+        return -1;
+    }
+    // threadgroup memory: the static arrays and the encoder's length, an instance per workgroup the cores can hold at once
+    // (Mesa's pan_calc_wls_instances); spill space: every thread a core can run (pan_get_total_stack_size)
+    uint32_t wls = k->binary.wls_size;
+    if (k->binary.threadgroup_arg_base != ~0u && k->binary.threadgroup_arg_base + cb->threadgroup_length > wls) {
+        wls = k->binary.threadgroup_arg_base + cb->threadgroup_length;     // the argument, past the static arrays
+    }
+    if (wls != 0) {
+        uint32_t per_task = d->max_threads / (d->max_tasks ? d->max_tasks : 1);
+        uint32_t wg_per_task = (per_task + total - 1) / total;
+        uint32_t most = npot(wg_per_task * (d->max_tasks ? d->max_tasks : 1));
+        uint32_t wanted = npot(groups[0]) * npot(groups[1]) * npot(groups[2]);
+        j.wls_size = npot(wls < 128 ? 128 : wls);
+        j.wls_instances = wanted < most ? wanted : most;
+        if (!grow(d, d->wls, (uint64_t)j.wls_size * j.wls_instances * d->core_range)) {
+            return -1;
+        }
+    }
+    if (k->binary.tls_size != 0 &&
+        !grow(d, d->tls, (uint64_t)npot((k->binary.tls_size + 15) & ~15u) * d->max_threads * d->core_range)) {
         return -1;
     }
     j.shader = DISPATCH;
@@ -910,6 +996,12 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
     return 0;
 }
 }  // namespace
+
+void
+hakios_metal_cb_set_threadgroup_length(hakios_metal_cb *cb, unsigned length)
+{
+    cb->threadgroup_length = length;
+}
 
 int
 hakios_metal_cb_dispatch(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[3], const unsigned threads[3],
