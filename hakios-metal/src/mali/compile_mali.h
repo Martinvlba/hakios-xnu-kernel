@@ -23,6 +23,11 @@ extern "C" {
 #endif
 
 #define MALI_KERNEL_BUFFERS         16
+#define MALI_KERNEL_TEXTURES        16      /* textures, images and samplers: indices 0 to 15 */
+#define MALI_TABLE_SAMPLER          3       /* the resource table's tables (gallium panfrost's numbering) */
+#define MALI_TABLE_TEXTURE          4
+#define MALI_TABLE_IMAGE            5
+#define MALI_TABLES                 6
 #define MALI_KERNEL_WORKGROUP_WORD  32
 #define MALI_KERNEL_GROUPS_WORD     35
 #define MALI_KERNEL_GRID_WORD       38
