@@ -1208,7 +1208,13 @@ IOMobileFramebuffer::settle(const uint8_t * swap, MiniIOSurface ** surfaces)
 		return;
 	}
 	fSettling = true;
-	fBase = hidden();
+	/*
+	 * (with flips: into the buffer last flipped to, which is shown or about to be, and no flip -- the idle redraws, ten a
+	 * second, into the hidden buffers in turn left each with parts of older frames, and a still screen shook)
+	 */
+	if (fFlipping && fGraphics) {
+		fBase = fBuffers[fQueued];
+	}
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		MiniIOSurface * s = surfaces[layer];
 
@@ -1219,7 +1225,6 @@ IOMobileFramebuffer::settle(const uint8_t * swap, MiniIOSurface ** surfaces)
 		memcpy(dst, swap + SWAP_DEST(layer), sizeof(dst));
 		drawLayer(s, src, dst);
 	}
-	flipTo(fBase);
 	fSettling = false;
 	fStatSettled++;
 }
