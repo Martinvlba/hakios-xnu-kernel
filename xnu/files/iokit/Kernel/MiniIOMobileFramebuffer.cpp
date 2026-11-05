@@ -233,6 +233,20 @@ static TUNABLE(uint32_t, gMeasure, "fb_measure", 0);
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 static inline uint32_t refreshHz(void);
 
+/*
+ * Double buffering, where a device's display driver can flip (the Pixel 8a's: devices/akita/drivers/display,
+ * display_flip=1): it sets hakios_display_ops before IOKit starts. BUFFERS gives two panel-sized buffers (the first the
+ * boot framebuffer); FLIP(i) has the panel show buffer i from its next frame on, returning once that is settled. Every
+ * frame is then drawn into the buffer that is not being shown and flipped to: no frame is seen half drawn.
+ */
+extern "C" {
+struct hakios_display_ops {
+	int (*buffers)(vm_offset_t va[2], uint32_t *width, uint32_t *height, uint32_t *row_bytes);
+	void (*flip)(unsigned index);
+};
+const struct hakios_display_ops * hakios_display_ops;
+}
+
 static void
 measurePanel(__unused void * arg, __unused wait_result_t wr)
 {
@@ -293,7 +307,12 @@ class IOMobileFramebuffer : public IOService
 
 public:
 	IOLock *        fLock;
-	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
+	uint8_t *       fBase;                  /* the boot framebuffer: the panel (with flips: the buffer drawn last) */
+	uint8_t *       fBuffers[2];            /* with flips (hakios_display_ops): the two buffers, and which one is shown */
+	unsigned        fShown;
+	bool            fFlipping;
+	uint8_t *       hidden(void);
+	void            flipTo(uint8_t * drawn);
 	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
 	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
 	MiniIOSurface * fDefaultSurface;
@@ -546,6 +565,19 @@ IOMobileFramebuffer::start(IOService * provider)
 				node->setProperty(places[i][1], &scale, sizeof(scale));
 				node->release();
 			}
+		}
+	}
+	if (hakios_display_ops != NULL && !fDiff && gDiff == 0) {
+		vm_offset_t va[2];
+		uint32_t w, h, rb;
+
+		if (hakios_display_ops->buffers(va, &w, &h, &rb) == 0 && w == fPanelWidth && h == fPanelHeight && rb == fRowBytes) {
+			fBuffers[0] = (uint8_t *) va[0];
+			fBuffers[1] = (uint8_t *) va[1];
+			fBase = fBuffers[0];
+			fShown = 0;
+			fFlipping = true;
+			IOLog("MiniIOMobileFramebuffer: double buffered (the device's display driver flips)\n");
 		}
 	}
 	fColumn = IONewZero(uint32_t, fPanelWidth);
@@ -1122,6 +1154,23 @@ IOMobileFramebuffer::presenter(void)
 	}
 }
 
+/* where the next frame is drawn: the buffer not being shown (once user space draws: the text console is the first's) */
+uint8_t *
+IOMobileFramebuffer::hidden(void)
+{
+	return fFlipping && fGraphics ? fBuffers[fShown ^ 1] : fBase;
+}
+
+/* the frame just drawn into DRAWN onto the panel, when that is the hidden buffer */
+void
+IOMobileFramebuffer::flipTo(uint8_t * drawn)
+{
+	if (fFlipping && fGraphics && drawn == fBuffers[fShown ^ 1]) {
+		hakios_display_ops->flip(fShown ^ 1);
+		fShown ^= 1;
+	}
+}
+
 /*
  * The frame on the panel once more, filtered (fb_filter=2): the same layers from the same surfaces where show() put
  * them, nothing else (no turn to wait for, no swap to hand on, nothing counted). Its surfaces were held since.
@@ -1135,6 +1184,7 @@ IOMobileFramebuffer::settle(const uint8_t * swap, MiniIOSurface ** surfaces)
 		return;
 	}
 	fSettling = true;
+	fBase = hidden();
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		MiniIOSurface * s = surfaces[layer];
 
@@ -1145,6 +1195,7 @@ IOMobileFramebuffer::settle(const uint8_t * swap, MiniIOSurface ** surfaces)
 		memcpy(dst, swap + SWAP_DEST(layer), sizeof(dst));
 		drawLayer(s, src, dst);
 	}
+	flipTo(fBase);
 	fSettling = false;
 	fStatSettled++;
 }
@@ -1216,6 +1267,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
 	}
+	fBase = hidden();
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 		int32_t src[4], dst[4];
@@ -1264,6 +1316,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 		}
 	}
+	flipTo(fBase);
 	drawn = mach_absolute_time();
 	if (recorded != NULL) {
 		record(recorded);
