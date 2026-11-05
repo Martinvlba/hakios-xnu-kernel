@@ -281,7 +281,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 				METAL_GPU="-DHAKIOS_METAL_GPU -I$HM/include $HM_OUT/libhakios-metal.a -lc++ -lz -framework IOKit -framework IOSurface"
 				# built with its compiler (make ios MESA=1): Mesa's archives of our iOS build too, as hakios-metal's
 				# tools/compiler.mk lists them (HAKIOS_METAL_IOS_MESA_LIBS)
-				if nm -g $HM_OUT/libhakios-metal.a 2>/dev/null | grep -q " U _air_"; then
+				# (not for a library that carries its Mesa itself -- the Mali build's, `make ios-mali`: air_to_nir is in it)
+				if nm -g $HM_OUT/libhakios-metal.a 2>/dev/null | grep -q " U _air_" &&
+				    ! nm -g $HM_OUT/libhakios-metal.a 2>/dev/null | grep -q " T _air_to_nir"; then
 					MB=../xnu-deps/build/mesa/build-softpipe-freedreno
 					for a in src/compiler/air/libair.a src/freedreno/ir3/libfreedreno_ir3.a src/freedreno/isa/libir3encode.a \
 					    src/freedreno/isa/libir3decode.a src/compiler/isaspec/libisaspec.a src/compiler/nir/libnir.a \
@@ -567,8 +569,11 @@ done
 # Programs and libraries of more than 4 MB (Turnip, UniXNU's Metal on Vulkan: TURNIP=1, M2V=1) live in the system
 # image, in /usr/local/redwood, with a link in their place here: the small image is loaded with the kernel, in the
 # 64 MB the loader takes for both (with them it grew from 6.6 to 26 MB).
+# BIG_IN_ROOT=1 keeps them here, compressed, as before: for a phone that runs the system volume already on its flash
+# rather than this build's system image (the Pixel 8a's boot_b images: its Metal plug-in with Mesa's compiler is 11 MB,
+# and a link into /usr/local/redwood pointed at nothing there).
 rm -rf big
-for f in $(cd root && find lib bin -type f -size +4M 2>/dev/null); do
+for f in $( [ "$BIG_IN_ROOT" = 1 ] || (cd root && find lib bin -type f -size +4M 2>/dev/null) ); do
 	mkdir -p big/$(dirname $f)
 	mv root/$f big/$f
 	ln -s /usr/local/redwood/$f root/$f
