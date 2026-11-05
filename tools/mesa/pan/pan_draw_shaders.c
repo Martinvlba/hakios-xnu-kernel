@@ -47,7 +47,7 @@ static void
 emit(FILE *out, const char *name, mesa_shader_stage stage)
 {
 	const nir_shader_compiler_options *options = pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), stage, false);
-	struct pan_compile_inputs inputs = { .gpu_id = GPU_ID };
+	struct pan_compile_inputs inputs = { .gpu_id = GPU_ID, .fau = { .reserved = stage == MESA_SHADER_FRAGMENT ? 2 : 0 } };
 	struct pan_shader_info info;
 	struct pan_varying_layout varyings;
 	struct util_dynarray binary;
@@ -64,8 +64,9 @@ emit(FILE *out, const char *name, mesa_shader_stage stage)
 		    .io_semantics = (nir_io_semantics){ .location = VARYING_SLOT_POS, .num_slots = 1 });
 		b.shader->info.outputs_written = VARYING_BIT_POS;
 	} else {
-		/* (and a count of the fragments shaded, at the triangle's descriptors + 0x12000 -- mali_test's DESC_VA) */
-		nir_global_atomic(&b, 32, nir_imm_int64(&b, 0x10400000ULL + 0x12000), nir_imm_int(&b, 1), .atomic_op = nir_atomic_op_iadd);
+		/* (and a count of the fragments shaded, at the address in its push constants' first 64 bits) */
+		nir_global_atomic(&b, 32, nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0), nir_imm_int(&b, 1),
+		    .atomic_op = nir_atomic_op_iadd);
 		nir_store_output(&b, nir_imm_vec4(&b, 1.0f, 0.0f, 0.0f, 1.0f), nir_imm_int(&b, 0), .base = 0, .write_mask = 0xf,
 		    .src_type = nir_type_float32,
 		    .io_semantics = (nir_io_semantics){ .location = FRAG_RESULT_DATA0, .num_slots = 1 });
