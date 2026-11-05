@@ -1775,10 +1775,7 @@ computeDispatch(id self, BOOL threads, MTLSize size, MTLSize perGroup)
 		hakios_metal_cb_fail(c->cb, "dispatch: no compute pipeline of the GPU's set (setComputePipelineState:)");
 		return;
 	}
-	if (e->threadgroupMemory != 0) {
-		hakios_metal_cb_fail(c->cb, "dispatch: threadgroup memory (setThreadgroupMemoryLength:) is not on this GPU yet");
-		return;
-	}
+	hakios_metal_cb_set_threadgroup_length(c->cb, e->threadgroupMemory);     /* ([[threadgroup(0)]]: past the static arrays) */
 	r = threads ? hakios_metal_cb_dispatch_threads(c->cb, p->kernel, a, t, e->gpu, e->offsets, COMPUTE_BUFFERS)
 	            : hakios_metal_cb_dispatch(c->cb, p->kernel, a, t, e->gpu, e->offsets, COMPUTE_BUFFERS);
 	if (r != 0) {
