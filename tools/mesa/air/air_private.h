@@ -129,6 +129,7 @@ struct air_ctx {
 
    unsigned scratch_size;
    unsigned shared_size;
+   unsigned tg_arg_param_plus1;   /* the [[threadgroup(0)]] parameter's index + 1, 0 when there is none */
 
    /* module-scope variables, by their air_global */
    struct hash_table *globals;

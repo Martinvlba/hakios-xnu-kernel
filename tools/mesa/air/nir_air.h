@@ -99,6 +99,11 @@ struct air_shader_info {
    struct air_varying *varyings;
    unsigned num_render_targets;
    unsigned threadgroup_bytes; /* static threadgroup memory */
+   /* A [[threadgroup(0)]] argument starts past the static arrays, at this
+    * offset (16-aligned, as Metal's lengths are); the runtime gives the
+    * dispatch threadgroup_arg_base + the encoder's length in all. */
+   bool has_threadgroup_arg;
+   unsigned threadgroup_arg_base;
 };
 
 /* -- the translator --------------------------------------------------------- */

@@ -688,6 +688,56 @@ compute(void)
 	    (unsigned long)cb.status, cb.error ? [[NSString stringWithFormat:@" (%@)", cb.error.localizedDescription] UTF8String] : "",
 	    righta, rightb, past ? "untouched" : "CHANGED", (unsigned long long)((t3 - t2) / 1000));
 	printf("metal_test:   compute %s\n", cb.status == MTLCommandBufferStatusCompleted && righta == 256 && rightb == 1000 && past ? "WORKS" : "FAILED");
+
+	/*
+	 * Threadgroup memory and spilled registers (hakios-metal's tg_arg and pvt_fill): tg_arg has a static threadgroup
+	 * array and a [[threadgroup(0)]] argument sized here (8 KiB, its far words 128 bytes apart), each thread reading a
+	 * neighbour's words after a barrier: out[2g] = n + 1000, out[2g + 1] = n + 2000, n = (lid + 1) & 63. pvt_fill keeps a
+	 * 128-word array per thread in private memory: out[g] = 3 (g & 127) + (g >> 7) + 1.
+	 */
+	id<MTLFunction> tgf = [library newFunctionWithName:@"tg_arg"], pvf = [library newFunctionWithName:@"pvt_fill"];
+	id<MTLComputePipelineState> tgp = tgf ? [device newComputePipelineStateWithFunction:tgf error:&error] : nil;
+	id<MTLComputePipelineState> pvp = pvf ? [device newComputePipelineStateWithFunction:pvf error:&error] : nil;
+	if (tgp == nil || pvp == nil) {
+		printf("metal_test:   threadgroup memory and spills: pipelines %s %s (%s)\n", tgp ? "made" : "nil", pvp ? "made" : "nil",
+		    error ? [error.localizedDescription UTF8String] : "");
+		return;
+	}
+	id<MTLBuffer> tgout = [device newBufferWithLength:512 * 4 options:MTLResourceStorageModeShared];
+	id<MTLBuffer> pvout = [device newBufferWithLength:1024 * 4 options:MTLResourceStorageModeShared];
+	memset(tgout.contents, 0xee, 512 * 4);
+	memset(pvout.contents, 0xee, 1024 * 4);
+	id<MTLCommandBuffer> cb2 = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e2 = [cb2 computeCommandEncoder];
+	[e2 setComputePipelineState:tgp];
+	[e2 setBuffer:tgout offset:0 atIndex:0];
+	[e2 setThreadgroupMemoryLength:8192 atIndex:0];
+	[e2 dispatchThreadgroups:MTLSizeMake(4, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	[e2 setThreadgroupMemoryLength:0 atIndex:0];
+	[e2 setComputePipelineState:pvp];
+	[e2 setBuffer:pvout offset:0 atIndex:0];
+	[e2 dispatchThreads:MTLSizeMake(1024, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	[e2 endEncoding];
+	t2 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	[cb2 commit];
+	[cb2 waitUntilCompleted];
+	t3 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+	const uint32_t *tg = tgout.contents, *pv = pvout.contents;
+	unsigned tgright = 0, pvright = 0;
+	for (uint32_t g = 0; g < 256; g++) {
+		uint32_t n = (g % 64 + 1) & 63;
+
+		tgright += (tg[2 * g] == n + 1000) + (tg[2 * g + 1] == n + 2000);
+	}
+	for (uint32_t g = 0; g < 1024; g++) {
+		pvright += pv[g] == 3 * (g & 127) + (g >> 7) + 1;
+	}
+	printf("metal_test:   threadgroup memory (tg_arg): %u of 512 words right (out[0] %u, out[1] %u); spills (pvt_fill): %u of 1024 "
+	    "(out[5] %u); status %lu%s, %llu us\n", tgright, tg[0], tg[1], pvright, pv[5], (unsigned long)cb2.status,
+	    cb2.error ? [[NSString stringWithFormat:@" (%@)", cb2.error.localizedDescription] UTF8String] : "",
+	    (unsigned long long)((t3 - t2) / 1000));
+	printf("metal_test:   threadgroup memory and spills %s\n", cb2.status == MTLCommandBufferStatusCompleted && tgright == 512 &&
+	    pvright == 1024 ? "WORK" : "FAILED");
 }
 
 int
