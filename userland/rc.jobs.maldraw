@@ -1,0 +1,3 @@
+# The first draws through hakios-metal's C interface on the Pixel 8a's Mali (src/mali_draw_test.c)
+/redwood/bin/rwtouch wait 20
+/redwood/bin/mali_draw_test
