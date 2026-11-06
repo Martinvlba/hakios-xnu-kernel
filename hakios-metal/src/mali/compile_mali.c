@@ -208,6 +208,38 @@ widen_image_stores(nir_builder *b, nir_intrinsic_instr *in, void *data)
 	return true;
 }
 
+/* a draw's system values, from the push constants the draw writes (compile_mali.h: MALI_DRAW_*) */
+static bool
+lower_draw_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+	nir_def *value;
+
+	(void)data;
+	b->cursor = nir_before_instr(&in->instr);
+	switch (in->intrinsic) {
+	case nir_intrinsic_load_viewport_scale:
+		value = push_words(b, MALI_DRAW_VIEWPORT_SCALE, 3, 32);
+		break;
+	case nir_intrinsic_load_viewport_offset:
+		value = push_words(b, MALI_DRAW_VIEWPORT_OFFSET, 3, 32);
+		break;
+	case nir_intrinsic_load_first_vertex:
+		value = push_words(b, MALI_DRAW_FIRST_VERTEX, 1, 32);
+		break;
+	case nir_intrinsic_load_base_instance:
+		value = push_words(b, MALI_DRAW_BASE_INSTANCE, 1, 32);
+		break;
+	default:
+		return false;
+	}
+	if (in->def.bit_size != 32) {
+		value = nir_u2uN(b, value, in->def.bit_size);
+	}
+	nir_def_rewrite_uses(&in->def, value);
+	nir_instr_remove(&in->instr);
+	return true;
+}
+
 /* if (any(global_id >= grid)) return; at the top of the entry point */
 static void
 bound_to_grid(nir_shader *s)
@@ -264,6 +296,14 @@ refusal(nir_shader *s)
 	return NULL;
 }
 
+/* an I/O variable's size, in attribute slots (gallium panfrost's glsl_type_size) */
+static unsigned
+attribute_slots(const struct glsl_type *type, bool bindless)
+{
+	(void)bindless;
+	return glsl_count_attribute_slots(type, false);
+}
+
 static pthread_once_t types_once = PTHREAD_ONCE_INIT;
 
 static void
@@ -272,13 +312,13 @@ types_init(void)
 	glsl_type_singleton_init_or_ref();
 }
 
-int
-mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
-    struct mali_kernel_binary *out, char *error, size_t error_size)
+static int
+compile_stage(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, mesa_shader_stage want,
+    const void *vs_varyings, struct mali_kernel_binary *out, char *error, size_t error_size)
 {
-	const nir_shader_compiler_options *options =
-	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_COMPUTE, false);
+	const nir_shader_compiler_options *options = pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), want, false);
 	struct pan_compile_inputs inputs = { .gpu_id = GPU_ID, .fau = { .reserved = MALI_KERNEL_RESERVED } };
+	struct pan_varying_layout *varyings = NULL;
 	struct air_constant_value *values = NULL;
 	struct air_to_nir_options air_options = { 0 };
 	struct air_shader_info air_info;
@@ -305,10 +345,12 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 		say(error, error_size, "the AIR front end: %s", why ? why : "refused");
 		goto done;
 	}
-	if (air_info.stage != MESA_SHADER_COMPUTE) {
-		say(error, error_size, "%s is not a compute kernel", air_info.entry_point);
+	if (air_info.stage != want) {
+		say(error, error_size, "%s is not a %s function", air_info.entry_point,
+		    want == MESA_SHADER_COMPUTE ? "kernel" : want == MESA_SHADER_VERTEX ? "vertex" : "fragment");
 		goto done;
 	}
+	out->stage = want == MESA_SHADER_COMPUTE ? 0 : want == MESA_SHADER_VERTEX ? 1 : 2;
 	snprintf(out->name, sizeof(out->name), "%s", air_info.entry_point);
 	for (unsigned i = 0; i < air_info.num_resources; i++) {
 		const struct air_resource *r = &air_info.resources[i];
@@ -339,12 +381,40 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 
 	NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_buffers, nir_metadata_control_flow, NULL);
 	NIR_PASS(_, s, nir_shader_intrinsics_pass, widen_image_stores, nir_metadata_control_flow, NULL);
-	bound_to_grid(s);
+	if (want == MESA_SHADER_COMPUTE) {
+		bound_to_grid(s);
+	}
 	pan_preprocess_nir(s, GPU_ID);
+	if (want != MESA_SHADER_COMPUTE) {
+		/* the stage's inputs and outputs from variables to I/O intrinsics, as gallium panfrost does after
+		 * pan_preprocess_nir (pan_shader.c): the front end leaves them as variables */
+		nir_assign_io_var_locations(s, nir_var_shader_in);
+		nir_assign_io_var_locations(s, nir_var_shader_out);
+		NIR_PASS(_, s, nir_lower_indirect_derefs_to_if_else_trees, nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
+		NIR_PASS(_, s, nir_lower_io, nir_var_shader_in | nir_var_shader_out, attribute_slots,
+		    nir_lower_io_use_interpolated_input_intrinsics);
+		NIR_PASS(_, s, nir_opt_constant_folding);
+	}
 	NIR_PASS(_, s, nir_shader_instructions_pass, lower_res_indices, nir_metadata_control_flow, NULL);
+	if (want == MESA_SHADER_VERTEX) {
+		/* where the varyings go, compact, as panvk lays them out; the fragment stage is compiled against the same */
+		varyings = calloc(1, sizeof(*varyings));
+		if (varyings == NULL) {
+			say(error, error_size, "no memory");
+			goto done;
+		}
+		pan_varying_collect_formats(varyings, s, GPU_ID, true, true);
+		pan_build_varying_layout_compact(varyings, s, GPU_ID);
+		inputs.varying_layout = varyings;
+		inputs.trust_varying_flat_highp_types = true;
+	} else if (want == MESA_SHADER_FRAGMENT) {
+		inputs.varying_layout = vs_varyings;
+		inputs.trust_varying_flat_highp_types = true;
+	}
 	memset(&info, 0, sizeof(info));
 	pan_postprocess_nir(s, &inputs, &info);
-	NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_sysvals, nir_metadata_control_flow, NULL);
+	NIR_PASS(_, s, nir_shader_intrinsics_pass, want == MESA_SHADER_COMPUTE ? lower_sysvals : lower_draw_sysvals,
+	    nir_metadata_control_flow, NULL);
 	NIR_PASS(_, s, nir_opt_constant_folding);
 	NIR_PASS(_, s, nir_opt_algebraic);
 	NIR_PASS(_, s, nir_opt_constant_folding);
@@ -352,6 +422,9 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 	if ((why = refusal(s)) != NULL) {
 		say(error, error_size, "%s: %s", out->name, why);
 		goto done;
+	}
+	if (getenv("MALI_COMPILE_NIR") != NULL) {
+		nir_print_shader(s, stderr);            /* (host debugging: the NIR the back end is given) */
 	}
 	binary = UTIL_DYNARRAY_INIT;
 	pan_shader_compile(s, &inputs, &binary, &info);
@@ -387,8 +460,22 @@ mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant
 	}
 	out->tls_size = info.tls_size;
 	out->wls_size = info.wls_size;
+	if (want == MESA_SHADER_VERTEX) {
+		out->idvs = info.vs.idvs;
+		out->secondary_offset = info.vs.secondary_enable ? info.vs.secondary_offset : 0;
+		out->secondary_work_regs = info.vs.secondary_work_reg_count;
+		out->secondary_preload = info.vs.secondary_preload;
+		out->varying_bytes = varyings->generic_size_B;
+		out->varyings = varyings;               /* (handed to the fragment stage's compile) */
+		varyings = NULL;
+		if (!out->idvs) {
+			say(error, error_size, "%s: the compiler made no IDVS variant (the Mali build draws with IDVS only)", out->name);
+			goto done;
+		}
+	}
 	result = 0;
 done:
+	free(varyings);
 	ralloc_free(mem);
 	if (result != 0) {
 		mali_kernel_binary_free(out);
@@ -396,10 +483,31 @@ done:
 	return result;
 }
 
+int
+mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
+    struct mali_kernel_binary *out, char *error, size_t error_size)
+{
+	return compile_stage(bitcode, size, constants, count, MESA_SHADER_COMPUTE, NULL, out, error, error_size);
+}
+
+int
+mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, int fragment,
+    const struct mali_kernel_binary *vertex, struct mali_kernel_binary *out, char *error, size_t error_size)
+{
+	if (fragment && (vertex == NULL || vertex->varyings == NULL)) {
+		say(error, error_size, "a fragment function compiled without its vertex function");
+		return -1;
+	}
+	return compile_stage(bitcode, size, constants, count, fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX,
+	    fragment ? vertex->varyings : NULL, out, error, error_size);
+}
+
 void
 mali_kernel_binary_free(struct mali_kernel_binary *binary)
 {
 	free(binary->code);
+	free(binary->varyings);
 	binary->code = NULL;
+	binary->varyings = NULL;
 	binary->size = 0;
 }

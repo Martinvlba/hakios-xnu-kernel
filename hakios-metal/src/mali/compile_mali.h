@@ -32,6 +32,12 @@ extern "C" {
 #define MALI_KERNEL_GROUPS_WORD     35
 #define MALI_KERNEL_GRID_WORD       38
 #define MALI_KERNEL_RESERVED        42
+/* a draw's push constants (both stages): words 2n, 2n+1 [[buffer(n)]]'s address as a kernel's; then the viewport
+ * transform's scale (3 words) and offset (3), the first vertex and the first instance */
+#define MALI_DRAW_VIEWPORT_SCALE    32
+#define MALI_DRAW_VIEWPORT_OFFSET   35
+#define MALI_DRAW_FIRST_VERTEX      38
+#define MALI_DRAW_BASE_INSTANCE     39
 #define MALI_KERNEL_MAX_FAU         256
 #define MALI_KERNEL_MAX_RESOURCES   64
 
@@ -54,6 +60,12 @@ struct mali_kernel_binary {
 	unsigned threadgroup_bytes;
 	unsigned threadgroup_arg_base;  /* where a [[threadgroup(0)]] argument starts; ~0u when there is none */
 	char name[128];
+	unsigned stage;                 /* 0 compute, 1 vertex, 2 fragment */
+	/* a vertex function's: IDVS, the varying shader's offset in CODE (0: none), its registers and preload; the bytes
+	 * of varyings a vertex has; the layout the fragment function is compiled against (Mesa's, opaque here) */
+	unsigned idvs, secondary_offset, secondary_work_regs, varying_bytes;
+	uint64_t secondary_preload;
+	void *varyings;
 	unsigned num_resources;
 	struct mali_kernel_resource resources[MALI_KERNEL_MAX_RESOURCES];
 };
@@ -66,6 +78,9 @@ struct mali_constant {
 /* 0 and *OUT filled, or -1 with the reason in ERROR */
 int mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
     struct mali_kernel_binary *out, char *error, size_t error_size);
+/* a vertex function (FRAGMENT 0), or a fragment function (FRAGMENT 1) against VERTEX's varyings; as mali_kernel_compile */
+int mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, int fragment,
+    const struct mali_kernel_binary *vertex, struct mali_kernel_binary *out, char *error, size_t error_size);
 void mali_kernel_binary_free(struct mali_kernel_binary *binary);
 
 #ifdef __cplusplus

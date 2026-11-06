@@ -321,6 +321,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		else
 		$DYN -bundle -framework Foundation -framework Metal -lobjc -I$METAL_SRC -o obj/HakiosMetal $METAL_SRC/HakiosMetal.m \
 			$METAL_SRC/hakios_metallib.c $METAL_GPU
+		# the Pixel 8a's Mali build: the first draws through hakios-metal's C interface (src/mali_draw_test.c; rc.jobs.maldraw)
+		if [ "$HAKIOS_METAL_OUT" = ios-mali ] && [ -n "$METAL_GPU" ]; then
+			$DYN -o obj/mali_draw_test src/mali_draw_test.c $METAL_GPU -framework CoreFoundation
+		fi
 		fi
 		if [ -n "$GL" ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
@@ -371,6 +375,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/snap_test ] && cp obj/snap_test root/bin/
 	[ -f obj/font_test ] && cp obj/font_test root/bin/
 	[ -f obj/metal_test ] && cp obj/metal_test root/bin/
+	[ -f obj/mali_draw_test ] && cp obj/mali_draw_test root/bin/
 	[ -f obj/fps_info ] && cp obj/fps_info root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
