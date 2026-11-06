@@ -121,6 +121,7 @@ struct hakios_metal_device {
     // descriptor and 64 KiB geometry buffer (heapdesc), the tiler's levels
     uint32_t heap_handle = 0, tiler_levels = 0;
     uint64_t heap_ctx = 0, heap_first = 0;
+    std::atomic<bool> heap_set{false};          // the queue given its heap (HEAP_SET once a queue, as panvk and gallium)
     Bo heapdesc;
     bool heap_ok = false;                       // the heap made and primed: draws can be served
 
@@ -552,13 +553,18 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(58, dj.dcd1);
     s[n++] = move32(60, 0x3f800000);                                            // primitive size 1.0
     s[n++] = move32(61, 0);                                                     // TILER_FLAGS2: VRS 1x1
+    s[n++] = 49ULL << 56 | 0ULL << 32;                                          // HEAP_OPERATION: vertex/tiler started
     s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                              // RUN_IDVS: malloc, the fragment's SRT
     s[n++] = WAIT_ALL;
     s[n++] = 9ULL << 56;                                                        // FINISH_TILING
     s[n++] = WAIT_ALL;
+    s[n++] = 49ULL << 56 | 1ULL << 32;                                          // HEAP_OPERATION: vertex/tiler completed
+    s[n++] = WAIT_ALL;
     s[n++] = move48(40, (area_va + 0x80) | 1);                                 // the framebuffer descriptor, one RT
     s[n++] = move32(42, 0);
     s[n++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
+    s[n++] = move48(44, 0);                                                     // no tile enable map (r44 held the
+    s[n++] = move32(46, 0);                                                     // depth clamps), its row stride
     s[n++] = 7ULL << 56;                                                        // RUN_FRAGMENT
     s[n++] = WAIT_ALL;
     // the pass finished, as panvk ends one: the tiler context's completed top and bottom (byte 40, four words) into
@@ -570,7 +576,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = 11ULL << 56 | 70ULL << 40 | 72ULL << 32 | 1;                       // FINISH_FRAGMENT: chunks r70..r72, count it
     s[n++] = WAIT_ALL;
 }
-constexpr unsigned DRAW_WORDS = 56;     // (instructions emitDraw writes, at most)
+constexpr unsigned DRAW_WORDS = 62;     // (instructions emitDraw writes, at most)
 
 // the bytes a draw needs in its command buffer's stream BO, past the instructions
 uint64_t
@@ -591,7 +597,8 @@ struct hakios_metal_cb {
     std::vector<hakios_metal_kernel *> kernels;
     std::vector<hakios_metal_texture *> held_textures;
     std::vector<DrawJob> draws;                 // a DRAW Job's (its dst the index)
-    std::vector<uint64_t> draw_areas;           // (where each draw's descriptors are in the stream BO: HAKIOS_MALI_TRACE)
+    std::vector<uint64_t> draw_areas;
+    uint32_t fresh_group = 0;                   // (HAKIOS_MALI_FRESH_GROUP=1: the group made for it, destroyed after)           // (where each draw's descriptors are in the stream BO: HAKIOS_MALI_TRACE)
     std::vector<hakios_metal_program *> programs;
     unsigned threadgroup_length = 0;            // setThreadgroupMemoryLength:atIndex: 0, for the dispatches after
     std::string error;
@@ -685,9 +692,19 @@ struct hakios_metal_queue {
                 auto *h = (uint32_t *)device->heapdesc.cpu;
                 for (uint64_t at : cb->draw_areas) {
                     auto *tc = (uint32_t *)((uint8_t *)cb->stream.cpu + at);
-                    fprintf(stderr, "hakios-metal: draw: tiler context %08x %08x %08x %08x; heap bottom %08x%08x top %08x%08x\n",
-                        tc[0], tc[1], tc[2], tc[3], h[5], h[4], h[7], h[6]);
+                    fprintf(stderr, "hakios-metal: draw: at 0x%llx: ", (unsigned long long)(cb->stream.va + at));
+                    fprintf(stderr, "tiler context %08x %08x %08x %08x; completed %08x%08x %08x%08x; "
+                        "private %08x %08x %08x %08x %08x %08x %08x %08x; heap bottom %08x%08x top %08x%08x\n",
+                        tc[0], tc[1], tc[2], tc[3], tc[11], tc[10], tc[13], tc[12], tc[24], tc[25], tc[26], tc[27], tc[28],
+                        tc[29], tc[30], tc[31], h[5], h[4], h[7], h[6]);
                 }
+                uint64_t nothing = 0;
+                device->call(0x7f, &nothing, sizeof(nothing));
+            }
+            if (cb->fresh_group != 0) {
+                struct { uint32_t group_handle, pad; } gd = { cb->fresh_group, 0 };
+                device->call(GROUP_DESTROY, &gd, sizeof(gd));
+                cb->fresh_group = 0;        // (HakiosGPU: the queues and heaps into its log)
             }
             device->freeBo(cb->stream);
             cb->letGo();
@@ -1132,7 +1149,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
         cb->status = HAKIOS_METAL_ERROR;
     } else if (!cb->blits.empty()) {
         // the stream (from 0), then each job's push constants: 32 bytes for a blit, a kernel's fau_words for a dispatch
-        size_t words = 12 + cb->blits.size() * 20 + cb->draws.size() * DRAW_WORDS;
+        size_t words = 18 + 40 + cb->blits.size() * 20 + cb->draws.size() * DRAW_WORDS;   // (40: HAKIOS_MALI_ZERO_REGS)
         uint64_t fau_area = (words * 8 + 0xff) & ~0xffULL, fau_size = 0;
         std::vector<uint64_t> fau_at(cb->blits.size());
         for (size_t i = 0; i < cb->blits.size(); i++) {
@@ -1160,10 +1177,26 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
             s[n++] = set_state(1, 0);
             s[n++] = set_state(2, 1);
             s[n++] = set_state(8, 0xf0);
+            // the GPU's caches made to see what the CPU wrote, and (at the end) to show the CPU what the GPU wrote, as
+            // gallium's panfrost ends a batch: L2 and load/store cleaned, the others (the tiler's, descriptors')
+            // invalidated. Without it a queue drew its first render pass only: later passes found the tiler heap and
+            // contexts as the GPU's caches held them.
+            s[n++] = move32(74, 0);
+            s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4 | 1;          // FLUSH_CACHE2
+            s[n++] = WAIT_ALL;
+            if (!cb->draws.empty() && getenv("HAKIOS_MALI_ZERO_REGS") != nullptr) {
+                for (unsigned r = 0; r < 80; r += 2) {
+                    s[n++] = move48(r, 0);      // (debugging: every register as a fresh group's)
+                }
+            }
             if (!cb->draws.empty()) {
                 s[n++] = 34ULL << 56 | 0xf;                                     // REQ_RESOURCE: compute, fragment, tiler, IDVS
-                s[n++] = move48(0, d->heap_ctx);                                // the queue's tiler heap ...
-                s[n++] = 48ULL << 56;                                           // ... HEAP_SET
+                // the queue's tiler heap, set once: a HEAP_SET in every submission left the queue drawing one pass
+                // and binning nothing after (a group per command buffer drew every pass)
+                if ((getenv("HAKIOS_MALI_FRESH_GROUP") != nullptr) || !d->heap_set.exchange(true)) {
+                    s[n++] = move48(0, d->heap_ctx);
+                    s[n++] = 48ULL << 56;                                       // HEAP_SET
+                }
             }
             for (size_t i = 0; i < cb->blits.size(); i++) {
                 const Job &b = cb->blits[i];
@@ -1279,6 +1312,9 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                 s[n++] = RUN_COMPUTE;
                 s[n++] = WAIT_ALL;                                                  // in order, as Metal's encoders are
             }
+            s[n++] = move32(74, 0);
+            s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4 | 1;          // FLUSH_CACHE2, as at the start
+            s[n++] = WAIT_ALL;
             __asm__ volatile("dsb sy" ::: "memory");
             syncobj_create sc = {};
             sync_op signal = {};
@@ -1295,6 +1331,10 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                 qs.stream_addr = cb->stream.va;
                 qs.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal };
                 gs.group_handle = d->group;
+                if (!cb->draws.empty() && getenv("HAKIOS_MALI_FRESH_GROUP") != nullptr &&
+                    (cb->fresh_group = newGroup(d)) != 0) {
+                    gs.group_handle = cb->fresh_group;  // (debugging: draws on a group of their own, as mali_test's)
+                }
                 gs.queue_submits = { sizeof(qs), 1, (uint64_t)(uintptr_t)&qs };
                 if (d->call(GROUP_SUBMIT, &gs, sizeof(gs)) != 0) {
                     cb->error = "HakiosGPU did not take the submission";

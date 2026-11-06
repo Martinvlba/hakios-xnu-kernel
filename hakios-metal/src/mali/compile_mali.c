@@ -218,9 +218,20 @@ lower_draw_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
 	b->cursor = nir_before_instr(&in->instr);
 	switch (in->intrinsic) {
 	case nir_intrinsic_load_viewport_scale:
+		/* (MALI_FIXED_VIEWPORT=N: a debugging aid, the viewport of an N x N target baked in, as the priming draw's) */
+		if (getenv("MALI_FIXED_VIEWPORT") != NULL) {
+			float n = (float)atoi(getenv("MALI_FIXED_VIEWPORT"));
+			value = nir_imm_vec3(b, n / 2, -n / 2, 1.0f);
+			break;
+		}
 		value = push_words(b, MALI_DRAW_VIEWPORT_SCALE, 3, 32);
 		break;
 	case nir_intrinsic_load_viewport_offset:
+		if (getenv("MALI_FIXED_VIEWPORT") != NULL) {
+			float n = (float)atoi(getenv("MALI_FIXED_VIEWPORT"));
+			value = nir_imm_vec3(b, n / 2, n / 2, 0.0f);
+			break;
+		}
 		value = push_words(b, MALI_DRAW_VIEWPORT_OFFSET, 3, 32);
 		break;
 	case nir_intrinsic_load_first_vertex:
