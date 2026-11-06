@@ -26,7 +26,7 @@ colour(uint32_t p)
 
 /* one draw of PROGRAM's six vertices into a fresh 64 x 64 RGBA8 texture cleared to grey; the pixels into PX */
 static int
-draw(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *p, uint32_t *px, long *us)
+draw_n(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *p, unsigned count, uint32_t *px, long *us)
 {
 	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
 	hakios_metal_cb *cb = hakios_metal_cb_new(q);
@@ -40,7 +40,7 @@ draw(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *p, uin
 	pass.store_action = 1;
 	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
 	pass.clear_color[3] = 1;
-	if (t == NULL || hakios_metal_cb_draw(cb, p, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0) {
+	if (t == NULL || hakios_metal_cb_draw(cb, p, &pass, NULL, NULL, 3, 0, count, 1, NULL, NULL, 0, NULL, NULL, 0) != 0) {
 		printf("mali_draw_test: the draw refused: %s\n", hakios_metal_error());
 		return -1;
 	}
@@ -57,6 +57,12 @@ draw(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *p, uin
 	hakios_metal_cb_free(cb);
 	hakios_metal_texture_free(t);
 	return status;
+}
+
+static int
+draw(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *p, uint32_t *px, long *us)
+{
+	return draw_n(d, q, p, 6, px, us);
 }
 
 static unsigned
@@ -111,6 +117,20 @@ main(void)
 		printf("mali_draw_test: no program (%s)\n", hakios_metal_error());
 		return 1;
 	}
+	/* one pass after another with other geometry: 6 vertices (the whole target) or 3 (its lower-left half), so that
+	 * what each pass shows says whose primitives it binned */
+	{
+		static const unsigned counts[] = { 6, 3, 3, 6, 3, 6 };
+		for (unsigned i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+			int st = draw_n(d, q, flat, counts[i], px, &us);
+			unsigned want = 0;
+			for (unsigned k = 0; k < 64 * 64; k++) {
+				want += px[k] == 0xff804020u;
+			}
+			printf("mali_draw_test: geometry pass %u, %u vertices: status %d, %u of 4096 drawn (%s)\n", i + 1, counts[i], st,
+			    want, want == 4096 ? "whole" : want > 1500 && want < 2600 ? "half" : want == 0 ? "none" : "other");
+		}
+	}
 	/* tri_color: a colour varying per vertex: no grey left; top left blue, bottom left red, top right green */
 	for (int round = 0; round < 2; round++) {
 		int st = draw(d, q, col, px, &us);
@@ -144,7 +164,7 @@ main(void)
 		printf("mali_draw_test: tri_flat, viewport baked in, draw %d: status %d, %u of 4096 pixels 0xff804020, %u grey\n",
 		    round + 1, st, want, greys(px));
 	}
-	/* two passes in one command buffer, on a group made for it: does a second pass in the same stream draw? */
+	/* two passes in one command buffer */
 	{
 		hakios_metal_texture *t1 = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
 		hakios_metal_texture *t2 = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
@@ -162,9 +182,7 @@ main(void)
 		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0);
 		pass.color0 = t2;
 		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0);
-		setenv("HAKIOS_MALI_FRESH_GROUP", "1", 1);
 		hakios_metal_cb_commit(cb, NULL, NULL);
-		unsetenv("HAKIOS_MALI_FRESH_GROUP");
 		hakios_metal_cb_wait(cb);
 		hakios_metal_texture_read(t1, 0, 0, 64, 64, px, 64 * 4);
 		hakios_metal_texture_read(t2, 0, 0, 64, 64, px2, 64 * 4);
@@ -172,7 +190,7 @@ main(void)
 			a1 += px[i] == 0xff804020u;
 			a2 += px2[i] == 0xff804020u;
 		}
-		printf("mali_draw_test: two passes in one command buffer, a fresh group: status %d; the first %u of 4096 drawn, "
+		printf("mali_draw_test: two passes in one command buffer: status %d; the first %u of 4096 drawn, "
 		    "the second %u\n", hakios_metal_cb_status(cb), a1, a2);
 		picture(px);
 		picture(px2);

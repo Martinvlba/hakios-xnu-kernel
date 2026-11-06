@@ -29,6 +29,7 @@
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
+#include <unistd.h>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -38,7 +39,6 @@
 
 #include "blit_shaders.h"
 #include "compile_mali.h"
-#include "prime_shaders.h"
 
 namespace {
 
@@ -123,7 +123,7 @@ struct hakios_metal_device {
     uint64_t heap_ctx = 0, heap_first = 0;
     std::atomic<bool> heap_set{false};          // the queue given its heap (HEAP_SET once a queue, as panvk and gallium)
     Bo heapdesc;
-    bool heap_ok = false;                       // the heap made and primed: draws can be served
+    bool heap_ok = false;                       // the heap made: draws can be served
 
     int call(uint32_t selector, void *request, size_t size)
     {
@@ -598,7 +598,7 @@ struct hakios_metal_cb {
     std::vector<hakios_metal_texture *> held_textures;
     std::vector<DrawJob> draws;                 // a DRAW Job's (its dst the index)
     std::vector<uint64_t> draw_areas;
-    uint32_t fresh_group = 0;                   // (HAKIOS_MALI_FRESH_GROUP=1: the group made for it, destroyed after)           // (where each draw's descriptors are in the stream BO: HAKIOS_MALI_TRACE)
+                                                // (where each draw's descriptors are in the stream BO: HAKIOS_MALI_TRACE)
     std::vector<hakios_metal_program *> programs;
     unsigned threadgroup_length = 0;            // setThreadgroupMemoryLength:atIndex: 0, for the dispatches after
     std::string error;
@@ -699,12 +699,7 @@ struct hakios_metal_queue {
                         tc[29], tc[30], tc[31], h[5], h[4], h[7], h[6]);
                 }
                 uint64_t nothing = 0;
-                device->call(0x7f, &nothing, sizeof(nothing));
-            }
-            if (cb->fresh_group != 0) {
-                struct { uint32_t group_handle, pad; } gd = { cb->fresh_group, 0 };
-                device->call(GROUP_DESTROY, &gd, sizeof(gd));
-                cb->fresh_group = 0;        // (HakiosGPU: the queues and heaps into its log)
+                device->call(0x7f, &nothing, sizeof(nothing));        // (HakiosGPU: the queues and heaps into its log)
             }
             device->freeBo(cb->stream);
             cb->letGo();
@@ -719,64 +714,10 @@ struct hakios_metal_queue {
 };
 
 namespace {
-// a stream of WORDS instructions at VA submitted on the device's queue, and waited for (2 s); false with the reason
-bool
-submitAndWait(hakios_metal_device *d, uint64_t va, unsigned words, uint32_t group)
-{
-    syncobj_create sc = {};
-    sync_op signal = {};
-    queue_submit qs = {};
-    group_submit gs = {};
-    syncobj_wait w = {};
-    bool done = false;
-
-    __asm__ volatile("dsb sy" ::: "memory");
-    std::lock_guard<std::mutex> g(d->lock);
-    if (d->call(SYNCOBJ_CREATE, &sc, sizeof(sc)) != 0) {
-        fail("no sync object");
-        return false;
-    }
-    signal = { 1u << 31, sc.handle, 0 };
-    qs.stream_size = words * 8;
-    qs.stream_addr = va;
-    qs.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal };
-    gs.group_handle = group;
-    gs.queue_submits = { sizeof(qs), 1, (uint64_t)(uintptr_t)&qs };
-    w.handles = (uint64_t)(uintptr_t)&sc.handle;
-    w.timeout_nsec = 2000000000LL;
-    w.count_handles = 1;
-    w.flags = 1;
-    done = d->call(GROUP_SUBMIT, &gs, sizeof(gs)) == 0 && d->call(SYNCOBJ_WAIT, &w, sizeof(w)) == 0;
-    syncobj_destroy sd = { sc.handle, 0 };
-    d->call(SYNCOBJ_DESTROY, &sd, sizeof(sd));
-    if (!done) {
-        fail("the GPU did not run the stream in 2 s");
-    }
-    return done;
-}
-
 // what draws need of the device: the queue's tiler heap (panvk's sizes) and its descriptor with a 64 KiB geometry buffer
 // after it (heapdesc + 0x1000); the sample positions (descriptors + 0x1800), a depth/stencil descriptor that lets all
-// through (+ 0x1980); then one draw made and thrown away, because the first draw on a fresh heap bins nothing
-// (hakios-kernel's mali_test: the tiler sets its bins up and writes no primitive) -- and on a group of its own, made for
-// it and destroyed after: the queue that drew it stays that way (every draw after on it binned nothing too), while
-// another queue draws on the heap from then on
-uint32_t
-newGroup(hakios_metal_device *d)
-{
-    queue_create qc = {};
-    qc.priority = 1;
-    qc.ringbuf_size = 0x10000;
-    group_create gc = {};
-    gc.queues = { sizeof(qc), 1, (uint64_t)(uintptr_t)&qc };
-    gc.max_compute_cores = gc.max_fragment_cores = 64;
-    gc.max_tiler_cores = 1;
-    gc.priority = 1;
-    gc.compute_core_mask = gc.fragment_core_mask = d->shaders;
-    gc.tiler_core_mask = d->tiler;
-    gc.vm_id = d->vm;
-    return d->call(GROUP_CREATE, &gc, sizeof(gc)) == 0 ? gc.group_handle : 0;
-}
+// through (+ 0x1980). (The GPU's pages are outer shareable -- hakios-kernel's PTE_SH_OS: without that the tiler read
+// what the shader cores had written as memory held it before, and every pass looked like the one before it.)
 
 bool
 openDraws(hakios_metal_device *d)
@@ -807,60 +748,6 @@ openDraws(hakios_metal_device *d)
     memset(zs, 0, 32);
     zs[0] = 7 | 7 << 4 | 7 << 16;                       // stencil faces: always
     zs[4] = 1u << 21 | 1u << 22 | 7u << 29;             // depth: always, nothing written
-    // the priming draw: pan_draw_shaders' triangle (prime_shaders.h) into a 64x64 target at heapdesc + 0x13000
-    memcpy(desc + 0x2000, mali_tri_vs.code, mali_tri_vs.size);
-    memcpy(desc + 0x2800, mali_tri_fs.code, mali_tri_fs.size);
-    auto *spd = (uint32_t *)(desc + 0x3000);
-    spd[0] = 8 | 3 << 4 | (mali_tri_vs.work_regs <= 32 ? 2u : 0u) << 30;
-    spd[1] = (uint32_t)(mali_tri_vs.preload >> 48);
-    *(uint64_t *)&spd[2] = d->descriptors.va + 0x2000;
-    spd[16] = 8 | 2 << 4 | (mali_tri_fs.work_regs <= 32 ? 2u : 0u) << 30;
-    spd[17] = (uint32_t)(mali_tri_fs.preload >> 48);
-    *(uint64_t *)&spd[18] = d->descriptors.va + 0x2800;
-    DrawJob dj = {};
-    dj.pos_spd = d->descriptors.va + 0x3000;
-    dj.frag_spd = d->descriptors.va + 0x3040;
-    uint64_t counter = d->heapdesc.va + 0x11000;
-    dj.fs_fau = { (uint32_t)counter, (uint32_t)(counter >> 32) };
-    dj.target_va = d->heapdesc.va + 0x13000;
-    dj.width = dj.height = 64;
-    dj.row_bytes = 64 * 4;
-    dj.rt1 = 19 << 3 | 2 << 8 | (0 | 1 << 3 | 2 << 6 | 3 << 9) << 16;
-    dj.write = true;
-    dj.blend[0] = 1u << 9;
-    dj.blend[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
-    dj.blend[2] = 1 | 3 << 3;
-    dj.blend[3] = 237u << 12;
-    dj.mode = 8;
-    dj.count = 3;
-    dj.instances = 1;
-    dj.dcd0 = 1u << 23 | 1u << 26;
-    dj.dcd1 = 0xffff | 1u << 16;
-    dj.dcd2 = 1u << 12 | 1u << 24 | 1u << 25;
-    dj.tiler_flags = 8 | 1u << 22;
-    dj.scissor_max = 63 | 63 << 16;
-    auto *st = (uint64_t *)((uint8_t *)d->heapdesc.cpu + 0x17000);
-    unsigned n = 0;
-    st[n++] = set_state(0, 3);
-    st[n++] = set_state(9, 0x8);
-    st[n++] = set_state(1, 0);
-    st[n++] = set_state(2, 1);
-    st[n++] = set_state(8, 0xf0);
-    st[n++] = 34ULL << 56 | 0xf;
-    st[n++] = move48(0, d->heap_ctx);
-    st[n++] = 48ULL << 56;
-    emitDraw(d, dj, (uint8_t *)d->heapdesc.cpu + 0x12000, d->heapdesc.va + 0x12000, st, n);
-    uint32_t primer = newGroup(d);
-    if (primer == 0) {
-        fail("HakiosGPU: no group for the heap's priming draw");
-        return false;
-    }
-    bool primed = submitAndWait(d, d->heapdesc.va + 0x17000, n, primer);
-    struct { uint32_t group_handle, pad; } gd = { primer, 0 };
-    d->call(GROUP_DESTROY, &gd, sizeof(gd));
-    if (!primed) {
-        return false;
-    }
     d->heap_ok = true;
     return true;
 }
@@ -948,14 +835,14 @@ hakios_metal_open(void)
     gc.compute_core_mask = gc.fragment_core_mask = d->shaders;
     gc.tiler_core_mask = d->tiler;
     gc.vm_id = d->vm;
+    d->tiler_levels = (info.tiler_features >> 8) & 0xf;
+    openDraws(d);                                       // (without it, draws are refused by name)
     if (d->call(GROUP_CREATE, &gc, sizeof(gc)) != 0) {
         fail("HakiosGPU: no group");
         hakios_metal_close(d);
         return nullptr;
     }
     d->group = gc.group_handle;
-    d->tiler_levels = (info.tiler_features >> 8) & 0xf;
-    openDraws(d);                                       // (without it, draws are refused by name)
     return d;
 }
 
@@ -1149,7 +1036,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
         cb->status = HAKIOS_METAL_ERROR;
     } else if (!cb->blits.empty()) {
         // the stream (from 0), then each job's push constants: 32 bytes for a blit, a kernel's fau_words for a dispatch
-        size_t words = 18 + 40 + cb->blits.size() * 20 + cb->draws.size() * DRAW_WORDS;   // (40: HAKIOS_MALI_ZERO_REGS)
+        size_t words = 18 + cb->blits.size() * 20 + cb->draws.size() * DRAW_WORDS;
         uint64_t fau_area = (words * 8 + 0xff) & ~0xffULL, fau_size = 0;
         std::vector<uint64_t> fau_at(cb->blits.size());
         for (size_t i = 0; i < cb->blits.size(); i++) {
@@ -1184,16 +1071,9 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
             s[n++] = move32(74, 0);
             s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4 | 1;          // FLUSH_CACHE2
             s[n++] = WAIT_ALL;
-            if (!cb->draws.empty() && getenv("HAKIOS_MALI_ZERO_REGS") != nullptr) {
-                for (unsigned r = 0; r < 80; r += 2) {
-                    s[n++] = move48(r, 0);      // (debugging: every register as a fresh group's)
-                }
-            }
             if (!cb->draws.empty()) {
                 s[n++] = 34ULL << 56 | 0xf;                                     // REQ_RESOURCE: compute, fragment, tiler, IDVS
-                // the queue's tiler heap, set once: a HEAP_SET in every submission left the queue drawing one pass
-                // and binning nothing after (a group per command buffer drew every pass)
-                if ((getenv("HAKIOS_MALI_FRESH_GROUP") != nullptr) || !d->heap_set.exchange(true)) {
+                if (!d->heap_set.exchange(true)) {                              // the queue's tiler heap, once
                     s[n++] = move48(0, d->heap_ctx);
                     s[n++] = 48ULL << 56;                                       // HEAP_SET
                 }
@@ -1331,10 +1211,6 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                 qs.stream_addr = cb->stream.va;
                 qs.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal };
                 gs.group_handle = d->group;
-                if (!cb->draws.empty() && getenv("HAKIOS_MALI_FRESH_GROUP") != nullptr &&
-                    (cb->fresh_group = newGroup(d)) != 0) {
-                    gs.group_handle = cb->fresh_group;  // (debugging: draws on a group of their own, as mali_test's)
-                }
                 gs.queue_submits = { sizeof(qs), 1, (uint64_t)(uintptr_t)&qs };
                 if (d->call(GROUP_SUBMIT, &gs, sizeof(gs)) != 0) {
                     cb->error = "HakiosGPU did not take the submission";
