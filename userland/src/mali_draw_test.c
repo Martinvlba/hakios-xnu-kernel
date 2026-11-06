@@ -102,9 +102,26 @@ main(void)
 	    tri_flat_fs_bc_len, 70);
 	hakios_metal_program *col = hakios_metal_program_new_bitcode(tri_color_vs_bc, tri_color_vs_bc_len, tri_color_fs_bc,
 	    tri_color_fs_bc_len, 70);
+	/* (the same tri_flat with the viewport baked into its code: push constants out of the question) */
+	setenv("MALI_FIXED_VIEWPORT", "64", 1);
+	hakios_metal_program *fixed = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc,
+	    tri_flat_fs_bc_len, 70);
+	unsetenv("MALI_FIXED_VIEWPORT");
 	if (flat == NULL || col == NULL) {
 		printf("mali_draw_test: no program (%s)\n", hakios_metal_error());
 		return 1;
+	}
+	/* tri_color: a colour varying per vertex: no grey left; top left blue, bottom left red, top right green */
+	for (int round = 0; round < 2; round++) {
+		int st = draw(d, q, col, px, &us);
+		uint32_t tl = px[0], tr = px[63], bl = px[63 * 64];
+		printf("mali_draw_test: tri_color, draw %d: status %d, %u grey; top left 0x%08x (%s), top right 0x%08x (%s), bottom "
+		    "left 0x%08x (%s); %ld us\n", round + 1, st, greys(px), tl, colour(tl), tr, colour(tr), bl, colour(bl), us);
+		if (round == 1) {
+			picture(px);
+		}
+		right = right && st == HAKIOS_METAL_COMPLETED && greys(px) == 0 && !strcmp(colour(tl), "blue") &&
+		    !strcmp(colour(bl), "red") && !strcmp(colour(tr), "green");
 	}
 	/* tri_flat: no varyings, a constant colour (32, 64, 128): every pixel 0xff804020 wanted */
 	for (int round = 0; round < 2; round++) {
@@ -118,17 +135,50 @@ main(void)
 		picture(px);
 		right = right && st == HAKIOS_METAL_COMPLETED && want == 4096;
 	}
-	/* tri_color: a colour varying per vertex: no grey left; top left blue, bottom left red, top right green */
-	for (int round = 0; round < 2; round++) {
-		int st = draw(d, q, col, px, &us);
-		uint32_t tl = px[0], tr = px[63], bl = px[63 * 64];
-		printf("mali_draw_test: tri_color, draw %d: status %d, %u grey; top left 0x%08x (%s), top right 0x%08x (%s), bottom "
-		    "left 0x%08x (%s); %ld us\n", round + 1, st, greys(px), tl, colour(tl), tr, colour(tr), bl, colour(bl), us);
-		if (round == 1) {
-			picture(px);
+	for (int round = 0; round < 2 && fixed != NULL; round++) {
+		int st = draw(d, q, fixed, px, &us);
+		unsigned want = 0;
+		for (unsigned i = 0; i < 64 * 64; i++) {
+			want += px[i] == 0xff804020u;
 		}
-		right = right && st == HAKIOS_METAL_COMPLETED && greys(px) == 0 && !strcmp(colour(tl), "blue") &&
-		    !strcmp(colour(bl), "red") && !strcmp(colour(tr), "green");
+		printf("mali_draw_test: tri_flat, viewport baked in, draw %d: status %d, %u of 4096 pixels 0xff804020, %u grey\n",
+		    round + 1, st, want, greys(px));
+	}
+	/* two passes in one command buffer, on a group made for it: does a second pass in the same stream draw? */
+	{
+		hakios_metal_texture *t1 = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+		hakios_metal_texture *t2 = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+		hakios_metal_cb *cb = hakios_metal_cb_new(q);
+		struct hakios_metal_render_pass pass;
+		uint32_t px2[64 * 64];
+		unsigned a1 = 0, a2 = 0;
+
+		memset(&pass, 0, sizeof(pass));
+		pass.load_action = 2;
+		pass.store_action = 1;
+		pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+		pass.clear_color[3] = 1;
+		pass.color0 = t1;
+		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0);
+		pass.color0 = t2;
+		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0);
+		setenv("HAKIOS_MALI_FRESH_GROUP", "1", 1);
+		hakios_metal_cb_commit(cb, NULL, NULL);
+		unsetenv("HAKIOS_MALI_FRESH_GROUP");
+		hakios_metal_cb_wait(cb);
+		hakios_metal_texture_read(t1, 0, 0, 64, 64, px, 64 * 4);
+		hakios_metal_texture_read(t2, 0, 0, 64, 64, px2, 64 * 4);
+		for (unsigned i = 0; i < 64 * 64; i++) {
+			a1 += px[i] == 0xff804020u;
+			a2 += px2[i] == 0xff804020u;
+		}
+		printf("mali_draw_test: two passes in one command buffer, a fresh group: status %d; the first %u of 4096 drawn, "
+		    "the second %u\n", hakios_metal_cb_status(cb), a1, a2);
+		picture(px);
+		picture(px2);
+		hakios_metal_cb_free(cb);
+		hakios_metal_texture_free(t1);
+		hakios_metal_texture_free(t2);
 	}
 	printf("mali_draw_test: the first Metal draws %s\n", right ? "WORK" : "FAILED");
 	hakios_metal_program_free(flat);
