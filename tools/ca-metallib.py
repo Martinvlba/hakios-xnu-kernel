@@ -15,7 +15,8 @@ ca_metallib=/redwood/share/<OUTDIR's name>/QuartzCore-default.metallib (userland
 Off a Mac (Windows, WSL, Linux): CA_QC_METALLIB=FILE names the later CoreAnimation's library to take the air64 slice
 from -- a copy of a Mac's QuartzCore.framework/Versions/A/Resources/default.metallib, or iPadOS/iOS 17's
 QuartzCore.framework/default.metallib out of its IPSW (7z x the root filesystem's dmg), both universal with an air64
-slice. Without it, the Mac's own path above.
+slice -- or an iOS 16 iPhone's own (the iPhone 11's 20F66 has one: a plain MTLB of the same CoreAnimation as this
+image, taken as it is). Without it, the Mac's own path above.
 """
 import os
 import struct
@@ -30,6 +31,10 @@ AIR64 = 0x01000017
 
 def air64_slice(path):
     with open(path, 'rb') as f:
+        if f.read(4) == b'MTLB':
+            f.seek(0)
+            return f.read()             # a library of one platform already (an iPhone's: iOS 16's own, e.g. iPhone 11's)
+        f.seek(0)
         magic, n = struct.unpack('>II', f.read(8))
         assert magic == 0xcafebabe, '%s: not a universal file' % path
         for _ in range(n):
