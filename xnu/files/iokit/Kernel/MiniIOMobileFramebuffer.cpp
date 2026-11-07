@@ -276,8 +276,18 @@ struct hakios_display_ops {
 	int (*buffers)(vm_offset_t va[3], uint32_t *count, uint32_t *width, uint32_t *height, uint32_t *row_bytes);
 	void (*flip)(unsigned index);
 	uint32_t (*shown)(void);
+	/* the panel's own refresh, where the driver measures it (NULL or 0: unknown): its rate in Hz, and the
+	 * mach_absolute_time of its last refresh -- the vsync this driver tells is put on that beat */
+	uint32_t (*refresh_hz)(void);
+	uint64_t (*vblank_time)(void);
 };
 const struct hakios_display_ops * hakios_display_ops;
+/*
+ * Where the display is on the panel, for the touch screen's coordinates (drivers/input/hakios.input.c): the displayed
+ * area's left and top and its width and height, in 65536ths of the panel's. A letterboxed display (see fLetterbox) sets
+ * them, so that a finger's place on the panel is its place in the picture.
+ */
+uint32_t hakios_touch_view[4] = { 0, 0, 65536, 65536 };
 }
 
 /*
@@ -322,6 +332,19 @@ measurePanel(__unused void * arg, __unused wait_result_t wr)
 static inline uint32_t
 refreshHz(void)
 {
+	static int given = -1;
+
+	/* the panel's measured rate (the Pixel 8a's: 60 or 120, display_hz=), unless fb_hz= says otherwise */
+	if (given < 0) {
+		uint32_t v;
+		given = PE_parse_boot_argn("fb_hz", &v, sizeof(v)) ? 1 : 0;
+	}
+	if (!given && hakios_display_ops != NULL && hakios_display_ops->refresh_hz != NULL) {
+		uint32_t hz = hakios_display_ops->refresh_hz();
+		if (hz >= 30 && hz <= 240) {
+			return hz;
+		}
+	}
 	return gRefreshHz >= 1 && gRefreshHz <= 240 ? gRefreshHz : kFBRefreshHz;
 }
 static inline uint32_t
@@ -364,6 +387,7 @@ class IOMobileFramebuffer : public IOService
 public:
 	IOLock *        fLock;
 	uint8_t *       fBase;                  /* the boot framebuffer: the panel (with flips: the buffer drawn last) */
+	bool            fLetterbox;             /* the display smaller than the panel: centred, not scaled */
 	uint8_t *       fBuffers[3];            /* with flips (hakios_display_ops): the buffers, and the one last flipped to */
 	unsigned        fBufferCount, fQueued;
 	bool            fFlipping;
@@ -668,6 +692,42 @@ IOMobileFramebuffer::start(IOService * provider)
 			fFlipping = true;
 			IOLog("MiniIOMobileFramebuffer: %s buffered (the device's display driver flips)\n", n == 3 ? "triple" : "double");
 		}
+	}
+	/*
+	 * A display that fits inside the panel (fbwidth x fbheight no larger: the Pixel 8a's 1080 x 2400 shows the 1080 x 2340
+	 * of the iPhone 12 mini's class whole) is put on it pixel for pixel, centred, and not scaled: every row of a frame a
+	 * copy (the unscaled path of drawRows). The margins are black, cleared once in every buffer; frames never touch them.
+	 */
+	fLetterbox = false;
+	if (fWidth <= fPanelWidth && fHeight <= fPanelHeight && (fWidth != fPanelWidth || fHeight != fPanelHeight)) {
+		uint32_t top = (fPanelHeight - fHeight) / 2, left = (fPanelWidth - fWidth) / 2;
+		uint8_t * buffers[3] = { fBase, NULL, NULL };
+		unsigned count = 1;
+
+		if (fFlipping) {
+			for (unsigned i = 0; i < fBufferCount; i++) {
+				buffers[i] = fBuffers[i];
+			}
+			count = fBufferCount;
+		}
+		fLetterbox = true;
+		for (unsigned b = 0; b < count; b++) {
+			for (uint32_t y = 0; y < fPanelHeight; y++) {
+				uint8_t * row = buffers[b] + (size_t) y * fRowBytes;
+				if (y < top || y >= top + fHeight) {
+					memset(row, 0, (size_t) fPanelWidth * 4);
+				} else if (left != 0) {
+					memset(row, 0, (size_t) left * 4);
+					memset(row + (size_t) (left + fWidth) * 4, 0, (size_t) (fPanelWidth - left - fWidth) * 4);
+				}
+			}
+		}
+		hakios_touch_view[0] = (uint32_t) ((uint64_t) left * 65536 / fPanelWidth);
+		hakios_touch_view[1] = (uint32_t) ((uint64_t) top * 65536 / fPanelHeight);
+		hakios_touch_view[2] = (uint32_t) ((uint64_t) fWidth * 65536 / fPanelWidth);
+		hakios_touch_view[3] = (uint32_t) ((uint64_t) fHeight * 65536 / fPanelHeight);
+		IOLog("MiniIOMobileFramebuffer: a display of %u x %u, centred on the panel's %u x %u, not scaled\n", fWidth, fHeight,
+		    fPanelWidth, fPanelHeight);
 	}
 	fColumn = IONewZero(uint32_t, fPanelWidth);
 	fColumnWeight = IONewZero(uint16_t, fPanelWidth);
@@ -1144,6 +1204,14 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	int64_t qy0 = (int64_t) dy * fPanelHeight / fHeight;
 	int64_t qx1 = ((int64_t) dx + dw) * fPanelWidth / fWidth;
 	int64_t qy1 = ((int64_t) dy + dh) * fPanelHeight / fHeight;
+	if (fLetterbox) {
+		/* pixel for pixel, centred (see where fLetterbox is set) */
+		int64_t left = (fPanelWidth - fWidth) / 2, top = (fPanelHeight - fHeight) / 2;
+		qx0 = dx + left;
+		qy0 = dy + top;
+		qx1 = (int64_t) dx + dw + left;
+		qy1 = (int64_t) dy + dh + top;
+	}
 
 	if (qx0 < -DST_LIMIT || qy0 < -DST_LIMIT || qx1 > DST_LIMIT || qy1 > DST_LIMIT) {
 		return;
@@ -1840,6 +1908,17 @@ IOMobileFramebufferUserClient::armVSync(void)
 	fVSyncTime += period;
 	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {
 		fVSyncTime = now + period;
+	}
+	/* on the panel's beat where its driver tells it: the nearest of its refreshes (the last one plus whole periods) */
+	if (hakios_display_ops != NULL && hakios_display_ops->vblank_time != NULL) {
+		uint64_t v = hakios_display_ops->vblank_time();
+		if (v != 0 && v <= fVSyncTime && fVSyncTime - v < 64 * period) {
+			uint64_t k = (fVSyncTime - v + period / 2) / period;
+			uint64_t snapped = v + k * period;
+			if (snapped > now) {
+				fVSyncTime = snapped;
+			}
+		}
 	}
 	thread_call_enter_delayed(fVSyncCall, fVSyncTime);
 }
