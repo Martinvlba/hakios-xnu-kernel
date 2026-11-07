@@ -94,8 +94,10 @@ int mali_vertex_compile(const void *bitcode, size_t size, const struct mali_cons
 /* a vertex function (FRAGMENT 0), or a fragment function (FRAGMENT 1) against VERTEX's varyings; as mali_kernel_compile */
 int mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, int fragment,
     const struct mali_kernel_binary *vertex, struct mali_kernel_binary *out, char *error, size_t error_size);
-/* the driver's preload draw (compile_mali.c): a triangle over the target, texture 0's texel at each fragment */
-int mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size);
+/* the driver's preload draw (compile_mali.c): a triangle over the target, colour attachment n texture n's texel, for
+ * TARGETS (1 to 4) attachments */
+int mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, char *error,
+    size_t error_size);
 void mali_kernel_binary_free(struct mali_kernel_binary *binary);
 
 #ifdef __cplusplus

@@ -240,6 +240,11 @@ lower_draw_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
 	case nir_intrinsic_load_base_instance:
 		value = push_words(b, MALI_DRAW_BASE_INSTANCE, 1, 32);
 		break;
+	case nir_intrinsic_load_rt_conversion_pan:
+		/* a framebuffer fetch's (LD_TILE) conversion: the tile buffer's format, as the blend descriptor's word 3 that
+		 * c_api_mali.cpp writes for every colour target it serves (R8G8B8A8 in the tile buffer) */
+		value = nir_imm_int(b, 237 << 12);
+		break;
 	default:
 		return false;
 	}
@@ -650,7 +655,8 @@ mali_vertex_compile(const void *bitcode, size_t size, const struct mali_constant
  * DCD, through the ordinary draw path instead: on a tiler a tile reads its own pixels before it writes them back.
  */
 int
-mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size)
+mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, char *error,
+    size_t error_size)
 {
 	void *mem = ralloc_context(NULL);
 	nir_builder b;
@@ -684,7 +690,10 @@ mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *f
 	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_FRAGMENT, false), "hakios_preload_fs");
 	ralloc_steal(mem, b.shader);
 	b.shader->info.fs.origin_upper_left = true;     /* as the front end's fragment functions (Metal's origin) */
-	{
+	/* colour attachment n from texture n, for each of TARGETS (1 to 4) */
+	fs->stage = 2;
+	snprintf(fs->name, sizeof(fs->name), "hakios_preload_fs%u", targets);
+	for (unsigned t = 0; t < targets && t < 4; t++) {
 		nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, nir_load_frag_coord(&b), 2));
 		nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
 
@@ -692,7 +701,7 @@ mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *f
 		tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
 		tex->dest_type = nir_type_float32;
 		tex->coord_components = 2;
-		tex->texture_index = 0;
+		tex->texture_index = t;
 		tex->sampler_index = 0;
 		tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, xy);
 		tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
@@ -700,13 +709,10 @@ mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *f
 		nir_builder_instr_insert(&b, &tex->instr);
 
 		var = nir_variable_create(b.shader, nir_var_shader_out, glsl_vec4_type(), "color");
-		var->data.location = FRAG_RESULT_DATA0;
+		var->data.location = FRAG_RESULT_DATA0 + t;
 		nir_store_var(&b, var, &tex->def, 0xf);
+		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, t, 0, 1, 0 };
 	}
-	fs->stage = 2;
-	snprintf(fs->name, sizeof(fs->name), "hakios_preload_fs");
-	fs->num_resources = 1;
-	fs->resources[0] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, 0, 0, 1, 0 };
 	if (compile_nir(b.shader, MESA_SHADER_FRAGMENT, vs->varyings, fs, error, error_size) != 0) {
 		goto done;
 	}
