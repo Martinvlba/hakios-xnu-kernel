@@ -24,6 +24,7 @@
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
+#include <sys/sysctl.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -850,10 +851,51 @@ hakios_metal_error(void)
     return gError.c_str();
 }
 
+/*
+ * The kernel starts the Mali mali_delay (8) s after its own start, once the firmware's file can be read: on the Pixel 8a
+ * HakiosGPU appears about 20 s into the boot, after backboardd has asked for its device (15 s) -- and a window server
+ * without one composites in software for good. With the GPU kept (mali_keep, mali= among the boot-args) the service is
+ * waited for, up to 15 s; without it the answer is at once, as before.
+ */
+static bool
+gpu_expected(void)
+{
+    char args[1024] = {};
+    size_t n = sizeof(args) - 1;
+    if (sysctlbyname("kern.bootargs", args, &n, nullptr, 0) != 0) {
+        return false;
+    }
+    for (const char *p = args; *p != 0;) {
+        while (*p == ' ') p++;
+        if ((strncmp(p, "mali_keep=", 10) == 0 && p[10] != '0') || (strncmp(p, "mali=", 5) == 0 && p[5] != '0')) {
+            return true;
+        }
+        while (*p != 0 && *p != ' ') p++;
+    }
+    return false;
+}
+
+static io_service_t
+find_gpu_service(void)
+{
+    io_service_t service = IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
+    if (service != 0 || !gpu_expected()) {
+        return service;
+    }
+    for (int i = 0; i < 150 && service == 0; i++) {     // 15 s in steps of 100 ms
+        usleep(100000);
+        service = IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
+    }
+    if (service != 0) {
+        fprintf(stderr, "hakios-metal: HakiosGPU appeared while it was waited for\n");
+    }
+    return service;
+}
+
 hakios_metal_device *
 hakios_metal_open(void)
 {
-    io_service_t service = IOServiceGetMatchingService(0, IOServiceMatching("HakiosGPU"));
+    io_service_t service = find_gpu_service();
     if (service == 0) {
         fail("no HakiosGPU service (hakios-kernel with mali_keep=1)");
         return nullptr;
