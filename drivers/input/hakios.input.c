@@ -190,10 +190,28 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
 	wakeup(&touch_queue);
 }
 
+/* the displayed area on the panel (MiniIOMobileFramebuffer's: left, top, width, height in 65536ths of the panel) */
+extern uint32_t hakios_touch_view[4];
+
+/* a coordinate on the panel as one in the displayed area, both 0..65535 (a finger outside it at the nearest edge) */
+static uint32_t
+touch_into_view(uint32_t v, uint32_t from, uint32_t size)
+{
+	if (size == 0 || size >= 65536) {
+		return v;
+	}
+	if (v <= from) {
+		return 0;
+	}
+	v = (uint32_t)((uint64_t)(v - from) * 65535 / size);
+	return v > 65535 ? 65535 : v;
+}
+
 void
 hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
 {
-	touch_post(type, finger, x, y, true);
+	touch_post(type, finger, touch_into_view(x, hakios_touch_view[0], hakios_touch_view[2]),
+	    touch_into_view(y, hakios_touch_view[1], hakios_touch_view[3]), true);
 }
 
 static int
