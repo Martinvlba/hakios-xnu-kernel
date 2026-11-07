@@ -35,6 +35,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <map>
 #include <vector>
 
 #include "blit_shaders.h"
@@ -140,31 +141,88 @@ struct hakios_metal_device {
             fail("no GPU memory of %llu bytes", (unsigned long long)size);
             return false;
         }
+        return mapAndBind(bo, c.handle, c.size, bind_flags);
+    }
+
+    // a buffer the kernel holds (HANDLE, SIZE) mapped for the CPU and bound into the GPU's address space (lock held)
+    bool mapAndBind(Bo &bo, uint32_t handle, uint64_t size, uint32_t bind_flags)
+    {
         mach_vm_address_t address = 0;
-        mach_vm_size_t mapped = c.size;
-        if (IOConnectMapMemory64(connection, c.handle, mach_task_self(), &address, &mapped, kIOMapAnywhere) != KERN_SUCCESS) {
+        mach_vm_size_t mapped = size;
+        if (IOConnectMapMemory64(connection, handle, mach_task_self(), &address, &mapped, kIOMapAnywhere) != KERN_SUCCESS) {
             fail("a buffer could not be mapped");
             return false;
         }
-        bo.handle = c.handle;
-        bo.size = c.size;
+        bo.handle = handle;
+        bo.size = size;
         bo.cpu = (void *)(uintptr_t)address;
-        if (next_va >> 32 != (next_va + c.size - 1) >> 32) {
-            next_va = (next_va + c.size - 1) & ~0xffffffffULL;  // (none across 4 GB: the local storage's must not)
+        if (next_va >> 32 != (next_va + size - 1) >> 32) {
+            next_va = (next_va + size - 1) & ~0xffffffffULL;    // (none across 4 GB: the local storage's must not)
         }
         bo.va = next_va;
-        next_va += c.size + 0x4000;             // a page between them
+        next_va += size + 0x4000;               // a page between them
         bind_op op = {};
         op.flags = bind_flags;
-        op.bo_handle = c.handle;
+        op.bo_handle = handle;
         op.va = bo.va;
-        op.size = c.size;
+        op.size = size;
         vm_bind b = { vm, 0, { sizeof(op), 1, (uint64_t)(uintptr_t)&op } };
         if (call(VM_BIND, &b, sizeof(b)) != 0) {
             fail("a buffer could not be bound into the GPU's address space");
             return false;
         }
         return true;
+    }
+
+    // An IOSurface's memory as a buffer (HakiosGPU's 0x7e, as the Adreno service's), shared by every texture over it:
+    // the kernel gives the same handle for the same surface, so it is closed with the last of them. false with the
+    // reason; INFO (size, offset, row bytes, width, height, pixel format, planes) filled.
+    struct SurfaceInfo { uint64_t size; uint32_t offset, row_bytes, width, height, pixel_format, planes; };
+    struct Surface { Bo bo; SurfaceInfo info; int refs; };
+    std::map<unsigned, Surface> surfaces;
+    bool surfaceBo(unsigned id, Bo &bo, SurfaceInfo &info)
+    {
+        std::lock_guard<std::mutex> g(lock);
+        auto it = surfaces.find(id);
+        if (it != surfaces.end()) {
+            it->second.refs++;
+            bo = it->second.bo;
+            info = it->second.info;
+            return true;
+        }
+        struct { uint32_t surface, handle; uint64_t size; uint32_t offset, row_bytes, width, height, format, planes; } r = {};
+        r.surface = id;
+        int e = call(0x7e, &r, sizeof(r));
+        if (e != 0) {
+            fail("IOSurface %u could not be had as GPU memory (HakiosGPU: 0x%x)", id, e);
+            return false;
+        }
+        Surface sf = {};
+        sf.info = { r.size, r.offset, r.row_bytes, r.width, r.height, r.format, r.planes };
+        if (!mapAndBind(sf.bo, r.handle, r.size, BIND_NOEXEC)) {
+            gem_close gc = { r.handle, 0 };
+            call(GEM_CLOSE, &gc, sizeof(gc));
+            return false;
+        }
+        sf.refs = 1;
+        surfaces[id] = sf;
+        bo = sf.bo;
+        info = sf.info;
+        return true;
+    }
+    void surfaceRelease(unsigned id)
+    {
+        Bo bo;
+        {
+            std::lock_guard<std::mutex> g(lock);
+            auto it = surfaces.find(id);
+            if (it == surfaces.end() || --it->second.refs > 0) {
+                return;
+            }
+            bo = it->second.bo;
+            surfaces.erase(it);
+        }
+        freeBo(bo);
     }
 
     void freeBo(Bo &bo)
@@ -343,24 +401,47 @@ struct hakios_metal_program {
 // format << 12 | sRGB << 20.
 struct hakios_metal_texture {
     hakios_metal_device *device;
-    Bo bo;
+    Bo bo;                                      // the memory (its own, an IOSurface's, a buffer's or a parent's)
     unsigned type, format, width, height, depth, usage;
-    uint32_t mali_format, bytes, stride;        // per texel; per row (64-byte aligned)
+    uint32_t mali_format, bytes, stride;        // per texel; per row (64-byte aligned for its own)
+    uint64_t offset = 0;                        // where its pixels start in BO
+    unsigned origin = 0;                        // 0 its own memory, 1 an IOSurface's, 2 a buffer's, 4 a view's
+    unsigned surface = 0;                       // the IOSurface's ID (origin 1)
+    unsigned levels = 1, samples = 1;
+    uint32_t swizzle = 0;                       // 0: the identity
+    hakios_metal_texture *parent = nullptr;     // a view's (held)
+    hakios_metal_buffer *buffer = nullptr;      // a buffer texture's (held)
     std::atomic<int> refs{1};
 
     void retain() { refs.fetch_add(1); }
-    void release()
-    {
-        if (refs.fetch_sub(1) == 1) {
-            device->freeBo(bo);
-            delete this;
-        }
-    }
+    void release();
+    uint8_t *pixels() const { return (uint8_t *)bo.cpu + offset; }
+    uint64_t gpu() const { return bo.va + offset; }
 };
 
 struct hakios_metal_sampler {
     uint32_t words[8];                          // genxml v10 "Sampler"
 };
+
+void
+hakios_metal_texture::release()
+{
+    if (refs.fetch_sub(1) != 1) {
+        return;
+    }
+    if (origin == 0) {
+        device->freeBo(bo);
+    } else if (origin == 1) {
+        device->surfaceRelease(surface);
+    }
+    if (parent != nullptr) {
+        parent->release();
+    }
+    if (buffer != nullptr) {
+        buffer->release();
+    }
+    delete this;
+}
 
 namespace {
 struct MaliFormat { unsigned metal; uint32_t mali; uint32_t bytes; };
@@ -388,14 +469,14 @@ describe(const hakios_metal_texture *t, uint32_t *tex, uint32_t *plane, uint64_t
     memset(plane, 0, 32);
     tex[0] = 2 | (t->type == 7 ? 3u : 2u) << 4 | t->mali_format << 10;      // a texture, 2D (or 3D: MTLTextureType3D 7)
     tex[1] = (t->width - 1) | (t->height - 1) << 16;
-    tex[2] = kIdentitySwizzle;                                              // one level, from level 0
+    tex[2] = t->swizzle ? t->swizzle : kIdentitySwizzle;                    // one level, from level 0
     tex[4] = (uint32_t)plane_va;
     tex[5] = (uint32_t)(plane_va >> 32);
     tex[7] = t->type == 7 ? t->depth - 1 : 0;
     plane[0] = 10 | 1 << 4 | 2 << 8 | clump << 24;                          // a plane, generic, linear
-    plane[1] = (uint32_t)t->bo.size;
-    plane[2] = (uint32_t)t->bo.va;
-    plane[3] = (uint32_t)(t->bo.va >> 32);
+    plane[1] = (uint32_t)(t->bo.size - t->offset);
+    plane[2] = (uint32_t)t->gpu();
+    plane[3] = (uint32_t)(t->gpu() >> 32);
     plane[4] = t->stride;
     plane[6] = t->stride * t->height;                                       // (a slice: a 3D texture's depth)
     plane[7] = (t->width - 1) | (t->height - 1) << 16;
@@ -434,7 +515,10 @@ struct DrawJob {
     hakios_metal_texture *textures[MALI_KERNEL_TEXTURES];
     uint32_t samplers[MALI_KERNEL_TEXTURES][8];
     unsigned texture_count, sampler_count;
+    uint64_t index_va = 0, index_size = 0;              // an indexed draw's indices (0: none)
+    bool clear_only = false;                            // a pass with no geometry: the clear (hakios_metal_cb_clear)
 };
+struct IndexInfo { hakios_metal_buffer *buffer; uint64_t offset; unsigned type; int base_vertex; };
 
 // the tiler's hierarchy mask for a W x H target of 16x16 tiles (Mesa's pan_select_tiler_hierarchy_mask, no budget)
 uint32_t
@@ -537,7 +621,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(36, dj.vertex_start);
     s[n++] = move32(37, 0);
     s[n++] = move32(38, dj.dcd2);
-    s[n++] = move32(39, 0);
+    s[n++] = move32(39, (uint32_t)dj.index_size);                               // the index buffer's bytes
     s[n++] = move48(40, area_va);                                               // the tiler context
     s[n++] = move32(42, dj.scissor_min);
     s[n++] = move32(43, dj.scissor_max);
@@ -547,19 +631,21 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(48, dj.vary_size);
     s[n++] = move48(50, (area_va + 0x180) | 1);                                // one blend descriptor
     s[n++] = move48(52, d->descriptors.va + 0x1980);                           // depth/stencil: all pass
-    s[n++] = move48(54, 0);                                                     // no index buffer
+    s[n++] = move48(54, dj.index_va);                                           // the index buffer (0: none)
     s[n++] = move32(56, dj.tiler_flags);
     s[n++] = move32(57, dj.dcd0);
     s[n++] = move32(58, dj.dcd1);
     s[n++] = move32(60, 0x3f800000);                                            // primitive size 1.0
     s[n++] = move32(61, 0);                                                     // TILER_FLAGS2: VRS 1x1
-    s[n++] = 49ULL << 56 | 0ULL << 32;                                          // HEAP_OPERATION: vertex/tiler started
-    s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                              // RUN_IDVS: malloc, the fragment's SRT
-    s[n++] = WAIT_ALL;
-    s[n++] = 9ULL << 56;                                                        // FINISH_TILING
-    s[n++] = WAIT_ALL;
-    s[n++] = 49ULL << 56 | 1ULL << 32;                                          // HEAP_OPERATION: vertex/tiler completed
-    s[n++] = WAIT_ALL;
+    if (!dj.clear_only) {                                                       // (a clear: the fragment job alone)
+        s[n++] = 49ULL << 56 | 0ULL << 32;                                      // HEAP_OPERATION: vertex/tiler started
+        s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                          // RUN_IDVS: malloc, the fragment's SRT
+        s[n++] = WAIT_ALL;
+        s[n++] = 9ULL << 56;                                                    // FINISH_TILING
+        s[n++] = WAIT_ALL;
+        s[n++] = 49ULL << 56 | 1ULL << 32;                                      // HEAP_OPERATION: vertex/tiler completed
+        s[n++] = WAIT_ALL;
+    }
     s[n++] = move48(40, (area_va + 0x80) | 1);                                 // the framebuffer descriptor, one RT
     s[n++] = move32(42, 0);
     s[n++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
@@ -603,6 +689,9 @@ struct hakios_metal_cb {
     unsigned threadgroup_length = 0;            // setThreadgroupMemoryLength:atIndex: 0, for the dispatches after
     std::string error;
     enum hakios_metal_status status = HAKIOS_METAL_NOT_ENQUEUED;
+    bool skip_refused = false;                  // a refused piece left out, not the whole command buffer failed
+    unsigned skipped = 0;
+    std::string skip_reason;
     Bo stream;
     uint32_t sync = 0;
     void (*callback)(hakios_metal_cb *, void *) = nullptr;
@@ -1569,9 +1658,9 @@ hakios_metal_texture_free(hakios_metal_texture *t)
     }
 }
 
-void *hakios_metal_texture_contents(hakios_metal_texture *t) { return t ? t->bo.cpu : nullptr; }
+void *hakios_metal_texture_contents(hakios_metal_texture *t) { return t ? t->pixels() : nullptr; }
 uint64_t hakios_metal_texture_bytes_per_row(hakios_metal_texture *t) { return t ? t->stride : 0; }
-uint64_t hakios_metal_texture_gpu_address(hakios_metal_texture *t) { return t ? t->bo.va : 0; }
+uint64_t hakios_metal_texture_gpu_address(hakios_metal_texture *t) { return t ? t->gpu() : 0; }
 unsigned hakios_metal_texture_width(hakios_metal_texture *t) { return t ? t->width : 0; }
 unsigned hakios_metal_texture_height(hakios_metal_texture *t) { return t ? t->height : 0; }
 unsigned hakios_metal_texture_format(hakios_metal_texture *t) { return t ? t->format : 0; }
@@ -1588,7 +1677,7 @@ copyRows(hakios_metal_texture *t, unsigned x, unsigned y, unsigned w, unsigned h
         return -1;
     }
     for (unsigned row = 0; row < h; row++) {
-        uint8_t *gpu = (uint8_t *)t->bo.cpu + (uint64_t)(y + row) * t->stride + (uint64_t)x * t->bytes;
+        uint8_t *gpu = t->pixels() + (uint64_t)(y + row) * t->stride + (uint64_t)x * t->bytes;
         uint8_t *cpu = bytes + row * bytes_per_row;
         if (in) {
             memcpy(gpu, cpu, (size_t)w * t->bytes);
@@ -1841,7 +1930,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     hakios_metal_buffer *const *vs_buffers, const uint64_t *vs_offsets, unsigned vs_count,
     hakios_metal_buffer *const *fs_buffers, const uint64_t *fs_offsets, unsigned fs_count,
     hakios_metal_texture *const *fs_textures, unsigned fs_texture_count, hakios_metal_sampler *const *fs_samplers,
-    unsigned fs_sampler_count)
+    unsigned fs_sampler_count, const IndexInfo *ix = nullptr)
 {
     hakios_metal_device *d = cb->queue->device;
     const char *refused = nullptr;
@@ -1862,6 +1951,9 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     else if (p->samples != 1) refused = "multisampling (not on the Mali yet)";
     else if (primitive != 3 && primitive != 4) refused = "a primitive other than triangles and triangle strips";
     else if (instance_count == 0) refused = "no instances";
+    else if (ix && (ix->buffer == nullptr || ix->type > 1 || ix->base_vertex < 0 ||
+                    ix->offset + (uint64_t)vertex_count * (ix->type ? 4 : 2) > ix->buffer->length))
+        refused = "an indexed draw past its index buffer, of an unknown index type or with a negative base vertex";
     for (unsigned i = 0; refused == nullptr && i < 7; i++) {
         if (pass->more[i].texture) refused = "colour attachments past 0 (not on the Mali yet)";
     }
@@ -1922,7 +2014,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.vary_spd = p->vary_spd;
     dj.frag_spd = p->frag_spd;
     dj.vary_size = p->vs.varying_bytes;
-    dj.target_va = t->bo.va;
+    dj.target_va = t->gpu();
     dj.width = t->width;
     dj.height = t->height;
     dj.row_bytes = t->stride;
@@ -1941,13 +2033,20 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.mode = primitive == 4 ? 10 : 8;
     dj.count = vertex_count;
     dj.instances = instance_count;
-    dj.vertex_start = vertex_start;
+    dj.vertex_start = ix ? (unsigned)ix->base_vertex : vertex_start;
     // DCD0: scissor to the bounding box, cull zero area (v11); the face culled and the front's winding
     dj.dcd0 = 1u << 23 | 1u << 26 | (pass->winding == 1 ? 1u << 16 : 0) | (pass->cull_mode == 1 ? 1u << 17 : 0) |
         (pass->cull_mode == 2 ? 1u << 18 : 0);
     dj.dcd1 = 0xffff | 1u << 16;
     dj.dcd2 = 1u << 12 | 1u << 24 | 1u << 25;
     dj.tiler_flags = dj.mode | 1u << 22 | (dj.vary_spd ? 1u << 18 : 0);   // basic FIFO; the varying shader
+    if (ix) {
+        // the indices: 16 or 32 bits (Mali's index type 2, 3), primitive restart at the type's all-ones as Metal has it
+        dj.index_va = ix->buffer->bo.va + ix->offset;
+        dj.index_size = ix->buffer->length - ix->offset;
+        dj.tiler_flags |= (ix->type ? 3u : 2u) << 8 | 1u << 19;
+        used.push_back(ix->buffer);
+    }
     unsigned x0 = 0, y0 = 0, x1 = t->width, y1 = t->height;
     if (scissor != nullptr) {
         x0 = scissor->x < t->width ? scissor->x : t->width;
@@ -2019,6 +2118,508 @@ hakios_metal_cb_draw3(hakios_metal_cb *cb, hakios_metal_program *program, const 
     return drawImpl(cb, program, pass, viewport, scissor, primitive, vertex_start, vertex_count, instance_count,
         base_instance, vs_buffers, vs_offsets, vs_count, fs_buffers, fs_offsets, fs_count, fs_textures, fs_texture_count,
         fs_samplers, fs_sampler_count);
+}
+
+// ---- what upstream's CoreAnimation plug-in (userland/src/HakiosMetalCA.m) asks besides: served, or refused by name ----
+
+namespace {
+const MaliFormat *
+findFormat(unsigned pixel_format)
+{
+    for (const MaliFormat &m : kFormats) {
+        if (m.metal == pixel_format) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+// a texture over memory not its own: OWNER's BO at OFFSET, STRIDE apart
+hakios_metal_texture *
+textureOver(hakios_metal_device *d, const Bo &bo, uint64_t offset, uint32_t stride, unsigned type, const MaliFormat *f,
+    unsigned pixel_format, unsigned width, unsigned height, unsigned usage, unsigned origin)
+{
+    auto *t = new hakios_metal_texture;
+    t->device = d;
+    t->bo = bo;
+    t->offset = offset;
+    t->type = type;
+    t->format = pixel_format;
+    t->width = width;
+    t->height = height;
+    t->depth = 1;
+    t->usage = usage;
+    t->mali_format = f->mali;
+    t->bytes = f->bytes;
+    t->stride = stride;
+    t->origin = origin;
+    return t;
+}
+}  // namespace
+
+hakios_metal_texture *
+hakios_metal_texture_new_iosurface(hakios_metal_device *d, unsigned surface_id, unsigned plane, unsigned pixel_format,
+    unsigned width, unsigned height, unsigned usage)
+{
+    const MaliFormat *f = findFormat(pixel_format);
+    if (f == nullptr || plane != 0) {
+        fail("a texture over IOSurface %u of MTLPixelFormat %u, plane %u (not served on the Mali yet)", surface_id,
+            pixel_format, plane);
+        return nullptr;
+    }
+    Bo bo;
+    hakios_metal_device::SurfaceInfo info;
+    if (!d->surfaceBo(surface_id, bo, info)) {
+        return nullptr;
+    }
+    if (width > info.width || height > info.height || (uint64_t)width * f->bytes > info.row_bytes ||
+        info.offset + (uint64_t)info.row_bytes * (height - 1) + (uint64_t)width * f->bytes > info.size) {
+        d->surfaceRelease(surface_id);
+        fail("a texture of %u x %u over IOSurface %u of %u x %u (rows of %u bytes)", width, height, surface_id, info.width,
+            info.height, info.row_bytes);
+        return nullptr;
+    }
+    hakios_metal_texture *t = textureOver(d, bo, info.offset, info.row_bytes, 2, f, pixel_format, width, height, usage, 1);
+    t->surface = surface_id;
+    return t;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_buffer(hakios_metal_buffer *b, unsigned type, unsigned pixel_format, unsigned width,
+    unsigned height, unsigned usage, uint64_t offset, uint64_t bytes_per_row)
+{
+    const MaliFormat *f = findFormat(pixel_format);
+    if (b == nullptr || f == nullptr || type != 2 || (offset & 63) || (bytes_per_row & 63) ||
+        bytes_per_row < (uint64_t)width * f->bytes || offset + bytes_per_row * height > b->length) {
+        fail("a texture over a buffer: of MTLPixelFormat %u, type %u, offset %llu, rows of %llu bytes (64-byte aligned, "
+            "2D, inside the buffer)", pixel_format, type, (unsigned long long)offset, (unsigned long long)bytes_per_row);
+        return nullptr;
+    }
+    hakios_metal_texture *t = textureOver(b->device, b->bo, offset, (uint32_t)bytes_per_row, type, f, pixel_format, width,
+        height, usage, 2);
+    b->retain();
+    t->buffer = b;
+    return t;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_view(hakios_metal_texture *p, unsigned pixel_format, unsigned type, unsigned base_level,
+    unsigned levels, unsigned base_slice, unsigned slices)
+{
+    const MaliFormat *f = findFormat(pixel_format);
+    if (p == nullptr || f == nullptr || f->bytes != p->bytes || type != p->type || base_level != 0 || levels != 1 ||
+        base_slice != 0 || slices != 1) {
+        fail("a texture view of MTLPixelFormat %u, type %u, levels %u+%u, slices %u+%u (the Mali build views level 0 of "
+            "a 2D texture, as a format of the same size)", pixel_format, type, base_level, levels, base_slice, slices);
+        return nullptr;
+    }
+    hakios_metal_texture *t = textureOver(p->device, p->bo, p->offset, p->stride, type, f, pixel_format, p->width,
+        p->height, p->usage, 4);
+    p->retain();
+    t->parent = p;
+    t->surface = p->surface;
+    return t;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_swizzled(hakios_metal_texture *p, unsigned red, unsigned green, unsigned blue, unsigned alpha)
+{
+    // MTLTextureSwizzle (0 zero, 1 one, 2 red .. 5 alpha) as Mali's component selects (0 R .. 3 A, 4 zero, 5 one), over
+    // what P already reads
+    static const uint32_t to_mali[6] = { 4, 5, 0, 1, 2, 3 };
+    if (p == nullptr || red > 5 || green > 5 || blue > 5 || alpha > 5) {
+        fail("a texture swizzle past MTLTextureSwizzleAlpha");
+        return nullptr;
+    }
+    hakios_metal_texture *t = textureOver(p->device, p->bo, p->offset, p->stride, p->type, findFormat(p->format), p->format,
+        p->width, p->height, p->usage, 4);
+    uint32_t base = p->swizzle ? p->swizzle : kIdentitySwizzle;
+    auto pick = [&](unsigned m) -> uint32_t {
+        uint32_t sel = to_mali[m];
+        return sel < 4 ? (base >> (3 * sel)) & 7 : sel;
+    };
+    t->swizzle = pick(red) | pick(green) << 3 | pick(blue) << 6 | pick(alpha) << 9;
+    p->retain();
+    t->parent = p;
+    t->surface = p->surface;
+    return t;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_levels(hakios_metal_device *d, unsigned type, unsigned pixel_format, unsigned width,
+    unsigned height, unsigned levels, unsigned usage)
+{
+    if (levels <= 1) {
+        return hakios_metal_texture_new(d, type, pixel_format, width, height, usage);
+    }
+    fail("a texture of %u mip levels (one level only on the Mali yet)", levels);
+    return nullptr;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_multisample(hakios_metal_device *d, unsigned pixel_format, unsigned width, unsigned height,
+    unsigned samples, unsigned usage)
+{
+    if (samples <= 1) {
+        return hakios_metal_texture_new(d, 2, pixel_format, width, height, usage);
+    }
+    fail("a multisample texture of %u samples (not on the Mali yet)", samples);
+    return nullptr;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_layered(hakios_metal_device *d, unsigned type, unsigned pixel_format, unsigned width,
+    unsigned height, unsigned layers, unsigned levels, unsigned usage)
+{
+    if (layers <= 1 && (type == 2 || type == 3)) {
+        return hakios_metal_texture_new_levels(d, 2, pixel_format, width, height, levels, usage);
+    }
+    fail("a layered texture: type %u, %u layers (not on the Mali yet)", type, layers);
+    return nullptr;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_3d(hakios_metal_device *d, unsigned pixel_format, unsigned width, unsigned height,
+    unsigned depth, unsigned usage)
+{
+    (void)d; (void)usage;
+    fail("a 3D texture of MTLPixelFormat %u, %u x %u x %u (not on the Mali yet)", pixel_format, width, height, depth);
+    return nullptr;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_compressed(hakios_metal_device *d, unsigned pixel_format, unsigned width, unsigned height,
+    unsigned usage)
+{
+    (void)d; (void)usage;
+    fail("a compressed texture of MTLPixelFormat %u, %u x %u (not on the Mali yet)", pixel_format, width, height);
+    return nullptr;
+}
+
+unsigned hakios_metal_texture_iosurface(hakios_metal_texture *t) { return t ? t->surface : 0; }
+unsigned hakios_metal_texture_levels(hakios_metal_texture *t) { return t ? t->levels : 0; }
+unsigned hakios_metal_texture_samples(hakios_metal_texture *t) { return t ? t->samples : 0; }
+unsigned hakios_metal_texture_depth(hakios_metal_texture *t) { return t ? t->depth : 0; }
+unsigned hakios_metal_texture_bytes_per_pixel(hakios_metal_texture *t) { return t ? t->bytes : 0; }
+unsigned hakios_metal_texture_origin(hakios_metal_texture *t) { return t ? (t->origin == 4 ? (t->parent ? hakios_metal_texture_origin(t->parent) : 0) : t->origin) : 0; }
+uint64_t hakios_metal_texture_allocated_bytes(hakios_metal_texture *t) { return t ? t->bo.size : 0; }
+uint64_t hakios_metal_texture_resource_id(hakios_metal_texture *t) { return (uint64_t)(uintptr_t)t; }
+uint64_t hakios_metal_sampler_resource_id(hakios_metal_sampler *s) { return (uint64_t)(uintptr_t)s; }
+uint64_t hakios_metal_device_allocated_bytes(hakios_metal_device *d) { (void)d; return 0; }
+
+int
+hakios_metal_format_block(unsigned pixel_format, unsigned *block_w, unsigned *block_h, unsigned *bytes)
+{
+    const MaliFormat *f = findFormat(pixel_format);
+    if (f == nullptr) {
+        fail("MTLPixelFormat %u is not served on the Mali yet", pixel_format);
+        return 0;
+    }
+    *block_w = *block_h = 1;
+    *bytes = f->bytes;
+    return 1;
+}
+
+int
+hakios_metal_texture_plan_bytes(unsigned type, unsigned pixel_format, unsigned width, unsigned height, unsigned depth,
+    unsigned levels, unsigned samples, unsigned usage, uint64_t *bytes)
+{
+    (void)usage;
+    const MaliFormat *f = findFormat(pixel_format);
+    if (f == nullptr || type != 2 || depth > 1 || levels > 1 || samples > 1) {
+        fail("a texture of type %u, MTLPixelFormat %u, %u levels, %u samples (not on the Mali yet)", type, pixel_format,
+            levels, samples);
+        return -1;
+    }
+    *bytes = (((uint64_t)((width * f->bytes + 63) & ~63u) * height) + 0x3fff) & ~0x3fffULL;
+    return 0;
+}
+
+int
+hakios_metal_texture_read_level(hakios_metal_texture *t, unsigned level, unsigned x, unsigned y, unsigned w, unsigned h,
+    void *bytes, uint64_t bytes_per_row)
+{
+    if (level != 0) {
+        fail("a texture's level %u (one level only on the Mali yet)", level);
+        return -1;
+    }
+    return hakios_metal_texture_read(t, x, y, w, h, bytes, bytes_per_row);
+}
+
+int
+hakios_metal_texture_replace_level(hakios_metal_texture *t, unsigned level, unsigned x, unsigned y, unsigned w,
+    unsigned h, const void *bytes, uint64_t bytes_per_row)
+{
+    if (level != 0) {
+        fail("a texture's level %u (one level only on the Mali yet)", level);
+        return -1;
+    }
+    return hakios_metal_texture_replace(t, x, y, w, h, bytes, bytes_per_row);
+}
+
+int
+hakios_metal_texture_read_3d(hakios_metal_texture *t, unsigned level, unsigned x, unsigned y, unsigned z, unsigned w,
+    unsigned h, unsigned d, void *bytes, uint64_t bytes_per_row, uint64_t bytes_per_image)
+{
+    (void)bytes_per_image;
+    if (z != 0 || d != 1) {
+        fail("a 3D region of a texture (not on the Mali yet)");
+        return -1;
+    }
+    return hakios_metal_texture_read_level(t, level, x, y, w, h, bytes, bytes_per_row);
+}
+
+int
+hakios_metal_texture_replace_3d(hakios_metal_texture *t, unsigned level, unsigned x, unsigned y, unsigned z, unsigned w,
+    unsigned h, unsigned d, const void *bytes, uint64_t bytes_per_row, uint64_t bytes_per_image)
+{
+    (void)bytes_per_image;
+    if (z != 0 || d != 1) {
+        fail("a 3D region of a texture (not on the Mali yet)");
+        return -1;
+    }
+    return hakios_metal_texture_replace_level(t, level, x, y, w, h, bytes, bytes_per_row);
+}
+
+// the clear alone: a pass of no geometry (the fragment job writes the clear into every tile, as mali_test's clear did)
+int
+hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass *pass)
+{
+    hakios_metal_texture *t = pass ? pass->color0 : nullptr;
+    if (cb == nullptr || t == nullptr) {
+        fail("a clear without a colour attachment");
+        return -1;
+    }
+    if (pass->load_action != 2) {
+        return 0;                                       // nothing cleared, nothing drawn: nothing to do
+    }
+    if (!cb->queue->device->heap_ok || (t->format != 70 && t->format != 71 && t->format != 80 && t->format != 81) ||
+        !(t->usage & HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET) || pass->depth || pass->stencil) {
+        fail("a clear of MTLPixelFormat %u%s (RGBA8/BGRA8 colour alone on the Mali yet)", t->format,
+            pass->depth || pass->stencil ? " with depth or stencil" : "");
+        return -1;
+    }
+    for (unsigned i = 0; i < 7; i++) {
+        if (pass->more[i].texture) {
+            fail("a clear of colour attachments past 0 (not on the Mali yet)");
+            return -1;
+        }
+    }
+    DrawJob dj = {};
+    dj.clear_only = true;
+    dj.target_va = t->gpu();
+    dj.width = t->width;
+    dj.height = t->height;
+    dj.row_bytes = t->stride;
+    bool bgra = t->format == 80 || t->format == 81, srgb = t->format == 71 || t->format == 81;
+    uint32_t swizzle = bgra ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
+    dj.rt1 = 19 << 3 | 2 << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16;
+    dj.write = pass->store_action == 1;
+    dj.clear = unorm8(pass->clear_color[0]) | unorm8(pass->clear_color[1]) << 8 | unorm8(pass->clear_color[2]) << 16 |
+        (uint32_t)unorm8(pass->clear_color[3]) << 24;
+    dj.blend[0] = 1u << 9;
+    dj.blend[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
+    dj.blend[2] = 1 | 3 << 3;
+    dj.blend[3] = 237u << 12;
+    dj.mode = 8;
+    dj.instances = 1;
+    dj.scissor_max = (t->width - 1) | (t->height - 1) << 16;
+    Job j = {};
+    j.shader = DRAW;
+    j.dst = cb->draws.size();
+    cb->draws.push_back(dj);
+    cb->blits.push_back(j);
+    t->retain();
+    cb->held_textures.push_back(t);
+    return 0;
+}
+
+int
+hakios_metal_cb_draw_indexed(hakios_metal_cb *cb, hakios_metal_program *program, const struct hakios_metal_render_pass *pass,
+    const struct hakios_metal_viewport *viewport, const struct hakios_metal_scissor *scissor, unsigned primitive,
+    unsigned index_count, unsigned index_type, hakios_metal_buffer *index_buffer, uint64_t index_offset,
+    unsigned instance_count, int base_vertex, unsigned base_instance,
+    hakios_metal_buffer *const *vs_buffers, const uint64_t *vs_offsets, unsigned vs_count,
+    hakios_metal_buffer *const *fs_buffers, const uint64_t *fs_offsets, unsigned fs_count,
+    hakios_metal_texture *const *fs_textures, unsigned fs_texture_count,
+    hakios_metal_sampler *const *fs_samplers, unsigned fs_sampler_count)
+{
+    IndexInfo ix = { index_buffer, index_offset, index_type, base_vertex };
+    return drawImpl(cb, program, pass, viewport, scissor, primitive, 0, index_count, instance_count, base_instance,
+        vs_buffers, vs_offsets, vs_count, fs_buffers, fs_offsets, fs_count, fs_textures, fs_texture_count, fs_samplers,
+        fs_sampler_count, &ix);
+}
+
+int
+hakios_metal_cb_refuse(hakios_metal_cb *cb, const char *why)
+{
+    if (cb != nullptr) {
+        if (cb->skip_refused) {
+            cb->skipped++;
+            cb->skip_reason = why ? why : "";
+        } else {
+            hakios_metal_cb_fail(cb, why ? why : "refused");
+        }
+    }
+    return -1;
+}
+
+void hakios_metal_cb_skip_refused(hakios_metal_cb *cb, int on) { if (cb) cb->skip_refused = on != 0; }
+
+// the rest: Adreno's GMEM and its tuning, profiles and counts (none here), and what is refused by name
+int
+hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned sx, unsigned sy,
+    unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned dx, unsigned dy, unsigned dw, unsigned dh,
+    int linear)
+{
+    (void)from; (void)from_level; (void)sx; (void)sy; (void)sw; (void)sh; (void)to; (void)to_level; (void)dx; (void)dy;
+    (void)dw; (void)dh; (void)linear;
+    fail("a scaled texture blit (not on the Mali yet)");
+    if (cb) hakios_metal_cb_fail(cb, gError.c_str());
+    return -1;
+}
+
+int
+hakios_metal_cb_blit_rotated(hakios_metal_cb *cb, hakios_metal_texture *from, hakios_metal_texture *to, unsigned rotation)
+{
+    (void)from; (void)to;
+    fail("a rotated texture blit (%u, not on the Mali yet)", rotation);
+    if (cb) hakios_metal_cb_fail(cb, gError.c_str());
+    return -1;
+}
+
+int
+hakios_metal_cb_append(hakios_metal_cb *cb, hakios_metal_cb *other)
+{
+    (void)cb; (void)other;
+    fail("a command buffer appended to another (not on the Mali yet)");
+    return -1;
+}
+
+int
+hakios_metal_cb_generate_mipmaps(hakios_metal_cb *cb, hakios_metal_texture *t)
+{
+    (void)cb;
+    if (t != nullptr && t->levels <= 1) {
+        return 0;                                       // one level: nothing to make
+    }
+    fail("mipmaps (not on the Mali yet)");
+    return -1;
+}
+
+int
+hakios_metal_cb_dispatch_indirect(hakios_metal_cb *cb, hakios_metal_kernel *kernel, hakios_metal_buffer *args,
+    uint64_t offset, const unsigned threads[3], hakios_metal_buffer *const *buffers, const uint64_t *offsets,
+    unsigned count, hakios_metal_texture *const *textures, unsigned texture_count, hakios_metal_sampler *const *samplers,
+    unsigned sampler_count)
+{
+    (void)kernel; (void)args; (void)offset; (void)threads; (void)buffers; (void)offsets; (void)count; (void)textures;
+    (void)texture_count; (void)samplers; (void)sampler_count;
+    fail("an indirect dispatch (not on the Mali yet)");
+    if (cb) hakios_metal_cb_fail(cb, gError.c_str());
+    return -1;
+}
+
+hakios_metal_program *
+hakios_metal_program_specialize(hakios_metal_program *base, const void *fs_bitcode, size_t fs_size,
+    const hakios_metal_constant *fs_constants, unsigned fs_count, unsigned binding, const void *bytes, size_t length)
+{
+    (void)base; (void)fs_bitcode; (void)fs_size; (void)fs_constants; (void)fs_count; (void)binding; (void)bytes;
+    (void)length;
+    fail("a program specialized for its buffer's bytes (not on the Mali yet)");
+    return nullptr;
+}
+
+int
+hakios_metal_argument_buffer_layout(const void *bitcode, size_t size, unsigned set, unsigned *ids, unsigned *offsets,
+    unsigned max)
+{
+    (void)bitcode; (void)size; (void)set; (void)ids; (void)offsets; (void)max;
+    fail("argument buffers (not on the Mali yet)");
+    return -1;
+}
+
+void hakios_metal_cb_set_vertex_textures(hakios_metal_cb *cb, hakios_metal_texture *const *textures, unsigned texture_count,
+    hakios_metal_sampler *const *samplers, unsigned sampler_count)
+{
+    (void)textures; (void)samplers;
+    if (cb && (texture_count || sampler_count)) {
+        hakios_metal_cb_fail(cb, "vertex stage textures and samplers (not on the Mali yet)");
+    }
+}
+void hakios_metal_cb_set_indirect(hakios_metal_cb *cb, hakios_metal_buffer *args, uint64_t offset)
+{
+    (void)offset;
+    if (cb && args) {
+        hakios_metal_cb_fail(cb, "an indirect draw (not on the Mali yet)");
+    }
+}
+void hakios_metal_cb_set_null_fs_textures(hakios_metal_cb *cb, int on) { (void)cb; (void)on; }
+void hakios_metal_cb_set_gmem(hakios_metal_cb *cb, int on) { (void)cb; (void)on; }
+void hakios_metal_cb_set_gmem_binning(hakios_metal_cb *cb, int on) { (void)cb; (void)on; }
+void hakios_metal_cb_set_gmem_min_draws(hakios_metal_cb *cb, unsigned draws) { (void)cb; (void)draws; }
+void hakios_metal_cb_set_gmem_off(hakios_metal_cb *cb, unsigned bits) { (void)cb; (void)bits; }
+void hakios_metal_cb_set_gmem_tuned(hakios_metal_cb *cb, int on) { (void)cb; (void)on; }
+void hakios_metal_cb_set_profile(hakios_metal_cb *cb, int on) { (void)cb; (void)on; }
+void hakios_metal_cb_set_profile_draws(hakios_metal_cb *cb, int on) { (void)cb; (void)on; }
+void hakios_metal_queue_set_deferred(hakios_metal_queue *q, int on) { (void)q; (void)on; }
+void hakios_metal_cb_gmem_counts(hakios_metal_cb *cb, unsigned *passes, unsigned *tiles)
+{
+    (void)cb;
+    if (passes) *passes = 0;
+    if (tiles) *tiles = 0;
+}
+const char *hakios_metal_cb_gmem_refusal(hakios_metal_cb *cb) { (void)cb; return "no GMEM on a Mali"; }
+const char *hakios_metal_cb_pass_sysmem_why(hakios_metal_cb *cb, unsigned i) { (void)cb; (void)i; return "a Mali: tiled by itself"; }
+int hakios_metal_cb_pass_tiles(hakios_metal_cb *cb, unsigned i) { (void)cb; (void)i; return -1; }
+int hakios_metal_cb_pass_attachments(hakios_metal_cb *cb, unsigned i, unsigned *attached, unsigned *touched)
+{
+    (void)cb; (void)i; (void)attached; (void)touched;
+    return -1;
+}
+int hakios_metal_cb_pass_time(hakios_metal_cb *cb, unsigned i, unsigned *kind, unsigned *width, unsigned *height,
+    unsigned *draws, double *us)
+{
+    (void)cb; (void)i; (void)kind; (void)width; (void)height; (void)draws; (void)us;
+    return -1;
+}
+int hakios_metal_cb_draw_time(hakios_metal_cb *cb, unsigned i, const char **name, double *us)
+{
+    (void)cb; (void)i; (void)name; (void)us;
+    return -1;
+}
+int hakios_metal_cb_draw_place(hakios_metal_cb *cb, unsigned i, unsigned *pass, unsigned area[4])
+{
+    (void)cb; (void)i; (void)pass; (void)area;
+    return -1;
+}
+void hakios_metal_cb_counts(hakios_metal_cb *cb, unsigned *passes, unsigned *draws, unsigned *dispatches, unsigned *copies,
+    unsigned *clears)
+{
+    unsigned p = 0, dr = 0, di = 0, co = 0, cl = 0;
+    if (cb != nullptr) {
+        for (const Job &j : cb->blits) {
+            if (j.shader == DRAW) {
+                (cb->draws[j.dst].clear_only ? cl : dr)++;
+                p++;
+            } else if (j.shader == DISPATCH) {
+                di++;
+            } else {
+                co++;
+            }
+        }
+    }
+    if (passes) *passes = p;
+    if (draws) *draws = dr;
+    if (dispatches) *dispatches = di;
+    if (copies) *copies = co;
+    if (clears) *clears = cl;
+}
+void hakios_metal_buffer_counts(unsigned *made, unsigned *reused, unsigned long long *bytes)
+{
+    if (made) *made = 0;
+    if (reused) *reused = 0;
+    if (bytes) *bytes = 0;
 }
 
 }  // extern "C"
