@@ -175,6 +175,13 @@ static int screen_quiet;
  * What it was before the run, to go back to.
  */
 static int screen_quiet_before_run;
+/*
+ * On a Pixel (no logdump: the log goes to klog, see find_log_partition) the log is written at every line until the first
+ * hand-over to the kernel: a phone that loses its power under the loader (the Pixel 8a, 2026-11-07: the screen dark
+ * within a frame of U-Boot's last line, pstore empty) still leaves what the loader got to.
+ */
+static int log_sync_lines;
+static void log_sync(void);
 
 static void
 put_char(char c)
@@ -183,6 +190,9 @@ put_char(char c)
 
 	if (log_len < sizeof(log_buf) - 1) {
 		log_buf[log_len++] = c;
+	}
+	if (c == '\n' && log_sync_lines) {
+		log_sync();
 	}
 	if (ST->con_out != NULL && !screen_quiet) {
 		if (c == '\n') {
@@ -261,12 +271,17 @@ clean_dcache(uint64_t start, uint64_t end)
 /* ------------------------------------------------------------------------ */
 /* Log persistence: raw write to a GPT partition (phone only)               */
 
+/*
+ * The partition the log goes to: Qualcomm's logdump, or on a Pixel (which has none) klog, the 16 MB partition Google's
+ * bootloader keeps its own crash logs in (sda2 on the Pixel 8a; Android reads it as /dev/block/by-name/klog).
+ */
+static int log_part_is_klog;
+
 static efi_block_io *
-find_log_partition(void)
+find_log_partition_named(const char16 *want, unsigned want_len)
 {
 	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
 	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
-	static const char16 want[] = LOG_PARTITION;
 	efi_handle *handles;
 	uint64_t count;
 
@@ -281,7 +296,7 @@ find_log_partition(void)
 		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2) {
 			continue;
 		}
-		for (unsigned k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+		for (unsigned k = 0; k < want_len; k++) {
 			if (info->name[k] != want[k]) {
 				match = 0;
 				break;
@@ -295,6 +310,18 @@ find_log_partition(void)
 	}
 	BS->free_pool(handles);
 	return NULL;
+}
+
+static efi_block_io *
+find_log_partition(void)
+{
+	static const char16 logdump[] = LOG_PARTITION, klog[] = u"klog";
+	efi_block_io *bio = find_log_partition_named(logdump, sizeof(logdump) / sizeof(logdump[0]));
+
+	if (bio == NULL && (bio = find_log_partition_named(klog, sizeof(klog) / sizeof(klog[0]))) != NULL) {
+		log_part_is_klog = 1;
+	}
+	return bio;
 }
 
 /*
@@ -397,15 +424,66 @@ write_logs(const char *klog, uint64_t klog_len)
 			same = !EFI_ERROR(rs) && memcmp(log_verify, out_buf, len) == 0;
 		}
 	}
-	print("log: %d bytes written to logdump (%x), read back %s (%x)\n", len, ws,
+	print("log: %d bytes written to %s (%x), read back %s (%x)\n", len, log_part_is_klog ? "klog" : "logdump", ws,
 	    EFI_ERROR(ws) ? "not tried" : same ? "the same" : "DIFFERENT", rs);
+	/*
+	 * A Pixel's bootloader writes klog over at its next start after a reset (only a power cycle leaves it): the end of
+	 * the kernel's log on the console as well, which under HakiOS's U-Boot is pstore (pmsg-ramoops-0 in Android).
+	 */
+	static const char *echoed;      /* (once per returned log: flush_log writes it again before a reset) */
+
+	if (log_part_is_klog && klog != NULL && klog_len != 0 && klog != echoed) {
+		uint64_t from = klog_len > 16384 ? klog_len - 16384 : 0;
+
+		print("\n== KERNEL LOG (its last %d bytes) ==\n", klog_len - from);
+		for (uint64_t i = from; i < klog_len; i++) {
+			put_char(klog[i]);
+		}
+		print("\n== END OF LOG ==\n");
+		echoed = klog;
+	}
 	compose_logs(klog, klog_len);
 }
 
+/* the log so far, with the kernel log of the run that returned last (a reset after a run kept only the loader's) */
 static void
 flush_log(void)
 {
-	write_logs(NULL, 0);
+	write_logs(returned_klog, returned_klog_len);
+}
+
+/*
+ * The log so far into klog, quietly (log_sync_lines: at every line on a Pixel until the first hand-over). Only through
+ * UEFI's own transfer list, as write_logs; nothing printed here (a line would call this again).
+ */
+static void
+log_sync(void)
+{
+	static int busy;
+	static efi_block_io *bio;
+	static int looked;
+	uint64_t bs, len;
+
+	if (busy) {
+		return;
+	}
+	busy = 1;
+	if (!looked) {
+		looked = 1;
+		bio = find_log_partition();
+		if (bio == NULL || !log_part_is_klog) {
+			log_sync_lines = 0;     /* logdump (Qualcomm: written as before) or none (QEMU) */
+		}
+	}
+	if (bio != NULL && log_part_is_klog && hc_list_is_uefis()) {
+		bs = bio->media->block_size;
+		compose_logs(returned_klog, returned_klog_len);
+		len = (staged_len + 1 + bs - 1) / bs * bs;
+		if (!EFI_ERROR(bio->write_blocks(bio, bio->media->media_id, 0, len, out_buf))) {
+			bio->flush_blocks(bio);
+		}
+	}
+	busy = 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -3896,6 +3974,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	flush_log();
 	screen_quiet_before_run = screen_quiet;
 	screen_quiet = 1;               /* the screen is the kernel's now; the log still takes every line */
+	log_sync_lines = 0;             /* (the kernel shares the storage from here: the log goes as before) */
 	/* From here on the kernel feeds the watchdog (boot-arg hv_wdt_pet, see loader_return.c in XNU). */
 	wdt_set_ms(60000);
 
@@ -4896,6 +4975,7 @@ efi_main(efi_handle image, efi_system_table *st)
 	ST = st;
 	BS = st->bs;
 	IMAGE = image;
+	log_sync_lines = 1;             /* a Pixel's klog at every line until the hand-over (log_sync) */
 
 	BS->set_watchdog_timer(0, 0, 0, NULL);
 	/* no payload in memory (nobody put one there): the volume this loader came from may have one, as a UEFI boot loader's does */
