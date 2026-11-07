@@ -19,7 +19,9 @@ cd "$B"
 [ -d mesa-$VERSION ] || tar xJf mesa-$VERSION.tar.xz
 # our AIR front end (tools/mesa/air) and the one line of meson that reaches it, as tools/mk-mesa.sh does for 25.0.7
 rm -rf mesa-$VERSION/src/compiler/air
-cp -r "$ROOT/tools/mesa/air" mesa-$VERSION/src/compiler/air
+# tools/mesa/air-mesa26: the front end the Mali build links (Mesa 26 names); tools/mesa/air, merged from upstream, still has
+# Mesa 25 names and does not build here. AIR_SRC= for another.
+cp -r "${AIR_SRC:-$ROOT/tools/mesa/air-mesa26}" mesa-$VERSION/src/compiler/air
 grep -q "subdir('air')" mesa-$VERSION/src/compiler/meson.build || patch -s -d mesa-$VERSION -p1 < "$ROOT/tools/mesa/air-frontend.patch"
 [ -f build-host/build.ninja ] || meson setup build-host mesa-$VERSION --buildtype=debugoptimized -Dplatforms= \
 	-Dgallium-drivers=softpipe -Dvulkan-drivers= -Dtools=panfrost -Dglx=disabled -Degl=disabled -Dgbm=disabled \
