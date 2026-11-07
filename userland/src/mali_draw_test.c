@@ -93,7 +93,6 @@ picture(const uint32_t *px)
 int
 main(void)
 {
-	setenv("HAKIOS_MALI_TRACE", "1", 1);         /* (the back end says what the tiler did with each draw) */
 	hakios_metal_device *d = hakios_metal_open();
 	uint32_t px[64 * 64];
 	long us;
@@ -197,6 +196,20 @@ main(void)
 		hakios_metal_cb_free(cb);
 		hakios_metal_texture_free(t1);
 		hakios_metal_texture_free(t2);
+	}
+	/* sustained load, for the GPU's clock governor: 300 draws back to back, the first and last 20 timed */
+	{
+		long first = 0, last = 0;
+		for (int i = 0; i < 300; i++) {
+			draw(d, q, col, px, &us);
+			if (i < 20) {
+				first += us;
+			} else if (i >= 280) {
+				last += us;
+			}
+		}
+		printf("mali_draw_test: 300 draws in a row: the first 20 %ld us each, the last 20 %ld us each\n", first / 20,
+		    last / 20);
 	}
 	printf("mali_draw_test: the first Metal draws %s\n", right ? "WORK" : "FAILED");
 	hakios_metal_program_free(flat);
