@@ -1209,10 +1209,13 @@ HM_REFUSES_OUT_LOUD
 	int _specBinding;
 	unsigned _specLength;
 	NSMutableDictionary *_specialised;
+	char _standIn[256];                 /* not empty: a stand-in, no program -- why it could not be built (hm_stand_in) */
 }
 - (instancetype)initWithHakiosDevice:(HakiosMetalDevice *)device program:(hakios_metal_program *)program
 			  descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 - (hakios_metal_program *)hakiosProgram;
+- (void)hakiosSetStandIn:(const char *)why;
+- (const char *)hakiosStandIn;          /* NULL for a real pipeline */
 - (void)hakiosKeepFragment:(NSData *)air constants:(const hakios_metal_constant *)constants count:(unsigned)count;
 - (hakios_metal_program *)hakiosProgramFor:(hakios_metal_buffer *const *)buffers offsets:(const uint64_t *)offsets count:(unsigned)count;
 @end
@@ -3215,9 +3218,24 @@ hm_describe_function(id f)
 			}
 			hm_dump_refused("vs", vs);
 			hm_dump_refused("fs", fs);
-			return [self hakiosRefuse:error what:"a render pipeline"
-					      why:[NSString stringWithFormat:@"%@ + %@ for pixel format %u (fragment constants not 0:%@): %s", [vs name], [fs name],
-							       format, fc, hakios_metal_error()]];
+			NSString *refusal = [NSString stringWithFormat:@"%@ + %@ for pixel format %u (fragment constants not 0:%@): %s", [vs name],
+							       [fs name], format, fc, hakios_metal_error()];
+			/*
+			 * A STAND-IN, unless metal_strict: CoreAnimation ends its window server (OS_REASON_COREANIMATION, "Metal failed
+			 * to build render pipeline") on the first pipeline it does not get, and launchd starts it again for the same
+			 * end -- the Pixel 8a's backboardd did so every ten seconds. A state with no program instead, whose draws are
+			 * refused one by one (and skipped, as every refused draw is outside metal_strict): what can be drawn is, and
+			 * one boot names every pipeline that cannot.
+			 */
+			if (!hm_strict()) {
+				HakiosMetalRenderPipelineState *standIn = [[HakiosMetalRenderPipelineState alloc] initWithHakiosDevice:self program:NULL
+															    descriptor:descriptor];
+
+				hm_print("refused: a render pipeline: %s -- a stand-in is given, its draws are skipped\n", [refusal UTF8String]);
+				[standIn hakiosSetStandIn:[refusal UTF8String]];
+				return standIn;
+			}
+			return [self hakiosRefuse:error what:"a render pipeline" why:refusal];
 		}
 	}
 	hakios_metal_program_set_samples(program, (unsigned)[descriptor rasterSampleCount]);   /* 1, 2 or 4: judged above */
@@ -7387,6 +7405,8 @@ HM_REFUSES_OUT_LOUD
 }
 
 - (hakios_metal_program *)hakiosProgram { return _program; }
+- (void)hakiosSetStandIn:(const char *)why { snprintf(_standIn, sizeof(_standIn), "%s", why != NULL && *why ? why : "refused"); }
+- (const char *)hakiosStandIn { return _standIn[0] != '\0' ? _standIn : NULL; }
 
 /* boot-arg metal_nospec: every draw with the pipeline's own program, no uber shader specialised */
 static BOOL
@@ -8289,6 +8309,11 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 	if (_pipeline == nil) {
 		hm_print("refused: a draw with no render pipeline state; the command buffer is failed\n");
 		hakios_metal_cb_refuse(cb, "a draw with no render pipeline state");
+		return;
+	}
+	if ([_pipeline hakiosStandIn] != NULL) {
+		/* a pipeline that could not be built (said once, where it was asked for): skipped, quietly */
+		hakios_metal_cb_refuse(cb, [_pipeline hakiosStandIn]);
 		return;
 	}
 	if (_refused[0] != '\0') {
