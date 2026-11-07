@@ -135,6 +135,10 @@ OSDefineMetaClassAndStructors(MiniIOSurface, OSObject);
  * this ran beside it), or a moment later by a thread of this file's if no frames are going
  * out, or by whoever asks for the memory if that comes first.
  */
+/* the display's scan-out slots (MiniIOMobileFramebuffer.cpp, fb_zc=1): a slot for a surface of the display's size, or 0 */
+extern "C" int hakios_scanout_take(uint32_t width, uint32_t height, uint32_t row_bytes, uint64_t * phys, uint64_t * bytes);
+extern "C" void hakios_scanout_give(int slot);
+
 #define SURFACE_KEEP_FROM       (4u << 20)      /* bytes: smaller ones are not worth it */
 #define SURFACE_KEPT            4
 #define SURFACE_CLEAR_MS        40              /* kept memory is cleared this long after, if the display's driver has not done it */
@@ -295,6 +299,10 @@ MiniIOSurface::free(void)
 	if (memory != NULL) {
 		surfaceMemoryBack(memory);
 		memory = NULL;
+	}
+	if (scanoutSlot > 0) {
+		hakios_scanout_give(scanoutSlot);
+		scanoutSlot = 0;
 	}
 	OSObject::free();
 	OSAddAtomic64((SInt64) (mach_absolute_time() - began), (SInt64 *) &gSurfaceFreeing);
@@ -632,7 +640,22 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
 		}
 	}
 
-	s->memory = surfaceMemory((vm_size_t) PAGE_SIZE + (wrapped ? 0 : alloc));
+	/*
+	 * A surface the display can scan out where it is (MiniIOMobileFramebuffer's zero copy, fb_zc=1): one of the display's
+	 * size, four bytes a pixel, one plane, gets its pixels in a scan-out slot -- RAM below 4 GB the display's DMA reaches --
+	 * as a surface around memory does (the page of shared state ours, the pixels in `client`), mapped write-combined.
+	 */
+	int scanoutSlot = 0;
+	uint64_t scanoutPhys = 0, scanoutBytes = 0;
+	if (wrapped == NULL && planeCount == 0 && offset == 0 && bpe == 4) {
+		scanoutSlot = hakios_scanout_take(width, height, bpr, &scanoutPhys, &scanoutBytes);
+		if (scanoutSlot > 0 && alloc > scanoutBytes) {
+			hakios_scanout_give(scanoutSlot);
+			scanoutSlot = 0;
+		}
+	}
+	s->scanoutSlot = 0;
+	s->memory = surfaceMemory((vm_size_t) PAGE_SIZE + (wrapped || scanoutSlot > 0 ? 0 : alloc));
 	if (s->memory == NULL) {
 		IOLog("MiniIOSurface: no memory for %u bytes (%u surfaces, %llu MB in use)\n", alloc, gSurfaceCount,
 		    gSurfaceBytes >> 20);
@@ -643,6 +666,20 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
 	s->kbase = (uint8_t *) s->memory->getBytesNoCopy();
 	s->values = OSDictionary::withCapacity(4);
 	s->kpixels = s->kbase + PAGE_SIZE;
+	if (scanoutSlot > 0) {
+		s->scanoutSlot = scanoutSlot;           /* (given back in free(), whatever happens below) */
+		s->clientTask = kernel_task;            /* (no client's: every client maps the pixels, pixelMap) */
+		s->client = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress) scanoutPhys, alloc, kIODirectionInOut);
+		if (s->client == NULL || s->client->prepare() != kIOReturnSuccess ||
+		    (s->clientMap = s->client->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapWriteCombineCache)) == NULL) {
+			IOLog("MiniIOSurface: scan-out slot %d (%#llx) could not be mapped\n", scanoutSlot, scanoutPhys);
+			s->release();
+			*error = kIOReturnNoMemory;
+			return NULL;
+		}
+		s->kpixels = (uint8_t *) s->clientMap->getVirtualAddress();
+		bzero(s->kpixels, alloc);
+	}
 	if (wrapped != NULL) {
 		s->clientTask = current_task();
 		s->clientAddress = wrapped->unsigned64BitValue();
@@ -1039,7 +1076,8 @@ IOSurfaceRootUserClient::addRef(MiniIOSurface * surface)
 	ref->surface = surface;
 	ref->map = map;
 	if (surface->client != NULL && surface->clientTask != fTask) {
-		ref->pixelMap = surface->client->createMappingInTask(fTask, 0, kIOMapAnywhere);
+		ref->pixelMap = surface->client->createMappingInTask(fTask, 0,
+		    kIOMapAnywhere | (surface->scanoutSlot > 0 ? kIOMapWriteCombineCache : 0));
 	}
 	surfaceHold(surface);
 	return ref;
