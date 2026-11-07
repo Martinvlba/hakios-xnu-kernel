@@ -65,6 +65,12 @@ void hakios_battery_report(__unused const struct hakios_battery_state *state) {}
 #endif
 
 /* a device's real-time clock, asked by GenericARMPE for the time of day: none, "not known" */
+/* the Pixel 8a's charger, asked by the thermal controllers to hold the charge current down: no charger driver, nothing */
+#if !defined(HAKIOS_AKITA_BATTERY)
+void akita_charger_limit_ua(int32_t ua);
+void akita_charger_limit_ua(__unused int32_t ua) {}
+#endif
+
 /* the Pixel 8a's GPU, asked by its clocks' governor how busy it has been: never (its clocks stay down) */
 #if !defined(HAKIOS_AKITA_MALI)
 uint64_t akita_mali_busy_abs(void);
