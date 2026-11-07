@@ -747,6 +747,53 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
       return true;
    }
 
+   /* A COLOUR ATTACHMENT READ AS AN INPUT -- `[[color(n)]]` on a fragment argument, programmable blending: what the
+    * primitives already drawn left at this pixel (from upstream's tools/mesa/air). NIR's form is a read of the output,
+    * load_output with io_semantics.fb_fetch_output (what nir_lower_io makes of a GLSL inout colour); the Mali compiler
+    * lowers it to LD_TILE (bifrost_nir_lower_load_output). Read as four 32-bit floats and narrowed after. The metadata
+    * has ONE integer after the key (the target), where an output has two:
+    *   input   !{i32 1, !"air.render_target", i32 2, !"air.arg_type_name", !"float", ...}
+    * Only float targets: an int or uint [[color(n)]] would come back converted from the attachment's format.
+    */
+   int rt_in = md_key(node, "air.render_target");
+   if (rt_in >= 0) {
+      if (c->nir->info.stage != MESA_SHADER_FRAGMENT)
+         return air_error(c, "interface: air.render_target as an input of a %s shader",
+                          gl_shader_stage_name(c->nir->info.stage));
+      if (md_key(node, "air.arg_unused") >= 0) {
+         c->params[param] = air_val_ssa(c, nir_undef(&c->b, air_nir_components(t), air_nir_bit_size(c, t)));
+         return true;
+      }
+      uint64_t n = 0;
+      if (!md_int(node, rt_in + 1, &n))
+         return air_error(c, "interface: an air.render_target input without a target");
+      if (n >= MAX_DRAW_BUFFERS)
+         return air_error(c, "interface: air.render_target input %u", (unsigned)n);
+      unsigned bits = air_nir_bit_size(c, t);
+      if (!air_type_is_float(air_type_scalar(t)) || (bits != 16 && bits != 32)) {
+         const char *tn = md_key_str(node, "air.arg_type_name");
+         return air_error(c, "interface: an air.render_target input of type %s", tn ? tn : "?");
+      }
+      nir_io_semantics sem = {
+         .location = FRAG_RESULT_DATA0 + n,
+         .num_slots = 1,
+         .fb_fetch_output = true,
+         .fb_fetch_output_coherent = true,      /* Metal's guarantee: what earlier primitives left */
+      };
+      nir_def *fetched = nir_load_output(&c->b, 4, 32, nir_imm_int(&c->b, 0),
+                                         .dest_type = nir_type_float32, .io_semantics = sem);
+      unsigned want = air_nir_components(t);
+      if (want < 4)
+         fetched = nir_trim_vector(&c->b, fetched, want);
+      if (bits == 16)
+         fetched = nir_f2f16(&c->b, fetched);
+      c->nir->info.outputs_read |= BITFIELD64_BIT(sem.location);
+      c->nir->info.fs.uses_fbfetch_output = true;
+      c->nir->info.fs.fbfetch_coherent = true;
+      c->params[param] = air_val_ssa(c, fetched);
+      return true;
+   }
+
    /* the one thing left that is not an error: an argument nothing reads */
    if (md_key(node, "air.arg_unused") >= 0) {
       c->params[param] = air_val_ssa(c, nir_undef(&c->b, air_nir_components(t),
