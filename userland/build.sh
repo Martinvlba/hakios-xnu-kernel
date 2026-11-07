@@ -316,6 +316,13 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 				M2V_OBJS="../xnu-deps/build/m2v/out/frontend.o ../xnu-deps/build/m2v/out/libadreno_metal_bridge.a -framework CoreFoundation -lc++ -Wl,-dead_strip"
 				echo "build.sh: with UniXNU's Metal on Vulkan (metal_m2v=1)"
 			fi
+			if [ -z "$M2V_OBJS" ]; then
+				# without the bridge its weak symbols may stay undefined (a weak variable, the hook, is not let go otherwise)
+				for sym in native_bridge_metal_open native_bridge_metal_first_problem native_bridge_metal_status \
+				    native_bridge_metal_formats native_bridge_metal_variant_hook; do
+					M2V_OBJS="$M2V_OBJS -Wl,-U,_$sym"
+				done
+			fi
 			$DYN -bundle -framework Foundation -framework IOKit -framework IOSurface -framework Metal -lobjc \
 				-I$HM/include -o obj/HakiosMetal src/HakiosMetalCA.m $METAL_GPU $M2V_OBJS
 		else
