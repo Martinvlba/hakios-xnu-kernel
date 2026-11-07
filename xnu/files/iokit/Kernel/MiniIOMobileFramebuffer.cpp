@@ -280,6 +280,11 @@ struct hakios_display_ops {
 	 * mach_absolute_time of its last refresh -- the vsync this driver tells is put on that beat */
 	uint32_t (*refresh_hz)(void);
 	uint64_t (*vblank_time)(void);
+	/* zero copy (fb_zc=1): the driver's scan-out slots -- RAM its display DMA reaches -- by number (0 past the last;
+	 * slot 0 is the framebuffer's own buffer), any place in one scanned out from the next refresh on, and what is now */
+	uint64_t (*slot)(unsigned i, uint64_t *size);
+	void (*scanout)(uint64_t phys, uint32_t row_bytes);
+	uint64_t (*scanned)(void);
 };
 const struct hakios_display_ops * hakios_display_ops;
 /*
@@ -289,6 +294,98 @@ const struct hakios_display_ops * hakios_display_ops;
  */
 uint32_t hakios_touch_view[4] = { 0, 0, 65536, 65536 };
 }
+
+/*
+ * ZERO COPY (boot-arg fb_zc=1, with a display that is the panel's width and letterboxed: fbwidth=1080 fbheight=2340 on
+ * the Pixel 8a): the window server's frames scanned out where it drew them, not copied. A surface of the display's size
+ * is given its pixels in one of the display driver's scan-out slots (MiniIOSurface.cpp asks hakios_scanout_take), the
+ * margins of the slot's rows black; a swap whose only layer is such a surface, whole, puts the slot on the panel
+ * (hakios_display_ops->scanout) and copies nothing. The surface shown stays held -- in use to CoreAnimation, which draws
+ * the next frame elsewhere -- until another takes its place; a slot let go of while it is shown is freed then.
+ * Anything else is drawn into slot 0, the framebuffer's own buffer, and that is put on the panel.
+ */
+static TUNABLE(uint32_t, gZeroCopy, "fb_zc", 0);
+#define ZC_SLOTS        4
+static bool             gZC;
+static IOLock *         gZCLock;
+static uint64_t         gZCPhys[ZC_SLOTS], gZCSize;
+/* where the display reads a slot from: the picture starts on a PAGE (a GPU's and a process's mappings are of pages, and
+ * a picture 30 rows into a slot -- 130560 bytes -- was drawn where its page began, 190 pixels off: seen in usbmux-shot),
+ * and the display's base is the margin's rows before it */
+static uint64_t         gZCBase[ZC_SLOTS];
+static uint8_t          gZCState[ZC_SLOTS];     /* 0 free, 1 a surface's, 2 let go of but still shown */
+static uint32_t         gZCWidth, gZCHeight, gZCPanelHeight, gZCTop;
+static int              gZCShown;               /* the slot on the panel (0: the framebuffer's buffer) */
+static uint32_t         gZCFrames, gZCCopied;
+/* each slot's margins mapped once (ml_io_map's area is small and never given back): from its start for the top rows,
+ * and from where the picture can end at the narrowest rows for the bottom ones, to the slot's end */
+static volatile uint32_t * gZCTopMap[ZC_SLOTS], * gZCBottomMap[ZC_SLOTS];
+static uint64_t         gZCBottomFrom;          /* bytes into a slot where gZCBottomMap starts */
+static uint64_t         gZCTopBytes;            /* bytes gZCTopMap covers */
+
+extern "C" int
+hakios_scanout_take(uint32_t width, uint32_t height, uint32_t row_bytes, uint64_t * phys, uint64_t * bytes)
+{
+	if (!gZC || width != gZCWidth || height != gZCHeight || row_bytes < width * 4 || (row_bytes & 3) != 0 ||
+	    round_page((uint64_t) gZCTop * row_bytes) - (uint64_t) gZCTop * row_bytes + (uint64_t) row_bytes * gZCPanelHeight > gZCSize ||
+	    round_page((uint64_t) gZCTop * row_bytes) > gZCTopBytes) {
+		return 0;
+	}
+	IOLockLock(gZCLock);
+	int slot = 0;
+	for (int i = 1; i < ZC_SLOTS && slot == 0; i++) {
+		if (gZCPhys[i] != 0 && gZCState[i] == 0) {
+			gZCState[i] = 1;
+			slot = i;
+		}
+	}
+	IOLockUnlock(gZCLock);
+	if (slot == 0) {
+		return 0;
+	}
+	/* the picture from a page on, the display's base the margin before it; the margins black, by words (the mappings
+	 * are the device's), offsets from the slot's start */
+	uint64_t marginBytes = (uint64_t) gZCTop * row_bytes, picture = round_page(marginBytes), base = picture - marginBytes;
+	uint64_t bottomAt = picture + (uint64_t) height * row_bytes, end = base + (uint64_t) row_bytes * gZCPanelHeight;
+	for (uint64_t at = base; at + 4 <= picture; at += 4) {
+		gZCTopMap[slot][at / 4] = 0;
+	}
+	for (uint64_t at = bottomAt; at + 4 <= end; at += 4) {
+		gZCBottomMap[slot][(at - gZCBottomFrom) / 4] = 0;
+	}
+	gZCBase[slot] = gZCPhys[slot] + base;
+	*phys = gZCPhys[slot] + picture;
+	*bytes = gZCSize - picture;
+	IOLog("MiniIOMobileFramebuffer: zero copy: scan-out slot %d (%#llx) for a %u x %u surface, rows of %u bytes\n", slot,
+	    gZCPhys[slot], width, height, row_bytes);
+	return slot;
+}
+
+extern "C" void
+hakios_scanout_give(int slot)
+{
+	if (slot <= 0 || slot >= ZC_SLOTS || gZCLock == NULL) {
+		return;
+	}
+	IOLockLock(gZCLock);
+	gZCState[slot] = slot == gZCShown ? 2 : 0;
+	IOLockUnlock(gZCLock);
+}
+
+/* SLOT now on the panel: one let go of while it was shown is free */
+static void
+zcShown(int slot)
+{
+	IOLockLock(gZCLock);
+	for (int i = 1; i < ZC_SLOTS; i++) {
+		if (i != slot && gZCState[i] == 2) {
+			gZCState[i] = 0;
+		}
+	}
+	gZCShown = slot;
+	IOLockUnlock(gZCLock);
+}
+
 
 /*
  * Boot-arg fb_intf=PHYSICAL: the registers of the display interface the panel is on, for a port. Without it the SoC the kernel
@@ -388,6 +485,7 @@ public:
 	IOLock *        fLock;
 	uint8_t *       fBase;                  /* the boot framebuffer: the panel (with flips: the buffer drawn last) */
 	bool            fLetterbox;             /* the display smaller than the panel: centred, not scaled */
+	MiniIOSurface * fZCHeld;                /* zero copy: the surface on the panel, held while it is */
 	uint8_t *       fBuffers[3];            /* with flips (hakios_display_ops): the buffers, and the one last flipped to */
 	unsigned        fBufferCount, fQueued;
 	bool            fFlipping;
@@ -728,6 +826,33 @@ IOMobileFramebuffer::start(IOService * provider)
 		hakios_touch_view[3] = (uint32_t) ((uint64_t) fHeight * 65536 / fPanelHeight);
 		IOLog("MiniIOMobileFramebuffer: a display of %u x %u, centred on the panel's %u x %u, not scaled\n", fWidth, fHeight,
 		    fPanelWidth, fPanelHeight);
+	}
+	if (gZeroCopy && fLetterbox && fWidth == fPanelWidth && fFlipping && hakios_display_ops->slot != NULL &&
+	    hakios_display_ops->scanout != NULL) {
+		gZCLock = IOLockAlloc();
+		for (unsigned i = 0; i < ZC_SLOTS; i++) {
+			gZCPhys[i] = hakios_display_ops->slot(i, &gZCSize);
+		}
+		gZCWidth = fWidth;
+		gZCHeight = fHeight;
+		gZCPanelHeight = fPanelHeight;
+		gZCTop = (fPanelHeight - fHeight) / 2;
+		gZCBottomFrom = (uint64_t) (gZCTop + fHeight) * fWidth * 4;
+		for (unsigned i = 1; i < ZC_SLOTS && gZCPhys[i] != 0; i++) {
+			uint64_t topBytes = round_page((uint64_t) gZCTop * (fWidth * 4 + 256));
+			gZCTopBytes = topBytes;
+			uint64_t bottomPhys = gZCPhys[i] + gZCBottomFrom, bottomEnd = gZCPhys[i] + gZCSize;
+			uint64_t page = bottomPhys & ~(uint64_t) PAGE_MASK;
+			gZCTopMap[i] = (volatile uint32_t *) ml_io_map((vm_offset_t) gZCPhys[i], (vm_size_t) topBytes);
+			gZCBottomMap[i] = (volatile uint32_t *) (ml_io_map((vm_offset_t) page, (vm_size_t) round_page(bottomEnd - page)) +
+			    (bottomPhys - page));
+		}
+		/* frames that are not scanned out where they are: drawn into slot 0, the boot framebuffer, alone */
+		fFlipping = false;
+		fBase = fBuffers[0];
+		gZC = gZCLock != NULL && gZCPhys[0] != 0;
+		IOLog("MiniIOMobileFramebuffer: zero copy %s: %u slots of %llu bytes from %#llx\n", gZC ? "on" : "OFF", ZC_SLOTS,
+		    gZCSize, gZCPhys[0]);
 	}
 	fColumn = IONewZero(uint32_t, fPanelWidth);
 	fColumnWeight = IONewZero(uint16_t, fPanelWidth);
@@ -1642,6 +1767,43 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
 	}
+	if (gZC) {
+		/* one layer, a scan-out slot's surface, all of it on all of the display: put on the panel where it is */
+		MiniIOSurface * s = surfaces[0];
+		int32_t src[4], dst[4];
+		bool alone = s != NULL && s->scanoutSlot > 0;
+
+		memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
+		memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
+		for (unsigned layer = 1; layer < SWAP_LAYERS && alone; layer++) {
+			alone = swapWord(swap, SWAP_SURFACE(layer)) == 0;
+		}
+		alone = alone && src[0] == 0 && src[1] == 0 && src[2] == (int32_t) fWidth && src[3] == (int32_t) fHeight &&
+		    dst[0] == 0 && dst[1] == 0 && dst[2] == (int32_t) fWidth && dst[3] == (int32_t) fHeight;
+		if (alone) {
+			if (!fGraphics) {
+				fGraphics = true;
+				PE_initialize_console(NULL, kPEGraphicsMode);
+			}
+			hakios_display_ops->scanout(gZCBase[s->scanoutSlot], s->info.bytesPerRow);
+			zcShown(s->scanoutSlot);
+			/* held while it is shown (in use to CoreAnimation); the one shown before let go of */
+			MiniIOSurface * held = MiniIOSurfaceCopy(swapWord(swap, SWAP_SURFACE(0)));
+			if (fZCHeld != NULL) {
+				MiniIOSurfaceDrop(fZCHeld);
+			}
+			fZCHeld = held;
+			gShownSurface = swapWord(swap, SWAP_SURFACE(0));
+			if (++gZCFrames % 600 == 1) {
+				IOLog("MiniIOMobileFramebuffer: zero copy: %u frames scanned out where they were drawn, %u copied\n",
+				    gZCFrames, gZCCopied);
+			}
+			drawn = mach_absolute_time();
+			fSwapsShown++;
+			goto counted;
+		}
+		gZCCopied++;
+	}
 	fBase = hidden();
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
@@ -1693,11 +1855,21 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	flipTo(fBase);
+	if (gZC && gZCShown != 0) {
+		/* (a copied frame: the framebuffer's own buffer back on the panel; the surface held for the last let go of) */
+		hakios_display_ops->scanout(gZCPhys[0], fRowBytes);
+		zcShown(0);
+		if (fZCHeld != NULL) {
+			MiniIOSurfaceDrop(fZCHeld);
+			fZCHeld = NULL;
+		}
+	}
 	drawn = mach_absolute_time();
 	if (recorded != NULL) {
 		record(recorded);
 	}
 	fSwapsShown++;
+counted:
 	if (gTouchLat) {
 		hakios_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));

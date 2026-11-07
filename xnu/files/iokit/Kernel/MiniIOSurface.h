@@ -117,6 +117,7 @@ public:
 	task_t                          clientTask;     /* whose memory it is (not held: only compared) */
 	mach_vm_address_t               clientAddress;  /* ... and where it is there */
 	uint8_t *                       kpixels;        /* where the pixel memory starts in the kernel, either way */
+	int                             scanoutSlot;    /* > 0: its pixels are a scan-out slot's (MiniIOMobileFramebuffer, fb_zc=1) */
 	uint32_t                        drawn;          /* the GPU's last submission that names the pixels (0: none; hakios.gpu.cpp) */
 	struct minisurf_result          info;           /* addresses not filled in */
 	struct minisurf_plane           planes[MINISURF_MAX_PLANES];

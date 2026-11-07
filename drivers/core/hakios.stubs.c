@@ -71,6 +71,13 @@ void akita_charger_limit_ua(int32_t ua);
 void akita_charger_limit_ua(__unused int32_t ua) {}
 #endif
 
+/* the Pixel 8a's display, asked by usbmux's port 6 for a picture of the panel: none */
+#if !defined(HAKIOS_AKITA_DISPLAY)
+int akita_display_snapshot(const uint8_t **pixels, uint64_t *phys, uint32_t *width, uint32_t *height, uint32_t *row_bytes);
+int akita_display_snapshot(__unused const uint8_t **pixels, __unused uint64_t *phys, __unused uint32_t *width,
+    __unused uint32_t *height, __unused uint32_t *row_bytes) { return -1; }
+#endif
+
 /* the Pixel 8a's GPU, asked by its clocks' governor how busy it has been: never (its clocks stay down) */
 #if !defined(HAKIOS_AKITA_MALI)
 uint64_t akita_mali_busy_abs(void);
