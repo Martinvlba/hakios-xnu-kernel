@@ -582,8 +582,18 @@ hierarchyMask(unsigned w, unsigned h, unsigned levels)
 // WAIT for the one before. Registers in v11's layout (upstream Mesa's genxml v11.xml: v10's plus TILER_FLAGS2 at r61);
 // what each value is, hakios-kernel's the port's log ("render pipelines") and userland/src/mali_test.c.
 void
-emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area_va, uint64_t *s, unsigned &n)
+emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area_va, uint64_t *s, unsigned &n,
+    bool first = true, bool last = true, uint8_t *pass_area = nullptr, uint64_t pass_va = 0)
 {
+    // ONE MALI PASS FOR A RUN OF DRAWS (the stream loop: the draws of one Metal pass, one after the other into the same
+    // attachments): the first opens it -- the tiler context, the framebuffer and its targets, the preload -- each draw
+    // then only its own registers and RUN_IDVS into that tiler context, and the last closes it: tiling finished, one
+    // fragment job, the targets written back as the last draw stores them. A pass a draw read and wrote the whole
+    // target (the preload) for every draw before.
+    if (first) {
+        pass_area = area;
+        pass_va = area_va;
+    }
     // the tiler context, the framebuffer descriptor, a render target descriptor for each target (64 bytes each, after
     // the framebuffer's), their blend descriptors (16 bytes each, in 64), then the stages' push constants
     uint64_t bl_at = 0x100 + 0x40 * dj.rts;
@@ -658,7 +668,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         srt = t_va | MALI_TABLES;
     }
     uint64_t vs_fau_va = area_va + vs_at, fs_fau_va = area_va + fs_at;
-    if (dj.load) {
+    if (dj.load && first) {
         // THE LOAD ACTION: the target's own pixels drawn first, one triangle over it whose fragment is the target's
         // texel (texture 0, txf), into the same tiler context as the draw -- the tile buffer preloaded through the
         // ordinary draw path. Caches first, as at a command buffer's start: what an earlier pass wrote back reaches
@@ -757,7 +767,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(37, 0);
     s[n++] = move32(38, dj.dcd2);
     s[n++] = move32(39, (uint32_t)dj.index_size);                               // the index buffer's bytes
-    s[n++] = move48(40, area_va);                                               // the tiler context
+    s[n++] = move48(40, pass_va);                                               // the pass's tiler context
     s[n++] = move32(42, dj.scissor_min);
     s[n++] = move32(43, dj.scissor_max);
     s[n++] = move32(44, 0);                                                     // depth clamps 0 .. 1
@@ -773,17 +783,28 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(60, 0x3f800000);                                            // primitive size 1.0
     s[n++] = move32(61, 0);                                                     // TILER_FLAGS2: VRS 1x1
     if (!dj.clear_only) {                                                       // (a clear: the fragment job alone)
-        if (!dj.load) {                                                         // (started already by the preload)
+        if (first && !dj.load) {                                                // (started already by the preload)
             s[n++] = 49ULL << 56 | 0ULL << 32;                                  // HEAP_OPERATION: vertex/tiler started
         }
         s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                          // RUN_IDVS: malloc, the fragment's SRT
+        if (!last) {
+            return;                                                             // (the pass goes on with the next draw)
+        }
         s[n++] = WAIT_ALL;
         s[n++] = 9ULL << 56;                                                    // FINISH_TILING
         s[n++] = WAIT_ALL;
         s[n++] = 49ULL << 56 | 1ULL << 32;                                      // HEAP_OPERATION: vertex/tiler completed
         s[n++] = WAIT_ALL;
     }
-    s[n++] = move48(40, (area_va + 0x80) | 1 | (dj.rts - 1) << 2);             // the framebuffer descriptor and its targets
+    if (!first) {
+        // the targets written back as the last draw stores them (the pass's descriptors are the first draw's)
+        auto *prt = (uint32_t *)(pass_area + 0x100);
+        prt[1] = (prt[1] & ~1u) | (dj.write ? 1u : 0u);
+        for (unsigned i = 1; i < dj.rts; i++) {
+            prt[16 * i + 1] = (prt[16 * i + 1] & ~1u) | (dj.more[i - 1].write ? 1u : 0u);
+        }
+    }
+    s[n++] = move48(40, (pass_va + 0x80) | 1 | (dj.rts - 1) << 2);             // the framebuffer descriptor and its targets
     s[n++] = move32(42, 0);
     s[n++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
     s[n++] = move48(44, 0);                                                     // no tile enable map (r44 held the
@@ -793,13 +814,29 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     // the pass finished, as panvk ends one: the tiler context's completed top and bottom (byte 40, four words) into
     // r70-r73, and FINISH_FRAGMENT gives that heap memory back and counts the pass done. Without it a queue drew one
     // pass and then binned nothing (the heap's in-flight passes never went down).
-    s[n++] = move48(74, area_va);
+    s[n++] = move48(74, pass_va);
     s[n++] = 20ULL << 56 | 70ULL << 48 | 74ULL << 40 | 0xfULL << 16 | 40;      // LOAD_MULTIPLE r70-73 <- [r74 + 40]
     s[n++] = WAIT_ALL;
     s[n++] = 11ULL << 56 | 70ULL << 40 | 72ULL << 32 | 1;                       // FINISH_FRAGMENT: chunks r70..r72, count it
     s[n++] = WAIT_ALL;
 }
 constexpr unsigned DRAW_WORDS = 62 + 45; // (instructions emitDraw writes, at most: the preload's 45 included)
+
+// whether draw B goes on in the Mali pass draw A is in: the same attachments, and B keeps what is in them (Load)
+bool
+samePass(const DrawJob &a, const DrawJob &b)
+{
+    if (a.clear_only || b.clear_only || !b.load || a.target_va != b.target_va || a.rts != b.rts || a.width != b.width ||
+        a.height != b.height || a.row_bytes != b.row_bytes) {
+        return false;
+    }
+    for (unsigned i = 1; i < a.rts; i++) {
+        if (a.more[i - 1].va != b.more[i - 1].va || !b.more[i - 1].load) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // the bytes a draw needs in its command buffer's stream BO, past the instructions
 uint64_t
@@ -1349,12 +1386,25 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                     s[n++] = 48ULL << 56;                                       // HEAP_SET
                 }
             }
+            uint8_t *pass_area = nullptr;           // the open Mali pass's first draw (emitDraw), or none
+            uint64_t pass_va = 0;
             for (size_t i = 0; i < cb->blits.size(); i++) {
                 const Job &b = cb->blits[i];
                 auto *pc = (uint8_t *)cb->stream.cpu + fau_at[i];
                 if (b.shader == DRAW) {
-                    emitDraw(d, cb->draws[b.dst], pc, cb->stream.va + fau_at[i], s, n);
+                    const DrawJob &dj = cb->draws[b.dst];
+                    bool first = pass_area == nullptr;
+                    bool last = i + 1 >= cb->blits.size() || cb->blits[i + 1].shader != DRAW ||
+                        !samePass(dj, cb->draws[cb->blits[i + 1].dst]);
+                    if (first) {
+                        pass_area = pc;
+                        pass_va = cb->stream.va + fau_at[i];
+                    }
+                    emitDraw(d, dj, pc, cb->stream.va + fau_at[i], s, n, first, last, pass_area, pass_va);
                     cb->draw_areas.push_back(fau_at[i]);
+                    if (last) {
+                        pass_area = nullptr;
+                    }
                     continue;
                 }
                 uint64_t fau_va = cb->stream.va + fau_at[i], spd;
@@ -2732,11 +2782,15 @@ hakios_metal_texture *
 hakios_metal_texture_new_levels(hakios_metal_device *d, unsigned type, unsigned pixel_format, unsigned width,
     unsigned height, unsigned levels, unsigned usage)
 {
-    if (levels <= 1) {
-        return hakios_metal_texture_new(d, type, pixel_format, width, height, usage);
+    // mipmapped: its first level alone for now -- a sample past it clamps to it (blurrier, not wrong); an upload to
+    // a later level is refused where it is asked for
+    if (levels > 1) {
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) {
+            fprintf(stderr, "hakios-metal: a texture of %u mip levels is given its first level only (Mali: not yet)\n", levels);
+        }
     }
-    fail("a texture of %u mip levels (one level only on the Mali yet)", levels);
-    return nullptr;
+    return hakios_metal_texture_new(d, type, pixel_format, width, height, usage);
 }
 
 hakios_metal_texture *
@@ -2765,9 +2819,26 @@ hakios_metal_texture *
 hakios_metal_texture_new_3d(hakios_metal_device *d, unsigned pixel_format, unsigned width, unsigned height,
     unsigned depth, unsigned usage)
 {
-    (void)d; (void)usage;
-    fail("a 3D texture of MTLPixelFormat %u, %u x %u x %u (not on the Mali yet)", pixel_format, width, height, depth);
-    return nullptr;
+    // a 2D texture's rows, DEPTH planes of them one after the other (describe(): a 3D texture, the plane's slice size)
+    if (depth == 0 || depth > 2048 || width > 2048 || height > 2048) {
+        fail("a 3D texture of %u x %u x %u (the Mali build makes them up to 2048 each way)", width, height, depth);
+        return nullptr;
+    }
+    hakios_metal_texture *t = hakios_metal_texture_new(d, 2, pixel_format, width, height, usage);
+    if (t == nullptr || depth == 1) {
+        if (t != nullptr) t->type = 7;
+        return t;
+    }
+    Bo bigger;
+    if (!d->newBo(bigger, (uint64_t)t->stride * height * depth, BIND_NOEXEC)) {
+        t->release();
+        return nullptr;
+    }
+    d->freeBo(t->bo);
+    t->bo = bigger;
+    t->type = 7;
+    t->depth = depth;
+    return t;
 }
 
 hakios_metal_texture *
