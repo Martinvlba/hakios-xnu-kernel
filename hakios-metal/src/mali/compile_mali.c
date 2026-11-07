@@ -323,73 +323,105 @@ types_init(void)
 	glsl_type_singleton_init_or_ref();
 }
 
-static int
-compile_stage(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, mesa_shader_stage want,
-    const void *vs_varyings, struct mali_kernel_binary *out, char *error, size_t error_size)
+/*
+ * A vertex function's [[stage_in]] attributes fetched in the shader, as Metal's vertex descriptor says: each read of an
+ * input variable at VERT_ATTRIB_GENERIC0 + n becomes a global load at buffer(b)'s address + offset + stride * index --
+ * the index the vertex's id, or the instance's (divided by the step rate, plus the base instance), or 0 -- converted
+ * from the attribute's format, the missing components (0, 0, 0, 1). The buffer's address comes in the push constants as
+ * any [[buffer(n)]]'s; the buffers read are added to the stage's resources so that the draw fills them in.
+ */
+struct fetch_state {
+	const struct mali_vertex_fetch *fetch;
+	const char *why;
+	uint32_t buffers;       /* bit n: buffer n read */
+};
+
+static bool
+lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
 {
-	const nir_shader_compiler_options *options = pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), want, false);
+	struct fetch_state *st = data;
+
+	if (in->intrinsic != nir_intrinsic_load_deref) {
+		return false;
+	}
+	nir_variable *var = nir_deref_instr_get_variable(nir_src_as_deref(in->src[0]));
+	if (var == NULL || var->data.mode != nir_var_shader_in || var->data.location < VERT_ATTRIB_GENERIC0) {
+		return false;
+	}
+	unsigned slot = var->data.location - VERT_ATTRIB_GENERIC0;
+	if (slot >= MALI_VERTEX_SLOTS || st->fetch->attributes[slot].format == 0) {
+		st->why = "a [[stage_in]] attribute the vertex descriptor does not describe";
+		return false;
+	}
+	unsigned format = st->fetch->attributes[slot].format, buffer = st->fetch->attributes[slot].buffer;
+	if (buffer >= MALI_KERNEL_BUFFERS || buffer >= MALI_VERTEX_SLOTS) {
+		st->why = "a vertex attribute from a buffer past 15";
+		return false;
+	}
+	unsigned stride = st->fetch->layouts[buffer].stride, step = st->fetch->layouts[buffer].step_function;
+	unsigned rate = st->fetch->layouts[buffer].step_rate ? st->fetch->layouts[buffer].step_rate : 1;
+
+	b->cursor = nir_before_instr(&in->instr);
+	nir_def *index = step == 1 ? nir_load_vertex_id(b) :
+	    step == 2 ? nir_iadd(b, nir_udiv_imm(b, nir_load_instance_id(b), rate), nir_load_base_instance(b)) : nir_imm_int(b, 0);
+	nir_def *addr = buffer_address(b, nir_imm_int(b, buffer),
+	    nir_iadd_imm(b, nir_imul_imm(b, index, stride), st->fetch->attributes[slot].offset));
+	nir_def *v;
+	switch (format) {
+	case 28: case 29: case 30: case 31:     /* Float .. Float4 */
+		v = nir_load_global(b, format - 27, 32, addr, .align_mul = 4);
+		break;
+	case 53: case 25: case 26: case 27:     /* Half, Half2 .. Half4 */
+		v = nir_f2f32(b, nir_load_global(b, format == 53 ? 1 : format - 23, 16, addr, .align_mul = 2));
+		break;
+	case 9: case 42:                        /* UChar4Normalized, UChar4Normalized_BGRA */
+		v = nir_unpack_unorm_4x8(b, nir_load_global(b, 1, 32, addr, .align_mul = 4));
+		if (format == 42) {
+			v = nir_swizzle(b, v, (unsigned[]){ 2, 1, 0, 3 }, 4);
+		}
+		break;
+	default:
+		st->why = "a vertex attribute format other than float, half and normalized uchar4 (not on the Mali yet)";
+		return false;
+	}
+	unsigned want = in->def.num_components, bits = in->def.bit_size;
+	nir_def *c[4];
+	for (unsigned i = 0; i < want; i++) {
+		c[i] = i < v->num_components ? nir_channel(b, v, i) : nir_imm_float(b, i == 3 ? 1.0f : 0.0f);
+	}
+	v = nir_vec(b, c, want);
+	if (bits != 32) {
+		v = nir_f2fN(b, v, bits);
+	}
+	nir_def_rewrite_uses(&in->def, v);
+	nir_instr_remove(&in->instr);
+	st->buffers |= 1u << buffer;
+	return true;
+}
+
+/*
+ * From NIR on, for the AIR path and the driver's own shaders alike: Metal's buffers made addresses, panfrost's pre- and
+ * post-processing, I/O variables to intrinsics, the resource tables, the draw's system values, pan_shader_compile; OUT's
+ * stage, name and resources are the caller's. 0, or -1 with ERROR (OUT then partly filled: the caller frees it).
+ */
+static int
+compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, struct mali_kernel_binary *out, char *error,
+    size_t error_size)
+{
 	struct pan_compile_inputs inputs = { .gpu_id = GPU_ID, .fau = { .reserved = MALI_KERNEL_RESERVED } };
 	struct pan_varying_layout *varyings = NULL;
-	struct air_constant_value *values = NULL;
-	struct air_to_nir_options air_options = { 0 };
-	struct air_shader_info air_info;
 	struct pan_shader_info info;
 	struct util_dynarray binary;
 	const char *why = NULL;
-	void *mem = ralloc_context(NULL);
-	nir_shader *s;
 	int result = -1;
 
-	memset(out, 0, sizeof(*out));
-	pthread_once(&types_once, types_init);
-	if (count != 0) {
-		values = ralloc_array(mem, struct air_constant_value, count);
-		for (unsigned i = 0; i < count; i++) {
-			values[i].index = constants[i].index;
-			values[i].bits = constants[i].bits;
+	if (want == MESA_SHADER_FRAGMENT) {
+		nir_foreach_shader_out_variable(var, s) {
+			if (var->data.location >= FRAG_RESULT_DATA0 && var->data.location < FRAG_RESULT_DATA0 + 8) {
+				out->rt_written |= 1u << (var->data.location - FRAG_RESULT_DATA0);
+			}
 		}
-		air_options.constants = values;
-		air_options.num_constants = count;
 	}
-	s = air_to_nir(mem, bitcode, size, NULL, &air_options, options, &air_info, &why);
-	if (s == NULL) {
-		say(error, error_size, "the AIR front end: %s", why ? why : "refused");
-		goto done;
-	}
-	if (air_info.stage != want) {
-		say(error, error_size, "%s is not a %s function", air_info.entry_point,
-		    want == MESA_SHADER_COMPUTE ? "kernel" : want == MESA_SHADER_VERTEX ? "vertex" : "fragment");
-		goto done;
-	}
-	out->stage = want == MESA_SHADER_COMPUTE ? 0 : want == MESA_SHADER_VERTEX ? 1 : 2;
-	snprintf(out->name, sizeof(out->name), "%s", air_info.entry_point);
-	for (unsigned i = 0; i < air_info.num_resources; i++) {
-		const struct air_resource *r = &air_info.resources[i];
-
-		if (out->num_resources == MALI_KERNEL_MAX_RESOURCES) {
-			say(error, error_size, "%s: more than %u resources", out->name, MALI_KERNEL_MAX_RESOURCES);
-			goto done;
-		}
-		if ((r->kind == AIR_RESOURCE_TEXTURE || r->kind == AIR_RESOURCE_IMAGE || r->kind == AIR_RESOURCE_SAMPLER) &&
-		    r->index >= MALI_KERNEL_TEXTURES) {
-			say(error, error_size, "%s: a texture or sampler at index %u (the Mali build binds 0 to %u)", out->name,
-			    r->index, MALI_KERNEL_TEXTURES - 1);
-			goto done;
-		}
-		if ((r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER) &&
-		    r->index >= MALI_KERNEL_BUFFERS) {
-			say(error, error_size, "%s: [[buffer(%u)]] (the Mali build binds buffers 0 to %u)", out->name, r->index,
-			    MALI_KERNEL_BUFFERS - 1);
-			goto done;
-		}
-		out->resources[out->num_resources++] = (struct mali_kernel_resource){ r->kind, r->index, r->size, r->read, r->write };
-	}
-	out->threadgroup_bytes = air_info.threadgroup_bytes;
-	out->threadgroup_arg_base = air_info.has_threadgroup_arg ? air_info.threadgroup_arg_base : ~0u;
-	for (unsigned i = 0; i < 3; i++) {
-		out->workgroup[i] = s->info.workgroup_size_variable ? 0 : s->info.workgroup_size[i];
-	}
-
 	NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_buffers, nir_metadata_control_flow, NULL);
 	NIR_PASS(_, s, nir_shader_intrinsics_pass, widen_image_stores, nir_metadata_control_flow, NULL);
 	if (want == MESA_SHADER_COMPUTE) {
@@ -487,6 +519,96 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 	result = 0;
 done:
 	free(varyings);
+	return result;
+}
+
+static int
+compile_stage(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, mesa_shader_stage want,
+    const void *vs_varyings, const struct mali_vertex_fetch *fetch, struct mali_kernel_binary *out, char *error,
+    size_t error_size)
+{
+	const nir_shader_compiler_options *options = pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), want, false);
+	struct air_constant_value *values = NULL;
+	struct air_to_nir_options air_options = { 0 };
+	struct air_shader_info air_info;
+	const char *why = NULL;
+	void *mem = ralloc_context(NULL);
+	nir_shader *s;
+	int result = -1;
+
+	memset(out, 0, sizeof(*out));
+	pthread_once(&types_once, types_init);
+	if (count != 0) {
+		values = ralloc_array(mem, struct air_constant_value, count);
+		for (unsigned i = 0; i < count; i++) {
+			values[i].index = constants[i].index;
+			values[i].bits = constants[i].bits;
+		}
+		air_options.constants = values;
+		air_options.num_constants = count;
+	}
+	s = air_to_nir(mem, bitcode, size, NULL, &air_options, options, &air_info, &why);
+	if (s == NULL) {
+		say(error, error_size, "the AIR front end: %s", why ? why : "refused");
+		goto done;
+	}
+	if (air_info.stage != want) {
+		say(error, error_size, "%s is not a %s function", air_info.entry_point,
+		    want == MESA_SHADER_COMPUTE ? "kernel" : want == MESA_SHADER_VERTEX ? "vertex" : "fragment");
+		goto done;
+	}
+	out->stage = want == MESA_SHADER_COMPUTE ? 0 : want == MESA_SHADER_VERTEX ? 1 : 2;
+	snprintf(out->name, sizeof(out->name), "%s", air_info.entry_point);
+	for (unsigned i = 0; i < air_info.num_resources; i++) {
+		const struct air_resource *r = &air_info.resources[i];
+
+		if (out->num_resources == MALI_KERNEL_MAX_RESOURCES) {
+			say(error, error_size, "%s: more than %u resources", out->name, MALI_KERNEL_MAX_RESOURCES);
+			goto done;
+		}
+		if ((r->kind == AIR_RESOURCE_TEXTURE || r->kind == AIR_RESOURCE_IMAGE || r->kind == AIR_RESOURCE_SAMPLER) &&
+		    r->index >= MALI_KERNEL_TEXTURES) {
+			say(error, error_size, "%s: a texture or sampler at index %u (the Mali build binds 0 to %u)", out->name,
+			    r->index, MALI_KERNEL_TEXTURES - 1);
+			goto done;
+		}
+		if ((r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER) &&
+		    r->index >= MALI_KERNEL_BUFFERS) {
+			say(error, error_size, "%s: [[buffer(%u)]] (the Mali build binds buffers 0 to %u)", out->name, r->index,
+			    MALI_KERNEL_BUFFERS - 1);
+			goto done;
+		}
+		out->resources[out->num_resources++] = (struct mali_kernel_resource){ r->kind, r->index, r->size, r->read, r->write };
+	}
+	out->threadgroup_bytes = air_info.threadgroup_bytes;
+	out->threadgroup_arg_base = air_info.has_threadgroup_arg ? air_info.threadgroup_arg_base : ~0u;
+	for (unsigned i = 0; i < 3; i++) {
+		out->workgroup[i] = s->info.workgroup_size_variable ? 0 : s->info.workgroup_size[i];
+	}
+
+	if (want == MESA_SHADER_VERTEX && fetch != NULL) {
+		struct fetch_state st = { fetch, NULL, 0 };
+
+		NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_vertex_fetch, nir_metadata_control_flow, &st);
+		if (st.why != NULL) {
+			say(error, error_size, "%s: %s", out->name, st.why);
+			goto done;
+		}
+		NIR_PASS(_, s, nir_remove_dead_variables, nir_var_shader_in, NULL);
+		s->info.inputs_read = 0;
+		for (unsigned n = 0; n < MALI_KERNEL_BUFFERS; n++) {
+			if (!(st.buffers & 1u << n)) {
+				continue;
+			}
+			if (out->num_resources == MALI_KERNEL_MAX_RESOURCES) {
+				say(error, error_size, "%s: more than %u resources", out->name, MALI_KERNEL_MAX_RESOURCES);
+				goto done;
+			}
+			out->resources[out->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_DEVICE_BUFFER, n, 0, 1, 0 };
+		}
+	}
+	result = compile_nir(s, want, vs_varyings, out, error, error_size);
+done:
 	ralloc_free(mem);
 	if (result != 0) {
 		mali_kernel_binary_free(out);
@@ -498,7 +620,7 @@ int
 mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
     struct mali_kernel_binary *out, char *error, size_t error_size)
 {
-	return compile_stage(bitcode, size, constants, count, MESA_SHADER_COMPUTE, NULL, out, error, error_size);
+	return compile_stage(bitcode, size, constants, count, MESA_SHADER_COMPUTE, NULL, NULL, out, error, error_size);
 }
 
 int
@@ -510,7 +632,91 @@ mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant 
 		return -1;
 	}
 	return compile_stage(bitcode, size, constants, count, fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX,
-	    fragment ? vertex->varyings : NULL, out, error, error_size);
+	    fragment ? vertex->varyings : NULL, NULL, out, error, error_size);
+}
+
+int
+mali_vertex_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
+    const struct mali_vertex_fetch *fetch, struct mali_kernel_binary *out, char *error, size_t error_size)
+{
+	return compile_stage(bitcode, size, constants, count, MESA_SHADER_VERTEX, NULL, fetch, out, error, error_size);
+}
+
+/*
+ * The tile buffer's preload, as a draw (c_api_mali.cpp: a pass that loads draws this first, in the same Mali pass): one
+ * triangle over the whole target from [[vertex_id]] 0..2, its fragment the target's own texel at the fragment's
+ * position -- texture 0, read with txf (no sampler, no filtering). What panfrost's frame shaders do with a pre-frame
+ * DCD, through the ordinary draw path instead: on a tiler a tile reads its own pixels before it writes them back.
+ */
+int
+mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size)
+{
+	void *mem = ralloc_context(NULL);
+	nir_builder b;
+	nir_variable *var;
+	int result = -1;
+
+	memset(vs, 0, sizeof(*vs));
+	memset(fs, 0, sizeof(*fs));
+	pthread_once(&types_once, types_init);
+
+	/* (-1,-1) (3,-1) (-1,3): the target and more */
+	b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
+	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_VERTEX, false), "hakios_preload_vs");
+	ralloc_steal(mem, b.shader);
+	{
+		nir_def *id = nir_load_vertex_id(&b);
+		nir_def *x = nir_fadd_imm(&b, nir_u2f32(&b, nir_ishl_imm(&b, nir_iand_imm(&b, id, 1), 2)), -1.0f);
+		nir_def *y = nir_fadd_imm(&b, nir_u2f32(&b, nir_ishl_imm(&b, nir_iand_imm(&b, id, 2), 1)), -1.0f);
+
+		var = nir_variable_create(b.shader, nir_var_shader_out, glsl_vec4_type(), "position");
+		var->data.location = VARYING_SLOT_POS;
+		nir_store_var(&b, var, nir_vec4(&b, x, y, nir_imm_float(&b, 0.0f), nir_imm_float(&b, 1.0f)), 0xf);
+	}
+	vs->stage = 1;
+	snprintf(vs->name, sizeof(vs->name), "hakios_preload_vs");
+	if (compile_nir(b.shader, MESA_SHADER_VERTEX, NULL, vs, error, error_size) != 0) {
+		goto done;
+	}
+
+	b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_FRAGMENT, false), "hakios_preload_fs");
+	ralloc_steal(mem, b.shader);
+	b.shader->info.fs.origin_upper_left = true;     /* as the front end's fragment functions (Metal's origin) */
+	{
+		nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, nir_load_frag_coord(&b), 2));
+		nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+
+		tex->op = nir_texop_txf;
+		tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+		tex->dest_type = nir_type_float32;
+		tex->coord_components = 2;
+		tex->texture_index = 0;
+		tex->sampler_index = 0;
+		tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, xy);
+		tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
+		nir_def_init(&tex->instr, &tex->def, 4, 32);
+		nir_builder_instr_insert(&b, &tex->instr);
+
+		var = nir_variable_create(b.shader, nir_var_shader_out, glsl_vec4_type(), "color");
+		var->data.location = FRAG_RESULT_DATA0;
+		nir_store_var(&b, var, &tex->def, 0xf);
+	}
+	fs->stage = 2;
+	snprintf(fs->name, sizeof(fs->name), "hakios_preload_fs");
+	fs->num_resources = 1;
+	fs->resources[0] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, 0, 0, 1, 0 };
+	if (compile_nir(b.shader, MESA_SHADER_FRAGMENT, vs->varyings, fs, error, error_size) != 0) {
+		goto done;
+	}
+	result = 0;
+done:
+	ralloc_free(mem);
+	if (result != 0) {
+		mali_kernel_binary_free(vs);
+		mali_kernel_binary_free(fs);
+	}
+	return result;
 }
 
 void

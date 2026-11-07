@@ -68,6 +68,7 @@ struct mali_kernel_binary {
 	void *varyings;
 	unsigned num_resources;
 	struct mali_kernel_resource resources[MALI_KERNEL_MAX_RESOURCES];
+	unsigned rt_written;             /* a fragment function's: bit n, [[color(n)]] written */
 };
 
 struct mali_constant {
@@ -78,9 +79,21 @@ struct mali_constant {
 /* 0 and *OUT filled, or -1 with the reason in ERROR */
 int mali_kernel_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
     struct mali_kernel_binary *out, char *error, size_t error_size);
+/* Metal's vertex descriptor, its numbers straight through (MTLVertexFormat, MTLVertexStepFunction): the vertex
+ * function's [[stage_in]] attributes fetched in the shader from [[buffer(n)]] (format 0: an attribute not described) */
+#define MALI_VERTEX_SLOTS 31
+struct mali_vertex_fetch {
+	struct { unsigned format, offset, buffer; } attributes[MALI_VERTEX_SLOTS];
+	struct { unsigned stride, step_function, step_rate; } layouts[MALI_VERTEX_SLOTS];
+};
+/* mali_stage_compile's vertex function, with its stage_in attributes fetched as FETCH says (NULL: as mali_stage_compile) */
+int mali_vertex_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
+    const struct mali_vertex_fetch *fetch, struct mali_kernel_binary *out, char *error, size_t error_size);
 /* a vertex function (FRAGMENT 0), or a fragment function (FRAGMENT 1) against VERTEX's varyings; as mali_kernel_compile */
 int mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, int fragment,
     const struct mali_kernel_binary *vertex, struct mali_kernel_binary *out, char *error, size_t error_size);
+/* the driver's preload draw (compile_mali.c): a triangle over the target, texture 0's texel at each fragment */
+int mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size);
 void mali_kernel_binary_free(struct mali_kernel_binary *binary);
 
 #ifdef __cplusplus

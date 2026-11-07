@@ -126,6 +126,10 @@ struct hakios_metal_device {
     std::atomic<bool> heap_set{false};          // the queue given its heap (HEAP_SET once a queue, as panvk and gallium)
     Bo heapdesc;
     bool heap_ok = false;                       // the heap made: draws can be served
+    struct hakios_metal_program *preload = nullptr;   // the Load action's draw (preloadProgram), made on first use
+    bool preload_failed = false;
+    std::mutex preload_lock;
+    std::string preload_error;
 
     int call(uint32_t selector, void *request, size_t size)
     {
@@ -348,6 +352,18 @@ struct hakios_metal_program {
     uint64_t pos_spd = 0, vary_spd = 0, frag_spd = 0;
     unsigned color_format = 0, samples = 1;
     bool blend_enabled = false, vertex_descriptor = false;
+    // colour attachment 0's blend (hakios_metal_program_set_blend): the fixed-function equation word, whether it
+    // reads the tile buffer, or why it cannot be done in fixed function
+    uint32_t blend_equation = 0x132 | 0x132 << 12 | 0xfu << 28;    // replace, every channel written
+    // the vertex descriptor (hakios_metal_program_set_vertex_*): the stages compiled again with the stage_in
+    // attributes fetched in the shader (compile_mali.c's lower_vertex_fetch), once, before the first draw
+    std::vector<uint8_t> vs_bitcode, fs_bitcode;
+    std::vector<mali_constant> vs_constants, fs_constants;
+    mali_vertex_fetch fetch = {};
+    bool fetch_described = false, fetch_compiled = false;
+    std::string fetch_refusal;
+    bool blend_reads_dest = false;
+    std::string blend_refusal;
     char name[300] = "";
 
     void retain() { refs.fetch_add(1); }
@@ -518,6 +534,11 @@ struct DrawJob {
     unsigned texture_count, sampler_count;
     uint64_t index_va = 0, index_size = 0;              // an indexed draw's indices (0: none)
     bool clear_only = false;                            // a pass with no geometry: the clear (hakios_metal_cb_clear)
+    // the Load action: the preload draw first, in the same Mali pass (compile_mali.c's mali_preload_compile)
+    bool load = false;
+    uint64_t pre_pos_spd = 0, pre_frag_spd = 0;
+    std::vector<uint32_t> pre_vs_fau, pre_fs_fau;
+    hakios_metal_texture *pre_target = nullptr;
 };
 struct IndexInfo { hakios_metal_buffer *buffer; uint64_t offset; unsigned type; int base_vertex; };
 
@@ -605,6 +626,78 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         srt = t_va | MALI_TABLES;
     }
     uint64_t vs_fau_va = area_va + vs_at, fs_fau_va = area_va + fs_at;
+    if (dj.load) {
+        // THE LOAD ACTION: the target's own pixels drawn first, one triangle over it whose fragment is the target's
+        // texel (texture 0, txf), into the same tiler context as the draw -- the tile buffer preloaded through the
+        // ordinary draw path. Caches first, as at a command buffer's start: what an earlier pass wrote back reaches
+        // L2, and the texture cache drops what an earlier preload read of the same target.
+        uint64_t end_at = srt_at + (dj.texture_count || dj.sampler_count ? 0x80 + (dj.texture_count * 3 + dj.sampler_count) * 32 : 0);
+        uint64_t pvs_at = (end_at + 0x3f) & ~0x3fULL, pfs_at = pvs_at + ((dj.pre_vs_fau.size() * 4 + 0x3f) & ~0x3fULL);
+        uint64_t psrt_at = pfs_at + ((dj.pre_fs_fau.size() * 4 + 0x3f) & ~0x3fULL);
+        memcpy(area + pvs_at, dj.pre_vs_fau.data(), dj.pre_vs_fau.size() * 4);
+        memcpy(area + pfs_at, dj.pre_fs_fau.data(), dj.pre_fs_fau.size() * 4);
+        uint8_t *t = area + psrt_at;
+        uint64_t t_va = area_va + psrt_at, tex_va = t_va + 0x80, samp_va = tex_va + 32, plane_va = samp_va + 32;
+        memset(t, 0, 0x80 + 3 * 32 + 0x40);
+        // the preload's own blend descriptor, a replace: the draw's may blend, the preload must not
+        uint64_t pbl_at = (psrt_at + 0x80 + 3 * 32 + 0x3f) & ~0x3fULL;
+        auto *pbl = (uint32_t *)(area + pbl_at);
+        pbl[0] = 1u << 9;
+        pbl[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
+        pbl[2] = 1 | 3 << 3;
+        pbl[3] = dj.blend[3];
+        auto entry = [&](unsigned table, uint64_t va, unsigned count) {
+            auto *e = (uint32_t *)(t + 16 * table);
+            e[0] = (uint32_t)va;
+            e[1] = (uint32_t)(va >> 32) | 1u << 24;
+            e[2] = count * 32;
+        };
+        entry(MALI_TABLE_TEXTURE, tex_va, 1);
+        entry(MALI_TABLE_SAMPLER, samp_va, 1);
+        uint32_t plane[8];
+        describe(dj.pre_target, (uint32_t *)(area + (tex_va - area_va)), plane, plane_va);
+        memcpy(area + (plane_va - area_va), plane, 32);
+        ((uint32_t *)(area + (samp_va - area_va)))[0] = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
+        uint64_t pvs_va = area_va + pvs_at, pfs_va = area_va + pfs_at;
+        s[n++] = move32(74, 0);
+        s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4 | 1;              // FLUSH_CACHE2: L2/LSC clean, others invalidated
+        s[n++] = WAIT_ALL;
+        s[n++] = move48(0, 0);
+        s[n++] = move48(4, t_va | MALI_TABLES);
+        s[n++] = move48(8, pvs_va);
+        s[n++] = move32(9, (uint32_t)(pvs_va >> 32) | (uint32_t)((dj.pre_vs_fau.size() + 1) / 2) << 24);
+        s[n++] = move48(12, pfs_va);
+        s[n++] = move32(13, (uint32_t)(pfs_va >> 32) | (uint32_t)((dj.pre_fs_fau.size() + 1) / 2) << 24);
+        s[n++] = move48(16, dj.pre_pos_spd);
+        s[n++] = move48(18, 0);                                                 // no varying shader
+        s[n++] = move48(20, dj.pre_frag_spd);
+        s[n++] = move48(24, d->descriptors.va + 0x1200);
+        s[n++] = move32(32, 0);
+        s[n++] = move32(33, 3);                                                 // one triangle
+        s[n++] = move32(34, 1);
+        s[n++] = move32(35, 0);
+        s[n++] = move32(36, 0);
+        s[n++] = move32(37, 0);
+        s[n++] = move32(38, dj.dcd2);
+        s[n++] = move32(39, 0);
+        s[n++] = move48(40, area_va);
+        s[n++] = move32(42, 0);                                                 // the whole target
+        s[n++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
+        s[n++] = move32(44, 0);
+        s[n++] = move32(45, 0x3f800000);
+        s[n++] = move48(46, 0);
+        s[n++] = move32(48, 0);
+        s[n++] = move48(50, (area_va + pbl_at) | 1);                           // the preload's: replace
+        s[n++] = move48(52, d->descriptors.va + 0x1980);
+        s[n++] = move48(54, 0);
+        s[n++] = move32(56, 8 | 1u << 22);                                      // triangles, basic FIFO
+        s[n++] = move32(57, 1u << 23 | 1u << 26);                               // no face culled
+        s[n++] = move32(58, dj.dcd1);
+        s[n++] = move32(60, 0x3f800000);
+        s[n++] = move32(61, 0);
+        s[n++] = 49ULL << 56 | 0ULL << 32;                                      // HEAP_OPERATION: vertex/tiler started
+        s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                          // RUN_IDVS
+    }
     s[n++] = move48(0, 0);                                                      // vertex SRT: none
     s[n++] = move48(4, srt);                                                    // fragment SRT
     s[n++] = move48(8, vs_fau_va);
@@ -639,7 +732,9 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(60, 0x3f800000);                                            // primitive size 1.0
     s[n++] = move32(61, 0);                                                     // TILER_FLAGS2: VRS 1x1
     if (!dj.clear_only) {                                                       // (a clear: the fragment job alone)
-        s[n++] = 49ULL << 56 | 0ULL << 32;                                      // HEAP_OPERATION: vertex/tiler started
+        if (!dj.load) {                                                         // (started already by the preload)
+            s[n++] = 49ULL << 56 | 0ULL << 32;                                  // HEAP_OPERATION: vertex/tiler started
+        }
         s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                          // RUN_IDVS: malloc, the fragment's SRT
         s[n++] = WAIT_ALL;
         s[n++] = 9ULL << 56;                                                    // FINISH_TILING
@@ -663,7 +758,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = 11ULL << 56 | 70ULL << 40 | 72ULL << 32 | 1;                       // FINISH_FRAGMENT: chunks r70..r72, count it
     s[n++] = WAIT_ALL;
 }
-constexpr unsigned DRAW_WORDS = 62;     // (instructions emitDraw writes, at most)
+constexpr unsigned DRAW_WORDS = 62 + 45; // (instructions emitDraw writes, at most: the preload's 45 included)
 
 // the bytes a draw needs in its command buffer's stream BO, past the instructions
 uint64_t
@@ -672,6 +767,9 @@ drawBytes(const DrawJob &dj)
     uint64_t bytes = 0x80 + 0x100 + 0x40 + ((dj.vs_fau.size() * 4 + 0x3f) & ~0x3fULL) + ((dj.fs_fau.size() * 4 + 0x3f) & ~0x3fULL);
     if (dj.texture_count || dj.sampler_count) {
         bytes += 0x80 + (dj.texture_count * 3 + dj.sampler_count) * 32 + 0x40;
+    }
+    if (dj.load) {
+        bytes += 0x40 + ((dj.pre_vs_fau.size() * 4 + 0x3f) & ~0x3fULL) + ((dj.pre_fs_fau.size() * 4 + 0x3f) & ~0x3fULL) + 0x80 + 3 * 32 + 0x80;
     }
     return bytes;
 }
@@ -1828,6 +1926,10 @@ hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_siz
     }
     p->color_format = color_pixel_format;
     snprintf(p->name, sizeof(p->name), "%s+%s", p->vs.name, p->fs.name);
+    p->vs_bitcode.assign((const uint8_t *)vs_bitcode, (const uint8_t *)vs_bitcode + vs_size);
+    p->fs_bitcode.assign((const uint8_t *)fs_bitcode, (const uint8_t *)fs_bitcode + fs_size);
+    p->vs_constants = vc;
+    p->fs_constants = fc;
     return p;
 }
 
@@ -1870,34 +1972,173 @@ hakios_metal_program_resource(hakios_metal_program *p, unsigned stage, unsigned 
 
 // (recorded; a draw refuses what the Mali build does not serve yet, by name)
 int
-hakios_metal_program_set_vertex_attribute(hakios_metal_program *p, unsigned index, unsigned, unsigned, unsigned)
+hakios_metal_program_set_vertex_attribute(hakios_metal_program *p, unsigned index, unsigned format, unsigned offset,
+    unsigned buffer_index)
 {
-    if (p == nullptr || index > 30) {
+    if (p == nullptr || index >= MALI_VERTEX_SLOTS) {
         fail("a vertex attribute past 30");
         return -1;
     }
-    p->vertex_descriptor = true;
+    std::lock_guard<std::mutex> g(p->lock);
+    p->fetch.attributes[index].format = format;
+    p->fetch.attributes[index].offset = offset;
+    p->fetch.attributes[index].buffer = buffer_index;
+    if (format != 0) {
+        p->fetch_described = true;              // (every slot is set, described or not: only a format counts)
+    }
+    p->fetch_compiled = false;
     return 0;
 }
 
 int
-hakios_metal_program_set_vertex_layout(hakios_metal_program *p, unsigned buffer_index, unsigned, unsigned, unsigned)
+hakios_metal_program_set_vertex_layout(hakios_metal_program *p, unsigned buffer_index, unsigned stride,
+    unsigned step_function, unsigned step_rate)
 {
-    if (p == nullptr || buffer_index > 30) {
+    if (p == nullptr || buffer_index >= MALI_VERTEX_SLOTS) {
         fail("a vertex layout past 30");
         return -1;
     }
-    p->vertex_descriptor = true;
+    std::lock_guard<std::mutex> g(p->lock);
+    p->fetch.layouts[buffer_index].stride = stride;
+    p->fetch.layouts[buffer_index].step_function = step_function;
+    p->fetch.layouts[buffer_index].step_rate = step_rate;
+    p->fetch_compiled = false;
     return 0;
 }
 
-void
-hakios_metal_program_set_blend(hakios_metal_program *p, int enabled, unsigned, unsigned, unsigned, unsigned, unsigned,
-    unsigned, unsigned)
+namespace {
+// the stages again with the vertex descriptor's attributes fetched in the shader, before the program's first upload;
+// true when there is nothing to do or it was done, false with p->fetch_refusal said
+bool
+compileFetch(hakios_metal_program *p)
 {
-    if (p != nullptr) {
-        p->blend_enabled = enabled != 0;
+    std::lock_guard<std::mutex> g(p->lock);
+    if (!p->fetch_described || p->fetch_compiled) {
+        return p->fetch_refusal.empty();
     }
+    p->fetch_compiled = true;
+    if (p->device != nullptr) {
+        p->fetch_refusal = "a vertex descriptor set after the program's first draw";
+        return false;
+    }
+    mali_kernel_binary vs = {}, fs = {};
+    char why[512] = "";
+    if (mali_vertex_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(),
+                            &p->fetch, &vs, why, sizeof(why)) != 0 ||
+        mali_stage_compile(p->fs_bitcode.data(), p->fs_bitcode.size(), p->fs_constants.data(), p->fs_constants.size(), 1,
+                           &vs, &fs, why, sizeof(why)) != 0) {
+        mali_kernel_binary_free(&vs);
+        mali_kernel_binary_free(&fs);
+        p->fetch_refusal = std::string("the vertex descriptor: ") + why;
+        return false;
+    }
+    mali_kernel_binary_free(&p->vs);
+    mali_kernel_binary_free(&p->fs);
+    p->vs = vs;
+    p->fs = fs;
+    p->fetch_refusal.clear();
+    return true;
+}
+}  // namespace
+
+namespace {
+// Metal's blend factor as Mali's fixed-function operand: the base (C operand, with ONE as its own) and whether it is
+// inverted; MTLBlendFactorZero is ONE inverted, as gallium's. false for what the hardware has no operand for.
+struct MaliFactor { unsigned base; bool inv; };
+enum { MF_ONE = 1, MF_SRC = 2, MF_DEST = 3, MF_SRC_ALPHA = 5, MF_DEST_ALPHA = 6 };    // (the C operand's values)
+bool
+maliFactor(unsigned metal, MaliFactor &f)
+{
+    static const MaliFactor table[10] = {
+        { MF_ONE, true }, { MF_ONE, false }, { MF_SRC, false }, { MF_SRC, true }, { MF_SRC_ALPHA, false },
+        { MF_SRC_ALPHA, true }, { MF_DEST, false }, { MF_DEST, true }, { MF_DEST_ALPHA, false }, { MF_DEST_ALPHA, true },
+    };
+    if (metal >= 10) {
+        return false;           // alpha saturated, the blend constant, the second source: not yet
+    }
+    f = table[metal];
+    return true;
+}
+
+// One channel group's A + B * C (pan_blend.c's to_mali_function, Mesa 26.2.5), for Metal's operation (0 add, 1
+// subtract, 2 reverse subtract); 0 and WHY for what fixed function cannot do (min, max; factors that neither match nor
+// are zero or one)
+uint32_t
+maliBlendFunction(unsigned op, unsigned src_metal, unsigned dst_metal, bool alpha, const char *&why)
+{
+    MaliFactor src, dst;
+    if (op > 2) {
+        why = "a min or max blend operation (fixed function adds and subtracts only)";
+        return 0;
+    }
+    if (!maliFactor(src_metal, src) || !maliFactor(dst_metal, dst)) {
+        why = "a blend factor with no fixed-function operand (alpha saturated, the blend colour, the second source)";
+        return 0;
+    }
+    enum { A_ZERO = 1, A_SRC = 2, A_DEST = 3 };
+    enum { B_MINUS = 0, B_PLUS = 1, B_SRC = 2, B_DEST = 3 };
+    unsigned a = 0, b = 0, c = 0;
+    bool neg_a = false, neg_b = false, inv_c = false;
+    // the hardware's C has zero and inverts it to one, gallium's ONE is uninverted: hence the extra invert for ONE
+    auto inverted = [](MaliFactor f) { return f.inv ^ (f.base == MF_ONE); };
+    auto c_of = [](MaliFactor f) { return f.base == MF_ONE ? 1u /* zero */ : f.base; };
+    bool src_zero = src.base == MF_ONE && src.inv, src_one = src.base == MF_ONE && !src.inv;
+    bool dst_zero = dst.base == MF_ONE && dst.inv, dst_one = dst.base == MF_ONE && !dst.inv;
+    bool two_src_dest = op == 0 && (src.base == MF_DEST || (alpha && src.base == MF_DEST_ALPHA)) && !src.inv &&
+        (dst.base == MF_SRC || (alpha && dst.base == MF_SRC_ALPHA)) && !dst.inv;
+    if (src_zero) {
+        a = A_ZERO; b = B_DEST; neg_b = op == 1; inv_c = inverted(dst); c = c_of(dst);
+    } else if (src_one) {
+        a = A_SRC; b = B_DEST; neg_b = op == 1; neg_a = op == 2; inv_c = inverted(dst); c = c_of(dst);
+    } else if (dst_zero) {
+        a = A_ZERO; b = B_SRC; neg_b = op == 2; inv_c = inverted(src); c = c_of(src);
+    } else if (dst_one) {
+        a = A_DEST; b = B_SRC; neg_a = op == 1; neg_b = op == 2; inv_c = inverted(src); c = c_of(src);
+    } else if (src.base == dst.base && src.inv == dst.inv) {
+        a = A_ZERO; inv_c = inverted(src); c = c_of(src);
+        b = op == 0 ? B_PLUS : B_MINUS;
+        neg_b = op == 2;
+    } else if (two_src_dest) {
+        a = A_ZERO; b = B_DEST; c = 4;                  // dest * (2 * src)
+    } else if (src.base == dst.base) {                  // the same factor, one of them inverted
+        a = A_DEST; inv_c = inverted(src); c = c_of(src);
+        if (op == 0) { b = B_MINUS; }
+        else if (op == 2) { b = B_PLUS; neg_b = true; }
+        else { b = B_PLUS; neg_a = true; }
+    } else {
+        why = "blend factors that neither match nor are zero or one (fixed function has one multiplier)";
+        return 0;
+    }
+    return a | (neg_a ? 1u << 3 : 0) | b << 4 | (neg_b ? 1u << 7 : 0) | c << 8 | (inv_c ? 1u << 11 : 0);
+}
+
+}  // namespace
+
+void
+hakios_metal_program_set_blend(hakios_metal_program *p, int enabled, unsigned rgb_op, unsigned alpha_op, unsigned src_rgb,
+    unsigned dst_rgb, unsigned src_alpha, unsigned dst_alpha, unsigned write_mask)
+{
+    if (p == nullptr) {
+        return;
+    }
+    // Metal's write mask: alpha 1, blue 2, green 4, red 8; Mali's colour mask: red bit 0 .. alpha bit 3
+    uint32_t mask = (write_mask & 8 ? 1u : 0) | (write_mask & 4 ? 2u : 0) | (write_mask & 2 ? 4u : 0) | (write_mask & 1 ? 8u : 0);
+    p->blend_enabled = enabled != 0;
+    p->blend_refusal.clear();
+    p->blend_reads_dest = mask != 0xf;          // a channel kept is read from the tile buffer
+    if (!p->blend_enabled) {
+        p->blend_equation = 0x132 | 0x132 << 12 | mask << 28;
+        return;
+    }
+    const char *why = nullptr;
+    uint32_t rgb = maliBlendFunction(rgb_op, src_rgb, dst_rgb, false, why);
+    uint32_t alpha = why == nullptr ? maliBlendFunction(alpha_op, src_alpha, dst_alpha, true, why) : 0;
+    if (why != nullptr) {
+        p->blend_refusal = std::string("blending: ") + why;
+        return;
+    }
+    p->blend_equation = rgb | alpha << 12 | mask << 28;
+    p->blend_reads_dest = true;
 }
 
 int
@@ -1965,6 +2206,31 @@ unorm8(double v)
     return (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : v * 255.0 + 0.5);
 }
 
+// the Load action's program (compile_mali.c's mali_preload_compile), compiled and uploaded on first use; false with
+// d->preload_error said when it cannot be
+bool
+preloadProgram(hakios_metal_device *d)
+{
+    std::lock_guard<std::mutex> g(d->preload_lock);
+    if (d->preload != nullptr) {
+        return true;
+    }
+    if (d->preload_failed) {
+        return false;
+    }
+    auto *p = new hakios_metal_program;
+    char why[256] = "";
+    if (mali_preload_compile(&p->vs, &p->fs, why, sizeof(why)) != 0 || !p->upload(d)) {
+        d->preload_error = std::string("load action Load: the preload draw: ") + (why[0] ? why : gError.c_str());
+        d->preload_failed = true;
+        p->release();
+        return false;
+    }
+    snprintf(p->name, sizeof(p->name), "hakios_preload");
+    d->preload = p;
+    return true;
+}
+
 int
 drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal_render_pass *pass,
     const struct hakios_metal_viewport *viewport, const struct hakios_metal_scissor *scissor, unsigned primitive,
@@ -1983,21 +2249,31 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     else if (p == nullptr || t == nullptr) refused = "a draw without a program or a colour attachment";
     else if (t->format != 70 && t->format != 71 && t->format != 80 && t->format != 81) refused = "a colour attachment not RGBA8/BGRA8 (not on the Mali yet)";
     else if (!(t->usage & HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET)) refused = "a colour attachment made without render-target usage";
-    else if (pass->load_action == 1) refused = "load action Load (the tile buffer's preload: not on the Mali yet)";
+    else if (pass->load_action == 1 && !preloadProgram(d)) refused = d->preload_error.c_str();
     else if (pass->store_action > 1) refused = "a store action other than DontCare and Store";
     else if (pass->depth || pass->stencil || pass->depth_state_set || pass->stencil_state_set) refused = "depth and stencil (not on the Mali yet)";
     else if (pass->visibility && pass->visibility_mode) refused = "visibility results (not on the Mali yet)";
     else if (pass->color0_level || pass->color0_slice) refused = "a mip level or slice of the colour attachment";
-    else if (p->blend_enabled) refused = "blending (not on the Mali yet)";
-    else if (p->vertex_descriptor) refused = "a vertex descriptor (stage_in attributes: not on the Mali yet)";
+    else if (!p->blend_refusal.empty()) refused = p->blend_refusal.c_str();
+    else if (!compileFetch(p)) refused = p->fetch_refusal.c_str();
     else if (p->samples != 1) refused = "multisampling (not on the Mali yet)";
     else if (primitive != 3 && primitive != 4) refused = "a primitive other than triangles and triangle strips";
     else if (instance_count == 0) refused = "no instances";
     else if (ix && (ix->buffer == nullptr || ix->type > 1 || ix->base_vertex < 0 ||
                     ix->offset + (uint64_t)vertex_count * (ix->type ? 4 : 2) > ix->buffer->length))
         refused = "an indexed draw past its index buffer, of an unknown index type or with a negative base vertex";
+    // colour attachments past 0: drawn into only by a fragment function that writes them (not yet); one it does not
+    // write is left as it is -- CoreAnimation attaches more targets than most of its draws write. A clear of one is
+    // not done (said once).
     for (unsigned i = 0; refused == nullptr && i < 7; i++) {
-        if (pass->more[i].texture) refused = "colour attachments past 0 (not on the Mali yet)";
+        if (pass->more[i].texture == nullptr) continue;
+        if (p->fs.rt_written & 2u << i) refused = "a fragment function writing colour attachments past 0 (not on the Mali yet)";
+        else if (pass->more[i].load_action == 2) {
+            static std::atomic<bool> told{false};
+            if (!told.exchange(true)) {
+                fprintf(stderr, "hakios-metal: colour attachment %u's clear is not done: the draws write attachment 0 only\n", i + 1);
+            }
+        }
     }
     if (refused != nullptr) {
         fail("%s%s%s", p ? p->name : "", p ? ": " : "", refused);
@@ -2067,10 +2343,24 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     if (pass->load_action == 2) {
         dj.clear = unorm8(pass->clear_color[0]) | unorm8(pass->clear_color[1]) << 8 | unorm8(pass->clear_color[2]) << 16 |
             (uint32_t)unorm8(pass->clear_color[3]) << 24;
+    } else if (pass->load_action == 1) {
+        // Load: the preload draw first (emitDraw), the target its texture 0, over the whole target
+        hakios_metal_program *pre = d->preload;
+        float full_scale[3] = { (float)t->width / 2, -(float)t->height / 2, 1 }, full_offset[3] = { (float)t->width / 2, (float)t->height / 2, 0 };
+        if (!stagePushConstants(pre->vs, nullptr, nullptr, 0, full_scale, full_offset, 0, 0, dj.pre_vs_fau, used) ||
+            !stagePushConstants(pre->fs, nullptr, nullptr, 0, full_scale, full_offset, 0, 0, dj.pre_fs_fau, used)) {
+            return -1;
+        }
+        dj.load = true;
+        dj.pre_pos_spd = pre->pos_spd;
+        dj.pre_frag_spd = pre->frag_spd;
+        dj.pre_target = t;                              // (held with the draw's target below)
     }
-    dj.blend[0] = 1u << 9;
-    dj.blend[1] = 0x132 | 0x132 << 12 | 0xfu << 28;     // replace
-    dj.blend[2] = 1 | 3 << 3;                           // opaque, 4 components, RT 0
+    // the blend descriptor: enabled; the tile buffer loaded when the equation or the mask reads it; opaque (mode 1)
+    // for a plain replace of every channel, fixed function (2) otherwise
+    dj.blend[0] = 1u << 9 | (p->blend_reads_dest ? 1u : 0);
+    dj.blend[1] = p->blend_equation;
+    dj.blend[2] = (p->blend_reads_dest ? 2u : 1u) | 3 << 3;    // mode, 4 components, RT 0
     dj.blend[3] = 237u << 12;                           // the tile buffer's RGBA8
     dj.mode = primitive == 4 ? 10 : 8;
     dj.count = vertex_count;
