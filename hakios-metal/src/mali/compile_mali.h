@@ -46,6 +46,8 @@ struct mali_kernel_resource {
 	unsigned index;         /* [[buffer(n)]] ... */
 	unsigned size;
 	unsigned read, write;
+	unsigned inline_sampler;        /* a sampler the function declares (constexpr sampler): bound by the driver */
+	uint64_t sampler_state;         /* ... its state word (AIR's __air_sampler_state) */
 };
 
 struct mali_kernel_binary {

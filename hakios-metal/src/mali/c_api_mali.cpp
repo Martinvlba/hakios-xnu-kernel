@@ -463,6 +463,7 @@ hakios_metal_texture::release()
 namespace {
 struct MaliFormat { unsigned metal; uint32_t mali; uint32_t bytes; };
 const MaliFormat kFormats[] = {
+    { 1, 163u << 12 | 16, 1 },                  // A8Unorm: R8's, the texture's swizzle 000R (alphaSwizzle below)
     { 10, 163u << 12 | 16, 1 },                 // R8Unorm (R001 -> RGB1)
     { 30, 171u << 12 | 16, 2 },                 // RG8Unorm
     { 53, 133u << 12 | 16, 4 },                 // R32Uint
@@ -476,6 +477,8 @@ const MaliFormat kFormats[] = {
     { 125, 191u << 12 | 0, 16 },                // RGBA32Float
 };
 constexpr uint32_t kIdentitySwizzle = 0 | 1 << 3 | 2 << 6 | 3 << 9;
+// A8Unorm's: zero (4) in red, green and blue, the R8 texel in alpha (as panfrost's A8_UNORM, 000R)
+constexpr uint32_t kAlphaSwizzle = 4 | 4 << 3 | 4 << 6 | 0 << 9;
 
 // a texture's descriptor (genxml v10 "Texture", 32 bytes) and its plane's ("Generic Plane"), the plane at PLANE_VA
 void
@@ -1781,6 +1784,7 @@ hakios_metal_texture_new(hakios_metal_device *d, unsigned type, unsigned pixel_f
     t->depth = 1;
     t->usage = usage;
     t->mali_format = f->mali;
+    if (f->metal == 1) t->swizzle = kAlphaSwizzle;
     t->bytes = f->bytes;
     t->stride = (width * f->bytes + 63) & ~63u;
     if (!d->newBo(t->bo, (uint64_t)t->stride * height, BIND_NOEXEC)) {
@@ -2206,6 +2210,45 @@ unorm8(double v)
     return (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : v * 255.0 + 0.5);
 }
 
+// A function's constexpr sampler (AIR's __air_sampler_state word; upstream tools/mesa/air's air_decode_sampler_state:
+// address s/t/r bits 0/3/6, mag 9, min 11, mip 13, coord::pixel 15, compare 16, anisotropy 20, lod 24/40, border 56)
+// as the API's samplers are made: AIR's clamp_to_zero 0 / clamp_to_edge 1 / repeat 2 / mirrored_repeat 3 /
+// clamp_to_border 4 are Metal's 4 / 0 / 2 / 3 / 5. A comparison (compare_func other than none 0 and never 8) is refused.
+bool
+inlineSampler(uint64_t w, uint32_t words[8])
+{
+    static const unsigned address[5] = { 4, 0, 2, 3, 5 };
+    auto field = [&](unsigned lo, unsigned n) { return (unsigned)((w >> lo) & ((1ull << n) - 1)); };
+    hakios_metal_sampler_desc desc = {};
+    for (unsigned a = 0; a < 3; a++) {
+        if (field(3 * a, 3) > 4) {
+            fail("an address mode AIR does not have (%u)", field(3 * a, 3));
+            return false;
+        }
+    }
+    unsigned compare = field(16, 4);
+    if (compare != 0 && compare != 8) {
+        fail("a comparison sampler (compare_func %u, MSL's numbering): not on the Mali yet", compare);
+        return false;
+    }
+    desc.s_address = address[field(0, 3)];
+    desc.t_address = address[field(3, 3)];
+    desc.r_address = address[field(6, 3)];
+    desc.mag_filter = field(9, 2) ? 1 : 0;                  // (bicubic as linear)
+    desc.min_filter = field(11, 2) ? 1 : 0;
+    desc.mip_filter = field(13, 2);
+    desc.normalized_coordinates = field(15, 1) == 0;
+    desc.max_anisotropy = field(20, 4) + 1;
+    desc.border_color = field(56, 2);
+    hakios_metal_sampler *s = hakios_metal_sampler_new(nullptr, &desc);
+    if (s == nullptr) {
+        return false;
+    }
+    memcpy(words, s->words, 32);
+    delete s;
+    return true;
+}
+
 // the Load action's program (compile_mali.c's mali_preload_compile), compiled and uploaded on first use; false with
 // d->preload_error said when it cannot be
 bool
@@ -2306,7 +2349,9 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             }
             dj.texture_count = res.index + 1 > dj.texture_count ? res.index + 1 : dj.texture_count;
         } else if (res.kind == HAKIOS_METAL_RESOURCE_SAMPLER) {
-            if (res.index >= fs_sampler_count || fs_samplers[res.index] == nullptr) {
+            if (res.inline_sampler) {
+                // the function's own (constexpr sampler): made from its state word below, nothing bound
+            } else if (res.index >= fs_sampler_count || fs_samplers[res.index] == nullptr) {
                 fail("draw with %s: nothing bound at [[sampler(%u)]]", p->name, res.index);
                 return -1;
             }
@@ -2326,6 +2371,16 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     for (unsigned i = 0; i < dj.sampler_count && i < fs_sampler_count; i++) {
         if (fs_samplers[i] != nullptr) {
             memcpy(dj.samplers[i], fs_samplers[i]->words, 32);
+        }
+    }
+    for (unsigned r = 0; r < p->fs.num_resources; r++) {
+        const mali_kernel_resource &res = p->fs.resources[r];
+        if (res.kind != HAKIOS_METAL_RESOURCE_SAMPLER || !res.inline_sampler || res.index >= MALI_KERNEL_TEXTURES) {
+            continue;
+        }
+        if (!inlineSampler(res.sampler_state, dj.samplers[res.index])) {
+            fail("draw with %s: its constexpr sampler at %u: %s", p->name, res.index, gError.c_str());
+            return -1;
         }
     }
     dj.pos_spd = p->pos_spd;
@@ -2482,6 +2537,7 @@ textureOver(hakios_metal_device *d, const Bo &bo, uint64_t offset, uint32_t stri
     t->depth = 1;
     t->usage = usage;
     t->mali_format = f->mali;
+    if (f->metal == 1) t->swizzle = kAlphaSwizzle;
     t->bytes = f->bytes;
     t->stride = stride;
     t->origin = origin;

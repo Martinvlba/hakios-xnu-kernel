@@ -578,7 +578,8 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 			    MALI_KERNEL_BUFFERS - 1);
 			goto done;
 		}
-		out->resources[out->num_resources++] = (struct mali_kernel_resource){ r->kind, r->index, r->size, r->read, r->write };
+		out->resources[out->num_resources++] = (struct mali_kernel_resource){ r->kind, r->index, r->size, r->read, r->write,
+		    r->inline_sampler ? 1u : 0u, r->sampler_state };
 	}
 	out->threadgroup_bytes = air_info.threadgroup_bytes;
 	out->threadgroup_arg_base = air_info.has_threadgroup_arg ? air_info.threadgroup_arg_base : ~0u;
