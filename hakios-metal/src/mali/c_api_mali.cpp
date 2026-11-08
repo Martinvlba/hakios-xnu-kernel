@@ -470,6 +470,8 @@ struct MaliFormat { unsigned metal; uint32_t mali; uint32_t bytes; };
 const MaliFormat kFormats[] = {
     { 1, 163u << 12 | 16, 1 },                  // A8Unorm: R8's, the texture's swizzle 000R (alphaSwizzle below)
     { 10, 163u << 12 | 16, 1 },                 // R8Unorm (R001 -> RGB1)
+    { 23, 132u << 12 | 16, 2 },                 // R16Uint
+    { 25, 199u << 12 | 16, 2 },                 // R16Float
     { 30, 171u << 12 | 16, 2 },                 // RG8Unorm
     { 53, 133u << 12 | 16, 4 },                 // R32Uint
     { 55, 167u << 12 | 16, 4 },                 // R32Float
@@ -477,6 +479,7 @@ const MaliFormat kFormats[] = {
     { 71, 187u << 12 | 0 | 1u << 20, 4 },       // RGBA8Unorm_sRGB
     { 80, 187u << 12 | 4, 4 },                  // BGRA8Unorm
     { 81, 187u << 12 | 4 | 1u << 20, 4 },       // BGRA8Unorm_sRGB
+    { 105, 175u << 12 | 16, 8 },                // RG32Float
     { 115, 223u << 12 | 0, 8 },                 // RGBA16Float
     { 123, 157u << 12 | 0, 16 },                // RGBA32Uint
     { 125, 191u << 12 | 0, 16 },                // RGBA32Float
@@ -492,7 +495,8 @@ describe(const hakios_metal_texture *t, uint32_t *tex, uint32_t *plane, uint64_t
     uint32_t clump = t->bytes == 1 ? 0 : t->bytes == 2 ? 1 : t->bytes == 4 ? 2 : t->bytes == 8 ? 3 : 4;   // RAW8..RAW128
     memset(tex, 0, 32);
     memset(plane, 0, 32);
-    tex[0] = 2 | (t->type == 7 ? 3u : 2u) << 4 | t->mali_format << 10;      // a texture, 2D (or 3D: MTLTextureType3D 7)
+    // a texture: 2D, 3D (MTLTextureType3D 7) or 1D (MTLTextureType1D 0, one row)
+    tex[0] = 2 | (t->type == 7 ? 3u : t->type == 0 ? 1u : 2u) << 4 | t->mali_format << 10;
     tex[1] = (t->width - 1) | (t->height - 1) << 16;
     tex[2] = t->swizzle ? t->swizzle : kIdentitySwizzle;                    // one level, from level 0
     tex[4] = (uint32_t)plane_va;
@@ -1871,8 +1875,8 @@ hakios_metal_texture_new(hakios_metal_device *d, unsigned type, unsigned pixel_f
         fail("a texture of MTLPixelFormat %u (not served on the Mali yet)", pixel_format);
         return nullptr;
     }
-    if (type != 2 || width == 0 || height == 0 || width > 16384 || height > 16384) {
-        fail("a texture of type %u, %u x %u (the Mali build makes 2D ones up to 16384)", type, width, height);
+    if ((type != 2 && !(type == 0 && height == 1)) || width == 0 || height == 0 || width > 16384 || height > 16384) {
+        fail("a texture of type %u, %u x %u (the Mali build makes 2D and 1D ones up to 16384)", type, width, height);
         return nullptr;
     }
     auto *t = new hakios_metal_texture;
@@ -2543,9 +2547,12 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     // the blend descriptor: enabled; the tile buffer loaded when the equation or the mask reads it; opaque (mode 1)
     // for a plain replace of every channel, fixed function (2) otherwise
-    dj.blend[0] = 1u << 9 | (p->blend_reads_dest ? 1u : 0);
+    // (a target the fragment function reads -- framebuffer fetch, LD_TILE -- is loaded too, as panfrost's blend for a
+    // shader that reads the tile buffer: in opaque mode the pixel before is not there to read)
+    bool reads0 = p->blend_reads_dest || (p->fs.rt_read & 1);
+    dj.blend[0] = 1u << 9 | (reads0 ? 1u : 0);
     dj.blend[1] = p->blend_equation;
-    dj.blend[2] = (p->blend_reads_dest ? 2u : 1u) | 3 << 3;    // mode, 4 components, RT 0
+    dj.blend[2] = (reads0 ? 2u : 1u) | 3 << 3;                // mode, 4 components, RT 0
     dj.blend[3] = 237u << 12;                           // the tile buffer's RGBA8
     dj.rts = rts;
     for (unsigned i = 1; i < rts; i++) {
@@ -2561,7 +2568,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         m.clear = a.load_action == 2 ? (unorm8(a.clear_color[0]) | unorm8(a.clear_color[1]) << 8 |
                                         unorm8(a.clear_color[2]) << 16 | (uint32_t)unorm8(a.clear_color[3]) << 24) : 0;
         m.texture = a.texture;
-        bool reads = p->more_blend_reads_dest[i - 1];
+        bool reads = p->more_blend_reads_dest[i - 1] || (p->fs.rt_read & 1u << i);
         m.blend[0] = 1u << 9 | (reads ? 1u : 0);
         m.blend[1] = p->more_blend_equation[i - 1];
         m.blend[2] = (reads ? 2u : 1u) | 3 << 3 | i << 16;

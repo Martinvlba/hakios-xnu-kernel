@@ -71,6 +71,7 @@ struct mali_kernel_binary {
 	unsigned num_resources;
 	struct mali_kernel_resource resources[MALI_KERNEL_MAX_RESOURCES];
 	unsigned rt_written;             /* a fragment function's: bit n, [[color(n)]] written */
+	unsigned rt_read;                /* ... bit n, [[color(n)]] read (framebuffer fetch: LD_TILE) */
 };
 
 struct mali_constant {

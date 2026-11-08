@@ -421,6 +421,7 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 	int result = -1;
 
 	if (want == MESA_SHADER_FRAGMENT) {
+		out->rt_read = (unsigned) ((s->info.outputs_read >> FRAG_RESULT_DATA0) & 0xff);
 		nir_foreach_shader_out_variable(var, s) {
 			if (var->data.location >= FRAG_RESULT_DATA0 && var->data.location < FRAG_RESULT_DATA0 + 8) {
 				out->rt_written |= 1u << (var->data.location - FRAG_RESULT_DATA0);
