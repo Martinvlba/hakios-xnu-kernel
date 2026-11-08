@@ -382,6 +382,67 @@ pass_bench(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 	hakios_metal_buffer_free(small);
 }
 
+/* 8. the kernel's recovery: a fill into an address nothing maps (HAKIOS_MALI_FAULT_TEST) faults the GPU; the command
+ * buffer must come back (not hang 10 s), and a draw after it must draw. 9. the tiler heap's growth: a full-screen draw
+ * of many instances, more polygon lists than the heap's first 10 MB, must complete and draw */
+static int
+recovery_tests(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
+{
+	uint32_t px[64 * 64];
+	long us;
+	int ok = 1;
+	struct timespec t0, t1;
+	hakios_metal_buffer *b = hakios_metal_buffer_new(d, 4096);
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+
+	setenv("HAKIOS_MALI_FAULT_TEST", "1", 1);
+	hakios_metal_cb_fill(cb, b, 0, 4096, 0x55);
+	unsetenv("HAKIOS_MALI_FAULT_TEST");
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	hakios_metal_cb_commit(cb, NULL, NULL);
+	hakios_metal_cb_wait(cb);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	printf("mali_draw_test: a faulting fill: status %d after %ld ms (%s)\n", hakios_metal_cb_status(cb),
+	    (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000), hakios_metal_cb_error(cb));
+	hakios_metal_cb_free(cb);
+	hakios_metal_buffer_free(b);
+	{
+		int st = draw(d, q, flat, px, &us);
+		unsigned n = 0;
+		for (unsigned i = 0; i < 64 * 64; i++) n += px[i] == 0xff804020u;
+		printf("mali_draw_test: a draw after the fault: status %d, %u of 4096 drawn: %s\n", st, n,
+		    st == HAKIOS_METAL_COMPLETED && n == 4096 ? "WORK" : "FAILED");
+		ok = ok && st == HAKIOS_METAL_COMPLETED && n == 4096;
+	}
+	{
+		const unsigned w = 1080, h = 2340, instances = 400;
+		hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, w, h, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+		struct hakios_metal_render_pass pass;
+		uint32_t row[64];
+		int st;
+
+		memset(&pass, 0, sizeof(pass));
+		pass.color0 = t;
+		pass.load_action = 2;
+		pass.store_action = 1;
+		cb = hakios_metal_cb_new(q);
+		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, instances, NULL, NULL, 0, NULL, NULL, 0);
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		hakios_metal_cb_commit(cb, NULL, NULL);
+		hakios_metal_cb_wait(cb);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		st = hakios_metal_cb_status(cb);
+		hakios_metal_texture_read(t, 0, h - 1, 64, 1, row, sizeof(row));
+		printf("mali_draw_test: %u full-screen instances at 1080x2340: status %d in %ld ms, the last row 0x%08x: %s\n",
+		    instances, st, (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000), row[0],
+		    st == HAKIOS_METAL_COMPLETED && row[0] == 0xff804020u ? "WORK" : "FAILED");
+		ok = ok && st == HAKIOS_METAL_COMPLETED && row[0] == 0xff804020u;
+		hakios_metal_cb_free(cb);
+		hakios_metal_texture_free(t);
+	}
+	return ok;
+}
+
 int
 main(void)
 {
@@ -493,6 +554,7 @@ main(void)
 	right = levels_and_blits(d, q, flat) && right;
 	right = depth_test(d, q, flat, col) && right;
 	pass_bench(d, q, flat);
+	right = recovery_tests(d, q, flat) && right;
 	/* sustained load, for the GPU's clock governor: 300 draws back to back, the first and last 20 timed */
 	{
 		long first = 0, last = 0;
