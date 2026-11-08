@@ -41,6 +41,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -153,6 +154,20 @@ stall_say(thread_t thread, uint64_t ms)
 		if (dladdr((void *)pcs[i], &info) != 0 && info.dli_fname != NULL) {
 			const char *image = strrchr(info.dli_fname, '/');
 
+			/* a name the shared cache hides ("<redacted>") as the address the cache file has it at -- the pc less its
+			 * image's slide -- for the host to name (`ipsw dyld a2s CACHE ADDR`, sysimage/<build>/dyld_shared_cache_*) */
+			if (info.dli_sname != NULL && strcmp(info.dli_sname, "<redacted>") == 0) {
+				intptr_t slide = 0;
+
+				for (uint32_t k = 0, n = _dyld_image_count(); k < n; k++) {
+					if ((const void *)_dyld_get_image_header(k) == info.dli_fbase) {
+						slide = _dyld_get_image_vmaddr_slide(k);
+						break;
+					}
+				}
+				at += snprintf(line + at, sizeof(line) - at, " c:%#lx", (unsigned long)(pcs[i] - (uintptr_t)slide));
+				continue;
+			}
 			at += info.dli_sname != NULL && pcs[i] - (uintptr_t)info.dli_saddr < 0x4000 ?
 			    snprintf(line + at, sizeof(line) - at, " %s", info.dli_sname) :
 			    snprintf(line + at, sizeof(line) - at, " %s+%#lx", image != NULL ? image + 1 : info.dli_fname, pcs[i] - (uintptr_t)info.dli_fbase);
