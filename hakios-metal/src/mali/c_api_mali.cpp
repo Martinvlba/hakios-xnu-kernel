@@ -835,6 +835,17 @@ samePass(const DrawJob &a, const DrawJob &b)
             return false;
         }
     }
+    // a draw that samples one of the pass's attachments needs what the draws before it left there IN MEMORY: in the
+    // same Mali pass that is still in the tile buffer (the home screen's search label went missing so)
+    for (unsigned t = 0; t < b.texture_count; t++) {
+        const hakios_metal_texture *x = b.textures[t];
+        if (x == nullptr) continue;
+        uint64_t va = x->gpu();
+        if (va == a.target_va) return false;
+        for (unsigned i = 1; i < a.rts; i++) {
+            if (va == a.more[i - 1].va) return false;
+        }
+    }
     return true;
 }
 
