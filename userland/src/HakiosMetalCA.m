@@ -379,6 +379,18 @@ hm_now(void)
 	return (double)mach_absolute_time() * timebase.numer / timebase.denom / 1e9;
 }
 
+/* milliseconds since T0 (mach_absolute_time) */
+static unsigned long long
+hm_ms_since(uint64_t t0)
+{
+	static mach_timebase_info_data_t timebase;
+
+	if (timebase.denom == 0) {
+		mach_timebase_info(&timebase);
+	}
+	return (unsigned long long)((mach_absolute_time() - t0) * timebase.numer / timebase.denom / 1000000);
+}
+
 /* --- the private base classes, by name only ---------------------------------------------------------------- */
 
 /* The designated initialisers are the ones Apple's own driver sends to super (IOGPUMetalCommandQueue,
@@ -1216,6 +1228,8 @@ HM_REFUSES_OUT_LOUD
 - (hakios_metal_program *)hakiosProgram;
 - (void)hakiosSetStandIn:(const char *)why;
 - (const char *)hakiosStandIn;          /* NULL for a real pipeline */
+- (void)hakiosSetProgram:(hakios_metal_program *)program;      /* a background compile's result: no longer a stand-in */
+- (hakios_metal_program *)hakiosTakeProgram;                   /* its program, given up (the state then has none) */
 - (void)hakiosKeepFragment:(NSData *)air constants:(const hakios_metal_constant *)constants count:(unsigned)count;
 - (hakios_metal_program *)hakiosProgramFor:(hakios_metal_buffer *const *)buffers offsets:(const uint64_t *)offsets count:(unsigned)count;
 @end
@@ -3163,6 +3177,42 @@ hm_describe_function(id f)
 }
 
 /*
+ * PIPELINES COMPILED IN THE BACKGROUND (boot-arg metal_defer=0: not): CoreAnimation builds its pipelines at start-up,
+ * synchronously, and its first frame waits for all of them -- fixed_frag_lph_cpf, its uber shader for one effect, takes
+ * some 15 s of the phone's processor for each of the pixel formats it is built for (the Pixel 8a, 11-08: no frame in
+ * the first 80 s). Such a pipeline is answered at once with a stand-in (its draws skipped) and compiled on a thread of
+ * low priority, by this same method with deferral off for that thread; its program is then moved into the stand-in,
+ * which from then on draws.
+ */
+static __thread BOOL hm_no_defer;
+
+static BOOL
+hm_deferred(NSString *fragment)
+{
+	static int off = -1;
+
+	if (off < 0) {
+		char args[1024] = {0};
+		size_t size = sizeof(args) - 1;
+		off = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_defer=0") != NULL;
+	}
+	return !off && !hm_no_defer && fragment != nil && [fragment isEqualToString:@"fixed_frag_lph_cpf"];
+}
+
+static dispatch_queue_t
+hm_compile_queue(void)
+{
+	static dispatch_queue_t q;
+	static dispatch_once_t once;
+
+	dispatch_once(&once, ^{
+		q = dispatch_queue_create("com.hakios.metal.compile", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+		    QOS_CLASS_UTILITY, 0));
+	});
+	return q;
+}
+
+/*
  * The one entry point every form below ends in. The order is: the descriptor's own rules (above), then the compiler
  * (hakios_metal_program_new_bitcode: AIR to NIR to ir3 for both stages, the link, the format against the fragment
  * output's class -- its refusals name the construct), then Metal's base initialiser with a descriptor already known to
@@ -3186,6 +3236,41 @@ hm_describe_function(id f)
 	}
 	vs = [descriptor vertexFunction];
 	fs = [descriptor fragmentFunction];
+	if (fs != nil && hm_deferred([fs name])) {
+		HakiosMetalRenderPipelineState *later = [[HakiosMetalRenderPipelineState alloc] initWithHakiosDevice:self program:NULL
+													  descriptor:descriptor];
+		MTLRenderPipelineDescriptor *copy = [descriptor copy];
+		NSString *name = [[NSString alloc] initWithFormat:@"%@ + %@", [vs name], [fs name]];
+
+		if (later == nil) {
+			[copy release];
+			[name release];
+			return nil;
+		}
+		[later hakiosSetStandIn:"compiling in the background"];
+		[later retain];         /* (the block's: released when it is done) */
+		[self retain];
+		dispatch_async(hm_compile_queue(), ^{
+			NSError *e = nil;
+			uint64_t t0 = mach_absolute_time();
+
+			hm_no_defer = YES;
+			HakiosMetalRenderPipelineState *real = [self newRenderPipelineStateWithDescriptor:copy error:&e];
+			hm_no_defer = NO;
+			if (real != nil && [real hakiosStandIn] == NULL) {
+				[later hakiosSetProgram:[real hakiosTakeProgram]];
+				hm_print("compiled in the background: %s, in %llu ms\n", [name UTF8String], hm_ms_since(t0));
+			} else {
+				[later hakiosSetStandIn:real != nil ? [real hakiosStandIn] : "refused in the background"];
+			}
+			[real release];
+			[copy release];
+			[name release];
+			[later release];
+			[self release];
+		});
+		return later;
+	}
 	if (![vs respondsToSelector:bitcode] || (fs != nil && ![fs respondsToSelector:bitcode])) {
 		return [self hakiosRefuse:error what:"a render pipeline"
 				      why:@"a function does not answer bitcodeData, so its AIR cannot be read (not an _MTLFunction of this Metal?)"];
@@ -7406,7 +7491,18 @@ HM_REFUSES_OUT_LOUD
 
 - (hakios_metal_program *)hakiosProgram { return _program; }
 - (void)hakiosSetStandIn:(const char *)why { snprintf(_standIn, sizeof(_standIn), "%s", why != NULL && *why ? why : "refused"); }
-- (const char *)hakiosStandIn { return _standIn[0] != '\0' ? _standIn : NULL; }
+- (const char *)hakiosStandIn { return __atomic_load_n(&_standIn[0], __ATOMIC_ACQUIRE) != '\0' ? _standIn : NULL; }
+- (void)hakiosSetProgram:(hakios_metal_program *)program
+{
+	_program = program;
+	__atomic_store_n(&_standIn[0], '\0', __ATOMIC_RELEASE);  /* (the program first: a draw that sees no stand-in sees it) */
+}
+- (hakios_metal_program *)hakiosTakeProgram
+{
+	hakios_metal_program *p = _program;
+	_program = NULL;
+	return p;
+}
 
 /* boot-arg metal_nospec: every draw with the pipeline's own program, no uber shader specialised */
 static BOOL

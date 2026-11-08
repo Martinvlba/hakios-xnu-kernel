@@ -1167,11 +1167,10 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
       nir_def *i = air_get_ssa(c, in->operands[2]);
       if (!v || !x || !i)
          return false;
-      if (!nir_src_is_const(nir_src_for_ssa(i)))
-         return air_error(c, "instruction: insertelement at a run-time index");
-      air_set(c, &in->base,
-              air_val_ssa(c, nir_vector_insert_imm(&c->b, v, x,
-                                                   nir_src_as_uint(nir_src_for_ssa(i)))));
+      /* (from upstream's tools/mesa/air) an index decided while the shader runs: nir_vector_insert builds
+       * bcsel(i == {0,1,2,3}, scalar, vec), and takes the constant path for a constant index. An index past the
+       * vector leaves it unchanged, a refinement of LLVM's poison. fixed_frag_lph_cpf reaches it. */
+      air_set(c, &in->base, air_val_ssa(c, nir_vector_insert(&c->b, v, x, nir_u2u32(&c->b, i))));
       return true;
    }
    case AIR_OP_SHUFFLEVEC: {
@@ -1440,6 +1439,15 @@ static void materialise_globals(struct air_ctx *c);
  * phis are all keyed on this function's own objects, and leaving the caller's
  * entries in place would let a callee resolve a value it cannot see.
  */
+/* (from upstream's tools/mesa/air, ptr_offset_to_pass) a pointer argument whose byte offset is computed at run time:
+ * the pointer is bound from the caller's resolution as any, its offset passed as a parameter of its own, after the
+ * ordinary ones -- the callee reads it with load_param, so no def of the caller's is used in the callee */
+static bool
+offset_passed(const struct air_val *v)
+{
+   return v && v->kind == AIR_VAL_PTR && v->ptr.offset && !nir_src_is_const(nir_src_for_ssa(v->ptr.offset));
+}
+
 static nir_function *
 translate_callee(struct air_ctx *c, const struct air_function *f,
                  struct air_val **argv, bool *is_param)
@@ -1458,11 +1466,8 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    bool specialised = false;
    for (unsigned i = 0; i < f->num_args; i++) {
       bool ptr = argv && argv[i] && argv[i]->kind == AIR_VAL_PTR;
-      if (ptr && argv[i]->ptr.offset) {
-         air_error(c, "intrinsic: a call passing a pointer at a computed offset as "
-                      "argument %u, which would use the caller's own value here", i);
-         return NULL;
-      }
+      /* (from upstream's tools/mesa/air, rebind_here) a CONSTANT byte offset is rebuilt in the callee's own builder
+       * when the argument is bound below; one computed at run time is passed as a parameter (offset_passed) */
       is_param[i] = !ptr;
       specialised |= ptr;
    }
@@ -1479,7 +1484,7 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
 
    const struct air_type *rt = f->fn_type->elem;   /* FUNCTION: the return type */
    bool has_ret = rt && rt->kind != AIR_TYPE_VOID;
-   unsigned nparams = f->num_args + (has_ret ? 1 : 0);
+   unsigned nparams = 2 * f->num_args + (has_ret ? 1 : 0);   /* (at most: an offset parameter for each argument) */
    nir_function *fn = nir_function_create(c->nir, f->base.name ? f->base.name : "callee");
    fn->num_params = nparams;
    fn->params = rzalloc_array(c->nir, nir_parameter, MAX2(nparams, 1));
@@ -1508,7 +1513,15 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
          .bit_size = (uint8_t)air_nir_bit_size(c, at),
       };
    }
-   fn->num_params = idx;   /* the pointers took no parameter */
+   for (unsigned i = 0; i < f->num_args; i++) {
+      if (!is_param[i] && offset_passed(argv[i])) {
+         fn->params[idx++] = (nir_parameter){
+            .num_components = 1,
+            .bit_size = (uint8_t)argv[i]->ptr.offset->bit_size,
+         };
+      }
+   }
+   fn->num_params = idx;   /* the pointers took no parameter (their run-time offsets one each) */
 
    /* cached before the body is translated, so that a callee which calls itself
     * meets its own declaration rather than being translated for ever */
@@ -1552,10 +1565,26 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    unsigned pidx = has_ret ? 1 : 0;
    for (unsigned i = 0; i < f->num_args && ok; i++) {
       if (!is_param[i]) {
-         air_set(c, &f->args[i], argv[i]);   /* the caller's own resolution */
+         struct air_val *v = argv[i];
+         if (offset_passed(v))
+            continue;                   /* bound after the ordinary parameters, below */
+         if (v->kind == AIR_VAL_PTR && v->ptr.offset) {
+            /* the constant offset as a def of this function's impl (the caller's is not usable here) */
+            struct air_ptr p = v->ptr;
+            p.offset = nir_imm_int(&c->b, (int)nir_src_as_uint(nir_src_for_ssa(v->ptr.offset)));
+            v = air_val_ptr(c, p);
+         }
+         air_set(c, &f->args[i], v);   /* the caller's own resolution */
          continue;
       }
       air_set(c, &f->args[i], air_val_ssa(c, nir_load_param(&c->b, pidx++)));
+   }
+   for (unsigned i = 0; i < f->num_args && ok; i++) {
+      if (!is_param[i] && offset_passed(argv[i])) {
+         struct air_ptr p = argv[i]->ptr;
+         p.offset = nir_load_param(&c->b, pidx++);
+         air_set(c, &f->args[i], air_val_ptr(c, p));
+      }
    }
    if (ok)
       ok = translate_body(c);
@@ -1637,6 +1666,10 @@ air_call_in_module(struct air_ctx *c, const struct air_inst *in, const char *nam
          return air_error(c, "intrinsic: argument %u of %s is not a value this can pass",
                           i, name);
       call->params[idx++] = nir_src_for_ssa(a);
+   }
+   for (unsigned i = 0; i < f->num_args; i++) {
+      if (!is_param[i] && offset_passed(argv[i]))
+         call->params[idx++] = nir_src_for_ssa(argv[i]->ptr.offset);
    }
    nir_builder_instr_insert(&c->b, &call->instr);
 
