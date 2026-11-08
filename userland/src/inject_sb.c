@@ -88,6 +88,22 @@ say(const char *format, ...)
 static uint64_t main_woke, commit_began;
 static volatile uint64_t turn_began;    /* mach_absolute_time at the start of the turn; 0 between turns (stall_watch()) */
 static uintptr_t main_stack_top, main_stack_bottom;
+/* the main thread's processor time (user, system: microseconds) when its turn began: a stall's line says how much of
+ * the turn the thread ran -- all of it (slow work), mostly in the kernel (faults, I/O), or little (waiting for a core) */
+static volatile uint64_t turn_user_us, turn_system_us;
+
+static void
+thread_times(thread_t thread, uint64_t *user_us, uint64_t *system_us)
+{
+	thread_basic_info_data_t info;
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+
+	*user_us = *system_us = 0;
+	if (thread_info(thread, THREAD_BASIC_INFO, (thread_info_t)&info, &count) == KERN_SUCCESS) {
+		*user_us = (uint64_t)info.user_time.seconds * 1000000 + (uint64_t)info.user_time.microseconds;
+		*system_us = (uint64_t)info.system_time.seconds * 1000000 + (uint64_t)info.system_time.microseconds;
+	}
+}
 static mach_timebase_info_data_t timebase;
 
 static uint64_t
@@ -100,6 +116,13 @@ static void
 main_loop_turn(__unused CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *info)
 {
 	if (activity == kCFRunLoopAfterWaiting) {
+		uint64_t u, sy;
+		mach_port_t self = mach_thread_self();
+
+		thread_times(self, &u, &sy);
+		mach_port_deallocate(mach_task_self(), self);
+		turn_user_us = u;
+		turn_system_us = sy;
 		main_woke = now_us();
 		turn_began = mach_absolute_time();
 	} else if (activity == kCFRunLoopBeforeWaiting && info == NULL) {
@@ -148,6 +171,13 @@ stall_say(thread_t thread, uint64_t ms)
 	}
 	thread_resume(thread);
 	at = snprintf(line, sizeof(line), "tl: t %llu", ms);
+	{
+		uint64_t u, sy;
+
+		thread_times(thread, &u, &sy);
+		/* (the thread's processor time in the turn so far: "cpu USER+SYSTEM" milliseconds, before the frames) */
+		at += snprintf(line + at, sizeof(line) - at, " cpu:%llu+%llu", (u - turn_user_us) / 1000, (sy - turn_system_us) / 1000);
+	}
 	for (unsigned i = 0; i < depth && at < (int)sizeof(line) - 96; i++) {
 		Dl_info info;
 

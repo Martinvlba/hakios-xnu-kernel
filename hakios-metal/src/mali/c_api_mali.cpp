@@ -25,6 +25,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <sys/sysctl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <dlfcn.h>
+#include <mach-o/loader.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -2007,6 +2011,190 @@ hakios_metal_cb_dispatch_threads2(hakios_metal_cb *cb, hakios_metal_kernel *k, c
 
 // ---- programs and draws ----
 
+// ---- the compiled programs kept on disk ----
+//
+// A program compiled once is not compiled again at the next start: CoreAnimation builds its pipelines at every start,
+// and its uber shaders take 14 to 27 s of the phone's processor each (fixed_frag_lph_cpf, for every pixel format) --
+// minutes of a busy, warming phone at every boot. Both stages are kept in a file of their own under
+// /private/var/mobile/Library/Caches/com.hakios.metal-mali, named for a hash of what decides them: both stages'
+// bitcode and constants, the colour format, the vertex descriptor's fetch (when it is compiled with one) and this
+// library's own image UUID -- a rebuilt compiler or front end is another image, and another name. Written to a
+// temporary file and renamed, so a file is whole or absent. Boot-arg metal_cache=0: not kept, not read.
+namespace {
+constexpr char kCacheMagic[8] = { 'H', 'K', 'M', 'A', 'L', 'I', '0', '1' };
+
+bool
+cacheOn()
+{
+    static int on = -1;
+    if (on < 0) {
+        char args[1024] = {};
+        size_t n = sizeof(args) - 1;
+        on = !(sysctlbyname("kern.bootargs", args, &n, nullptr, 0) == 0 && strstr(args, "metal_cache=0") != nullptr);
+    }
+    return on != 0;
+}
+
+const std::string &
+cacheDir()
+{
+    static std::string dir;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const char *tries[] = { "/private/var/mobile/Library/Caches/com.hakios.metal-mali", "/private/var/tmp/com.hakios.metal-mali" };
+        for (const char *t : tries) {
+            mkdir(t, 0755);
+            struct stat st;
+            if (stat(t, &st) == 0 && S_ISDIR(st.st_mode) && access(t, W_OK) == 0) {
+                dir = t;
+                break;
+            }
+        }
+    });
+    return dir;
+}
+
+void
+fnv(uint64_t &h, const void *data, size_t n)
+{
+    auto *b = (const uint8_t *)data;
+    for (size_t i = 0; i < n; i++) {
+        h = (h ^ b[i]) * 1099511628211ULL;
+    }
+}
+
+// this library's image UUID (LC_UUID): another build, another key
+void
+fnvImage(uint64_t &h)
+{
+    static uint8_t uuid[16];
+    static bool have = false;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        Dl_info info;
+        if (dladdr((const void *)&fnvImage, &info) == 0 || info.dli_fbase == nullptr) {
+            return;
+        }
+        auto *mh = (const struct mach_header_64 *)info.dli_fbase;
+        auto *lc = (const struct load_command *)(mh + 1);
+        for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize)) {
+            if (lc->cmd == LC_UUID) {
+                memcpy(uuid, ((const struct uuid_command *)lc)->uuid, 16);
+                have = true;
+                break;
+            }
+        }
+    });
+    if (have) {
+        fnv(h, uuid, 16);
+    }
+}
+
+uint64_t
+cacheKey(const void *vs, size_t vs_size, const std::vector<mali_constant> &vc, const void *fs, size_t fs_size,
+    const std::vector<mali_constant> &fc, unsigned format, const mali_vertex_fetch *fetch)
+{
+    uint64_t h = 14695981039346656037ULL;
+    fnv(h, kCacheMagic, sizeof(kCacheMagic));
+    fnvImage(h);
+    fnv(h, &vs_size, sizeof(vs_size));
+    fnv(h, vs, vs_size);
+    for (const mali_constant &k : vc) fnv(h, &k, sizeof(k));
+    fnv(h, &fs_size, sizeof(fs_size));
+    fnv(h, fs, fs_size);
+    for (const mali_constant &k : fc) fnv(h, &k, sizeof(k));
+    fnv(h, &format, sizeof(format));
+    if (fetch != nullptr) fnv(h, fetch, sizeof(*fetch));
+    return h;
+}
+
+std::string
+cachePath(uint64_t key)
+{
+    char name[32];
+    snprintf(name, sizeof(name), "/%016llx.prog", (unsigned long long)key);
+    return cacheDir() + name;
+}
+
+bool
+writeAll(int fd, const void *p, size_t n)
+{
+    auto *b = (const uint8_t *)p;
+    while (n != 0) {
+        ssize_t w = write(fd, b, n);
+        if (w <= 0) return false;
+        b += w;
+        n -= (size_t)w;
+    }
+    return true;
+}
+
+bool
+readAll(int fd, void *p, size_t n)
+{
+    auto *b = (uint8_t *)p;
+    while (n != 0) {
+        ssize_t r = read(fd, b, n);
+        if (r <= 0) return false;
+        b += r;
+        n -= (size_t)r;
+    }
+    return true;
+}
+
+// both stages from the file KEY names; false (and nothing left allocated) when there is none or it is not whole
+bool
+cacheLoad(uint64_t key, mali_kernel_binary *vs, mali_kernel_binary *fs)
+{
+    if (!cacheOn() || cacheDir().empty()) return false;
+    int fd = open(cachePath(key).c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    char magic[8];
+    uint64_t k = 0;
+    uint32_t struct_size = 0;
+    bool ok = readAll(fd, magic, 8) && memcmp(magic, kCacheMagic, 8) == 0 && readAll(fd, &k, 8) && k == key &&
+        readAll(fd, &struct_size, 4) && struct_size == sizeof(mali_kernel_binary);
+    mali_kernel_binary *b[2] = { vs, fs };
+    for (int i = 0; i < 2 && ok; i++) {
+        ok = readAll(fd, b[i], sizeof(mali_kernel_binary));
+        b[i]->code = nullptr;
+        b[i]->varyings = nullptr;               // (the layout a fragment stage is compiled against: not kept)
+        if (ok && (b[i]->size == 0 || b[i]->size > (16u << 20))) ok = false;
+        if (ok) {
+            b[i]->code = malloc(b[i]->size);
+            ok = b[i]->code != nullptr && readAll(fd, b[i]->code, b[i]->size);
+        }
+    }
+    close(fd);
+    if (!ok) {
+        free(vs->code);
+        free(fs->code);
+        memset(vs, 0, sizeof(*vs));
+        memset(fs, 0, sizeof(*fs));
+    }
+    return ok;
+}
+
+void
+cacheStore(uint64_t key, const mali_kernel_binary &vs, const mali_kernel_binary &fs)
+{
+    if (!cacheOn() || cacheDir().empty()) return;
+    std::string path = cachePath(key), tmp = path + "." + std::to_string(getpid()) + ".tmp";
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    uint32_t struct_size = sizeof(mali_kernel_binary);
+    bool ok = writeAll(fd, kCacheMagic, 8) && writeAll(fd, &key, 8) && writeAll(fd, &struct_size, 4);
+    const mali_kernel_binary *b[2] = { &vs, &fs };
+    for (int i = 0; i < 2 && ok; i++) {
+        ok = writeAll(fd, b[i], sizeof(mali_kernel_binary)) && writeAll(fd, b[i]->code, b[i]->size);
+    }
+    close(fd);
+    if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
+        unlink(tmp.c_str());
+    }
+}
+}  // namespace
+
 hakios_metal_program *
 hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_size, const hakios_metal_constant *vs_constants,
     unsigned vs_count, const void *fs_bitcode, size_t fs_size, const hakios_metal_constant *fs_constants, unsigned fs_count,
@@ -2026,11 +2214,15 @@ hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_siz
         fc[i] = { fs_constants[i].index, fs_constants[i].bits };
     }
     auto *p = new hakios_metal_program;
-    if (mali_stage_compile(vs_bitcode, vs_size, vc.data(), vs_count, 0, nullptr, &p->vs, why, sizeof(why)) != 0 ||
-        mali_stage_compile(fs_bitcode, fs_size, fc.data(), fs_count, 1, &p->vs, &p->fs, why, sizeof(why)) != 0) {
-        fail("%s", why);
-        p->release();
-        return nullptr;
+    uint64_t key = cacheKey(vs_bitcode, vs_size, vc, fs_bitcode, fs_size, fc, color_pixel_format, nullptr);
+    if (!cacheLoad(key, &p->vs, &p->fs)) {
+        if (mali_stage_compile(vs_bitcode, vs_size, vc.data(), vs_count, 0, nullptr, &p->vs, why, sizeof(why)) != 0 ||
+            mali_stage_compile(fs_bitcode, fs_size, fc.data(), fs_count, 1, &p->vs, &p->fs, why, sizeof(why)) != 0) {
+            fail("%s", why);
+            p->release();
+            return nullptr;
+        }
+        cacheStore(key, p->vs, p->fs);
     }
     p->color_format = color_pixel_format;
     snprintf(p->name, sizeof(p->name), "%s+%s", p->vs.name, p->fs.name);
@@ -2131,14 +2323,19 @@ compileFetch(hakios_metal_program *p)
     }
     mali_kernel_binary vs = {}, fs = {};
     char why[512] = "";
-    if (mali_vertex_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(),
-                            &p->fetch, &vs, why, sizeof(why)) != 0 ||
-        mali_stage_compile(p->fs_bitcode.data(), p->fs_bitcode.size(), p->fs_constants.data(), p->fs_constants.size(), 1,
-                           &vs, &fs, why, sizeof(why)) != 0) {
-        mali_kernel_binary_free(&vs);
-        mali_kernel_binary_free(&fs);
-        p->fetch_refusal = std::string("the vertex descriptor: ") + why;
-        return false;
+    uint64_t key = cacheKey(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants, p->fs_bitcode.data(),
+                            p->fs_bitcode.size(), p->fs_constants, p->color_format, &p->fetch);
+    if (!cacheLoad(key, &vs, &fs)) {
+        if (mali_vertex_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(),
+                                &p->fetch, &vs, why, sizeof(why)) != 0 ||
+            mali_stage_compile(p->fs_bitcode.data(), p->fs_bitcode.size(), p->fs_constants.data(), p->fs_constants.size(), 1,
+                               &vs, &fs, why, sizeof(why)) != 0) {
+            mali_kernel_binary_free(&vs);
+            mali_kernel_binary_free(&fs);
+            p->fetch_refusal = std::string("the vertex descriptor: ") + why;
+            return false;
+        }
+        cacheStore(key, vs, fs);
     }
     mali_kernel_binary_free(&p->vs);
     mali_kernel_binary_free(&p->fs);
