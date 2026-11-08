@@ -995,8 +995,11 @@ translate_cast(struct air_ctx *c, const struct air_inst *in)
       res = x->bit_size == 1 ? nir_ineg(&c->b, nir_b2iN(&c->b, x, bits))
                              : nir_i2iN(&c->b, x, bits);
       break;
-   case AIR_CAST_FPTOUI: res = nir_f2uN(&c->b, x, bits); break;
-   case AIR_CAST_FPTOSI: res = nir_f2iN(&c->b, x, bits); break;
+   /* to i1: NIR's f2u1/f2i1 have no instruction on the Mali ("Unhandled ALU op f2u1": bi_emit_alu trapped, and the
+    * window server died with it); the only results in range are 0 and 1 (-1 for a signed i1), so the value is
+    * x != 0 -- out-of-range inputs are poison in LLVM, any answer refines them */
+   case AIR_CAST_FPTOUI: res = bits == 1 ? nir_fneu_imm(&c->b, x, 0.0) : nir_f2uN(&c->b, x, bits); break;
+   case AIR_CAST_FPTOSI: res = bits == 1 ? nir_fneu_imm(&c->b, x, 0.0) : nir_f2iN(&c->b, x, bits); break;
    case AIR_CAST_UITOFP:
       res = x->bit_size == 1 ? nir_b2fN(&c->b, x, bits) : nir_u2fN(&c->b, x, bits);
       break;

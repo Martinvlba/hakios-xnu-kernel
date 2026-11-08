@@ -208,16 +208,22 @@ stall_say(thread_t thread, uint64_t ms)
 	say("%s\n", line);
 }
 
+static void count_say(void);
+
 static void *
 stall_watch(void *argument)
 {
 	thread_t main_thread = (thread_t)(uintptr_t)argument;
-	uint64_t said_turn = 0, next_ms = 25;
+	uint64_t said_turn = 0, next_ms = 25, counted_at = 0;
 
 	for (;;) {
 		uint64_t began = turn_began;
 
 		usleep(10000);
+		if (now_us() - counted_at >= 1000000) {
+			counted_at = now_us();
+			count_say();
+		}
 		if (began == 0 || began != turn_began) {
 			continue;
 		}
@@ -235,6 +241,138 @@ stall_watch(void *argument)
 	return NULL;
 }
 
+/*
+ * What SpringBoard redoes while a finger moves (touch_lat=1): how often the icon labels' legibility images, the icons
+ * and the hosted scenes' layers are set, and whether what they were given had changed. Counting wrappers only -- each
+ * calls the original -- put in where the method's type encoding is the one the wrapper is written for (otherwise its
+ * encoding is said and it is left alone). "tl: n ..." once a second in which any was called.
+ */
+static uint32_t n_label_area, n_set_icon, n_same_icon, n_legibility, n_same_settings, n_same_image, n_layers, n_same_layers,
+    n_rebuild;
+static char rebuild_reasons[8][48];
+static uint32_t rebuild_counts[8];
+static const void *key_settings = &key_settings, *key_image = &key_image, *key_layers = &key_layers;
+
+static void (*orig_label_area)(id, SEL);
+static void (*orig_set_icon)(id, SEL, id, BOOL);
+static void (*orig_legibility)(id, SEL, id, long, id, double);
+static void (*orig_set_layers)(id, SEL, id);
+static void (*orig_rebuild)(id, SEL, id, id);
+
+static BOOL
+same_as(id a, id b)
+{
+	return a == b || (a != nil && b != nil && ((BOOL (*)(id, SEL, id))objc_msgSend)(a, sel_registerName("isEqual:"), b));
+}
+
+static void
+count_label_area(id self, SEL cmd)
+{
+	n_label_area++;
+	orig_label_area(self, cmd);
+}
+
+static void
+count_set_icon(id self, SEL cmd, id icon, BOOL animated)
+{
+	n_set_icon++;
+	n_same_icon += ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("icon")) == icon;
+	orig_set_icon(self, cmd, icon, animated);
+}
+
+static void
+count_legibility(id self, SEL cmd, id settings, long options, id image, double strength)
+{
+	n_legibility++;
+	n_same_settings += same_as(objc_getAssociatedObject(self, key_settings), settings);
+	n_same_image += objc_getAssociatedObject(self, key_image) == image;
+	objc_setAssociatedObject(self, key_settings, settings, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, key_image, image, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	orig_legibility(self, cmd, settings, options, image, strength);
+}
+
+static void
+count_set_layers(id self, SEL cmd, id layers)
+{
+	n_layers++;
+	n_same_layers += same_as(objc_getAssociatedObject(self, key_layers), layers);
+	objc_setAssociatedObject(self, key_layers, layers, OBJC_ASSOCIATION_COPY_NONATOMIC);
+	orig_set_layers(self, cmd, layers);
+}
+
+static void
+count_rebuild(id self, SEL cmd, id reason, id fence)
+{
+	char text[48] = "?";
+	id d = reason != nil ? ((id (*)(id, SEL))objc_msgSend)(reason, sel_registerName("description")) : nil;
+	const char *u = d != nil ? ((const char *(*)(id, SEL))objc_msgSend)(d, sel_registerName("UTF8String")) : NULL;
+
+	n_rebuild++;
+	if (u != NULL) {
+		snprintf(text, sizeof(text), "%s", u);
+	}
+	for (int i = 0; i < 8; i++) {
+		if (rebuild_reasons[i][0] == 0 || strcmp(rebuild_reasons[i], text) == 0) {
+			if (rebuild_reasons[i][0] == 0) {
+				strcpy(rebuild_reasons[i], text);
+			}
+			rebuild_counts[i]++;
+			break;
+		}
+	}
+	orig_rebuild(self, cmd, reason, fence);
+}
+
+/* -[CLASS SELECTOR] wrapped by REPLACEMENT when its type encoding is ENCODING; the original, or NULL */
+static IMP
+count_hook(const char *class_name, const char *selector, const char *encoding, IMP replacement)
+{
+	Class cls = objc_getClass(class_name);
+	Method method = cls != NULL ? class_getInstanceMethod(cls, sel_registerName(selector)) : NULL;
+	const char *types = method != NULL ? method_getTypeEncoding(method) : NULL;
+
+	if (types == NULL || strcmp(types, encoding) != 0) {
+		say("hakios: count: -[%s %s]: %s%s, not %s; not counted\n", class_name, selector, types ? "encoding " : "not found",
+		    types ? types : "", encoding);
+		return NULL;
+	}
+	return method_setImplementation(method, replacement);
+}
+
+static void
+count_hooks(void)
+{
+	orig_label_area = (void (*)(id, SEL))count_hook("SBIconView", "_updateLabelArea", "v16@0:8", (IMP)count_label_area);
+	orig_set_icon = (void (*)(id, SEL, id, BOOL))count_hook("SBIconView", "setIcon:animated:", "v28@0:8@16B24",
+	    (IMP)count_set_icon);
+	orig_legibility = (void (*)(id, SEL, id, long, id, double))count_hook("SBUILegibilityView",
+	    "updateForChangedSettings:options:image:strength:", "v48@0:8@16q24@32d40", (IMP)count_legibility);
+	orig_set_layers = (void (*)(id, SEL, id))count_hook("FBSceneLayerManager", "_setLayers:", "v24@0:8@16", (IMP)count_set_layers);
+	orig_rebuild = (void (*)(id, SEL, id, id))count_hook("_UISceneLayerHostContainerView", "_rebuildLayersForReason:withFence:",
+	    "v32@0:8@16@24", (IMP)count_rebuild);
+}
+
+/* the second's counts (stall_watch's thread, once a second) */
+static void
+count_say(void)
+{
+	char reasons[400] = "";
+	int at = 0;
+
+	if (n_label_area + n_set_icon + n_legibility + n_layers + n_rebuild == 0) {
+		return;
+	}
+	for (int i = 0; i < 8 && rebuild_reasons[i][0]; i++) {
+		at += snprintf(reasons + at, sizeof(reasons) - at, " [%s]=%u", rebuild_reasons[i], rebuild_counts[i]);
+		rebuild_counts[i] = 0;
+	}
+	say("tl: n labelArea=%u setIcon=%u(same %u) legibility=%u(same settings %u, same image %u) setLayers=%u(same %u) "
+	    "rebuild=%u%s\n", n_label_area, n_set_icon, n_same_icon, n_legibility, n_same_settings, n_same_image, n_layers,
+	    n_same_layers, n_rebuild, reasons);
+	n_label_area = n_set_icon = n_same_icon = n_legibility = n_same_settings = n_same_image = n_layers = n_same_layers = 0;
+	n_rebuild = 0;
+}
+
 static void
 watch_main_loop(void)
 {
@@ -247,6 +385,7 @@ watch_main_loop(void)
 		return;
 	}
 	mach_timebase_info(&timebase);
+	count_hooks();
 	{
 		pthread_t watcher;
 
