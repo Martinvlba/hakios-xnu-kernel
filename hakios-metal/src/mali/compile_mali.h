@@ -95,10 +95,20 @@ int mali_vertex_compile(const void *bitcode, size_t size, const struct mali_cons
 /* a vertex function (FRAGMENT 0), or a fragment function (FRAGMENT 1) against VERTEX's varyings; as mali_kernel_compile */
 int mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, int fragment,
     const struct mali_kernel_binary *vertex, struct mali_kernel_binary *out, char *error, size_t error_size);
+/* a fragment function with the blend of the targets in BLEND->MASK done in the shader (Metal's numbers: MTLBlendOperation,
+ * MTLBlendFactor, MTLColorWriteMask), from the tile buffer's pixel (framebuffer fetch); otherwise mali_stage_compile's */
+struct mali_blend_rt { unsigned rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask; };
+struct mali_shader_blend { unsigned mask; struct mali_blend_rt rt[4]; };
+int mali_fragment_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
+    const struct mali_kernel_binary *vertex, const struct mali_shader_blend *blend, struct mali_kernel_binary *out, char *error,
+    size_t error_size);
 /* the driver's preload draw (compile_mali.c): a triangle over the target, colour attachment n texture n's texel, for
  * TARGETS (1 to 4) attachments */
 int mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, char *error,
     size_t error_size);
+/* the driver's blit draw: texture 0 through sampler 0 at (x w0 + y w1 + w2, x w3 + y w4 + w5), normalized, of the
+ * fragment's position (x, y) */
+int mali_blit_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size);
 void mali_kernel_binary_free(struct mali_kernel_binary *binary);
 
 #ifdef __cplusplus

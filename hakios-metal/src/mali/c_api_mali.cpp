@@ -133,6 +133,8 @@ struct hakios_metal_device {
     struct hakios_metal_program *preload_for[4] = {};  // the Load action's draw for 1 to 4 targets (preloadProgram)
     bool preload_failed_for[4] = {};
     std::mutex preload_lock;
+    struct hakios_metal_program *blit_prog = nullptr;  // the driver's blit draw (blitProgram), under preload_lock
+    bool blit_failed = false;
     // where a colour output with no attachment goes (DrawJob::More::missing): the GPU writes such a target back even
     // with its write disabled -- at address 0 it faulted (AS1, a write at 0x80200) and the queue stopped
     Bo scratch_rt;
@@ -370,6 +372,9 @@ struct hakios_metal_program {
     std::vector<mali_constant> vs_constants, fs_constants;
     mali_vertex_fetch fetch = {};
     bool fetch_described = false, fetch_compiled = false;
+    // the targets whose blend fixed function cannot do, blended in the fragment shader instead (compileFetch compiles it
+    // again with mali_fragment_compile; their equation is a replace that reads the tile buffer)
+    mali_shader_blend shader_blend = {};
     std::string fetch_refusal;
     bool blend_reads_dest = false;
     std::string blend_refusal;
@@ -434,11 +439,21 @@ struct hakios_metal_texture {
     hakios_metal_device *device;
     Bo bo;                                      // the memory (its own, an IOSurface's, a buffer's or a parent's)
     unsigned type, format, width, height, depth, usage;
-    uint32_t mali_format, bytes, stride;        // per texel; per row (64-byte aligned for its own)
+    uint32_t mali_format, bytes, stride;        // per texel (a compressed format's: per block); per row (of blocks;
+                                                //  64-byte aligned for its own)
+    unsigned bw = 1, bh = 1;                    // a compressed format's block (ASTC), in texels
+    uint64_t stencil_off = 0;                   // Depth32Float_Stencil8: the stencil plane (a byte a texel) at offset +
+    uint32_t stencil_stride = 0;                //  stencil_off, rows stencil_stride apart (0: none)
     uint64_t offset = 0;                        // where its pixels start in BO
     unsigned origin = 0;                        // 0 its own memory, 1 an IOSurface's, 2 a buffer's, 4 a view's
     unsigned surface = 0;                       // the IOSurface's ID (origin 1)
     unsigned levels = 1, samples = 1;
+    // a mipmapped texture (levels > 1): level n's rows at offset + level_off[n], level_stride[n] apart, its size
+    // levelWidth/levelHeight; the levels' plane descriptors (32 bytes each, level 0 first) at planes_off in BO, written
+    // once when the texture is made (a view of levels n.. points at the parent's, 32 * n further on)
+    uint64_t level_off[16] = {};
+    uint32_t level_stride[16] = {};
+    uint64_t planes_off = 0;                    // 0: none (one level, described per use)
     uint32_t swizzle = 0;                       // 0: the identity
     hakios_metal_texture *parent = nullptr;     // a view's (held)
     hakios_metal_buffer *buffer = nullptr;      // a buffer texture's (held)
@@ -448,6 +463,16 @@ struct hakios_metal_texture {
     void release();
     uint8_t *pixels() const { return (uint8_t *)bo.cpu + offset; }
     uint64_t gpu() const { return bo.va + offset; }
+    unsigned levelWidth(unsigned l) const { return width >> l ? width >> l : 1; }
+    unsigned levelHeight(unsigned l) const { return type == 0 ? 1 : height >> l ? height >> l : 1; }
+    uint32_t levelStride(unsigned l) const { return l == 0 ? stride : level_stride[l]; }
+    unsigned levelRows(unsigned l) const { return (levelHeight(l) + bh - 1) / bh; }    // rows of blocks
+    uint64_t levelOffset(unsigned l) const { return l == 0 ? 0 : level_off[l]; }
+    // the bytes from gpu() that its pixels (every level, every slice) span
+    uint64_t span() const {
+        if (levels > 1) return level_off[levels - 1] + (uint64_t)level_stride[levels - 1] * levelRows(levels - 1);
+        return (uint64_t)stride * levelRows(0) * depth;
+    }
 };
 
 struct hakios_metal_sampler {
@@ -475,7 +500,7 @@ hakios_metal_texture::release()
 }
 
 namespace {
-struct MaliFormat { unsigned metal; uint32_t mali; uint32_t bytes; };
+struct MaliFormat { unsigned metal; uint32_t mali; uint32_t bytes; unsigned bw = 1, bh = 1; };  // (bytes: a block's)
 const MaliFormat kFormats[] = {
     { 1, 163u << 12 | 16, 1 },                  // A8Unorm: R8's, the texture's swizzle 000R (alphaSwizzle below)
     { 10, 163u << 12 | 16, 1 },                 // R8Unorm (R001 -> RGB1)
@@ -492,31 +517,101 @@ const MaliFormat kFormats[] = {
     { 115, 223u << 12 | 0, 8 },                 // RGBA16Float
     { 123, 157u << 12 | 0, 16 },                // RGBA32Uint
     { 125, 191u << 12 | 0, 16 },                // RGBA32Float
+    // packed 16-bit and 32-bit formats (Metal names the components from the low bits, as gallium does: Mesa's
+    // pan_format.c entry for the gallium format of the same name)
+    { 40, 64u << 12 | 20, 2 },                  // B5G6R5Unorm: RGB565, BGR1
+    { 42, 186u << 12 | 12, 2 },                 // ABGR4Unorm: RGBA4_UNORM, ABGR
+    { 43, 65u << 12 | 4, 2 },                   // BGR5A1Unorm: RGB5_A1_UNORM, BGRA
+    { 20, 164u << 12 | 16, 2 },                 // R16Unorm
+    { 60, 172u << 12 | 16, 4 },                 // RG16Unorm
+    { 65, 207u << 12 | 16, 4 },                 // RG16Float
+    { 72, 123u << 12 | 0, 4 },                  // RGBA8Snorm
+    { 90, 67u << 12 | 0, 4 },                   // RGB10A2Unorm
+    { 94, 67u << 12 | 4, 4 },                   // BGR10A2Unorm
+    { 92, 89u << 12 | 16, 4 },                  // RG11B10Float
+    { 93, 91u << 12 | 16, 4 },                  // RGB9E5Float
+    { 110, 188u << 12 | 0, 8 },                 // RGBA16Unorm
+    // depth and stencil (render pass attachments; sampled as the plain format of their size): Depth16Unorm,
+    // Depth32Float, Stencil8, Depth32Float_Stencil8 (its depth plane; the stencil plane after it, stencil_off)
+    { 250, 164u << 12 | 16, 2 },
+    { 252, 167u << 12 | 16, 4 },
+    { 253, 163u << 12 | 16, 1 },
+    { 260, 167u << 12 | 16, 4 },
+    // ASTC, LDR (Metal 204..217) and sRGB (186..199), 16 bytes a block: on Valhall the format is the one it decodes to
+    // (RGBA16F; sRGB RGBA8), the block size in the plane descriptor ("ASTC 2D Plane", describe())
+#define ASTC(n, w, h) { 204 + n, 223u << 12 | 0, 16, w, h }, { 186 + n, 187u << 12 | 0 | 1u << 20, 16, w, h }
+    ASTC(0, 4, 4), ASTC(1, 5, 4), ASTC(2, 5, 5), ASTC(3, 6, 5), ASTC(4, 6, 6), ASTC(5, 8, 5), ASTC(6, 8, 6), ASTC(7, 8, 8),
+    ASTC(8, 10, 5), ASTC(9, 10, 6), ASTC(10, 10, 8), ASTC(11, 10, 10), ASTC(12, 12, 10), ASTC(13, 12, 12),
+#undef ASTC
 };
+// A COLOUR ATTACHMENT'S FORMAT: the render target's word 1 (write-back format, linear block, sRGB, swizzle) for the
+// formats the Mali build draws into; false for the rest. The tile buffer holds R8G8B8A8 for every one of them (the
+// blend descriptors' and LD_TILE's conversion), converted at write-back. Metal names packed formats from the low bits:
+// BGRA8, BGR5A1 and B5G6R5 all have blue first, hence the swizzle.
+bool
+rtFormat(unsigned f, uint32_t &rt1)
+{
+    uint32_t wb;
+    bool bgra, srgb = f == 71 || f == 81;
+    switch (f) {
+    case 70: case 71: wb = 19; bgra = false; break;     // R8G8B8A8
+    case 80: case 81: wb = 19; bgra = true; break;
+    case 43: wb = 28; bgra = true; break;               // BGR5A1Unorm: R5G5B5A1
+    case 40: wb = 21; bgra = true; break;               // B5G6R5Unorm: R5G6B5
+    default: return false;
+    }
+    uint32_t swizzle = bgra ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
+    rt1 = wb << 3 | 2u << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16;
+    return true;
+}
+bool drawable(unsigned f) { uint32_t w; return rtFormat(f, w); }
+
+// genxml's "ASTC 2D Dimension" for a block side
+inline uint32_t astcDim(unsigned n) { return n == 4 ? 0 : n == 5 ? 1 : n == 6 ? 2 : n == 8 ? 4 : n == 10 ? 6 : 7; }
 constexpr uint32_t kIdentitySwizzle = 0 | 1 << 3 | 2 << 6 | 3 << 9;
 // A8Unorm's: zero (4) in red, green and blue, the R8 texel in alpha (as panfrost's A8_UNORM, 000R)
 constexpr uint32_t kAlphaSwizzle = 4 | 4 << 3 | 4 << 6 | 0 << 9;
+
+// a plane descriptor's first word: "Generic Plane" (clump RAW8..RAW128) or "ASTC 2D Plane" (block size; decoded wide,
+// to RGBA16F, unless sRGB), linear
+uint32_t
+planeWord0(const hakios_metal_texture *t)
+{
+    if (t->bw > 1 || t->bh > 1) {
+        bool srgb = (t->mali_format >> 20) & 1;
+        return 10 | 4 << 4 | 2 << 8 | (srgb ? 0u : 1u << 25) | astcDim(t->bw) << 26 | astcDim(t->bh) << 29;
+    }
+    uint32_t clump = t->bytes == 1 ? 0 : t->bytes == 2 ? 1 : t->bytes == 4 ? 2 : t->bytes == 8 ? 3 : 4;
+    return 10 | 1 << 4 | 2 << 8 | clump << 24;
+}
 
 // a texture's descriptor (genxml v10 "Texture", 32 bytes) and its plane's ("Generic Plane"), the plane at PLANE_VA
 void
 describe(const hakios_metal_texture *t, uint32_t *tex, uint32_t *plane, uint64_t plane_va)
 {
-    uint32_t clump = t->bytes == 1 ? 0 : t->bytes == 2 ? 1 : t->bytes == 4 ? 2 : t->bytes == 8 ? 3 : 4;   // RAW8..RAW128
+    bool astc = t->bw > 1 || t->bh > 1;
     memset(tex, 0, 32);
     memset(plane, 0, 32);
     // a texture: 2D, 3D (MTLTextureType3D 7) or 1D (MTLTextureType1D 0, one row)
     tex[0] = 2 | (t->type == 7 ? 3u : t->type == 0 ? 1u : 2u) << 4 | t->mali_format << 10;
     tex[1] = (t->width - 1) | (t->height - 1) << 16;
     tex[2] = t->swizzle ? t->swizzle : kIdentitySwizzle;                    // one level, from level 0
+    if (astc) tex[2] |= 1u << 12;                                           // texel interleave (compressed, as Mesa)
+    if (t->levels > 1 && t->planes_off != 0) {
+        // every level: the plane descriptors the texture keeps (levels - 1, and the maximum LOD as 8.8 fixed point)
+        tex[2] |= (t->levels - 1) << 16;
+        tex[3] = ((t->levels - 1) * 256) << 16;
+        plane_va = t->bo.va + t->planes_off;
+    }
     tex[4] = (uint32_t)plane_va;
     tex[5] = (uint32_t)(plane_va >> 32);
     tex[7] = t->type == 7 ? t->depth - 1 : 0;
-    plane[0] = 10 | 1 << 4 | 2 << 8 | clump << 24;                          // a plane, generic, linear
+    plane[0] = planeWord0(t);                                               // a plane, generic (or ASTC), linear
     plane[1] = (uint32_t)(t->bo.size - t->offset);
     plane[2] = (uint32_t)t->gpu();
     plane[3] = (uint32_t)(t->gpu() >> 32);
     plane[4] = t->stride;
-    plane[6] = t->stride * t->height;                                       // (a slice: a 3D texture's depth)
+    plane[6] = t->stride * t->levelRows(0);                                 // (a slice: a 3D texture's depth)
     plane[7] = (t->width - 1) | (t->height - 1) << 16;
 }
 }  // namespace
@@ -555,6 +650,16 @@ struct DrawJob {
     unsigned texture_count, sampler_count;
     uint64_t index_va = 0, index_size = 0;              // an indexed draw's indices (0: none)
     bool clear_only = false;                            // a pass with no geometry: the clear (hakios_metal_cb_clear)
+    // DEPTH AND STENCIL (zs): the attachments' memory, formats, actions and clear values (the framebuffer descriptor's
+    // word 12-13 and its ZS extension), and this draw's depth/stencil descriptor (zsd)
+    bool zs = false, has_z = false, has_s = false;
+    uint64_t z_va = 0, s_va = 0;
+    unsigned z_row = 0, s_row = 0;
+    uint32_t z_format = 0, z_internal = 0;              // genxml "ZS Format" (D16 1, D32 14), "Z Internal Format"
+    bool z_write = false, z_load = false, s_write = false, s_load = false;
+    float z_clear = 0;
+    uint32_t s_clear = 0;
+    uint32_t zsd[8] = {};
     uint32_t tls_size = 0;                              // bytes a thread spills (the larger stage's): a local storage
                                                         // descriptor of its own at the area's end (drawBytes)
     // the Load action: the preload draw first, in the same Mali pass (compile_mali.c's mali_preload_compile)
@@ -614,10 +719,13 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     }
     // the tiler context, the framebuffer descriptor, a render target descriptor for each target (64 bytes each, after
     // the framebuffer's), their blend descriptors (16 bytes each, in 64), then the stages' push constants
-    uint64_t bl_at = 0x100 + 0x40 * dj.rts;
-    auto *tc = (uint32_t *)area, *fb = (uint32_t *)(area + 0x80), *rt = (uint32_t *)(area + 0x100);
+    // (with depth or stencil the framebuffer's ZS extension comes first, 64 bytes, and the draw's depth/stencil
+    // descriptor after the blend descriptors)
+    const uint64_t rt_at = 0x100 + (dj.zs ? 0x40 : 0);
+    uint64_t bl_at = rt_at + 0x40 * dj.rts;
+    auto *tc = (uint32_t *)area, *fb = (uint32_t *)(area + 0x80), *rt = (uint32_t *)(area + rt_at);
     auto *bl = (uint32_t *)(area + bl_at);
-    uint64_t vs_at = bl_at + 0x40, fs_at = vs_at + ((dj.vs_fau.size() * 4 + 0x3f) & ~0x3fULL);
+    uint64_t zsd_at = bl_at + 0x40, vs_at = zsd_at + (dj.zs ? 0x40 : 0), fs_at = vs_at + ((dj.vs_fau.size() * 4 + 0x3f) & ~0x3fULL);
     uint64_t srt_at = fs_at + ((dj.fs_fau.size() * 4 + 0x3f) & ~0x3fULL), srt = 0;
 
     memset(area, 0, vs_at);
@@ -631,6 +739,27 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     fb[11] = 2 << 6 | 8 << 9 | 1u << 15 | (dj.rts - 1) << 19 | dj.rts << 24;   // 16x16 tiles, targets, 1 KiB a target a tile
     fb[12] = 1u << 29;                                                          // empty tiles written (the clear)
     *(uint64_t *)&fb[14] = area_va;
+    if (dj.zs) {
+        auto *ext = (uint32_t *)(area + 0x100);
+        fb[12] |= 1u << 21;                                                     // the ZS extension
+        ext[0] = 1u << 31;                                                      // clean tiles written
+        if (dj.has_z) {
+            fb[12] |= dj.z_internal << 16 | (dj.z_write ? 1u << 18 : 0) | (dj.z_load ? 1u << 19 : 0);
+            memcpy(&fb[13], &dj.z_clear, 4);
+            ext[0] |= dj.z_format | 2u << 4;                                    // linear
+            *(uint64_t *)&ext[8] = dj.z_va;
+            ext[10] = dj.z_row;
+            ext[11] = dj.z_row * dj.height;
+        }
+        if (dj.has_s) {
+            fb[12] |= (dj.s_clear & 0xff) | (dj.s_write ? 1u << 8 : 0) | (dj.s_load ? 1u << 9 : 0);
+            ext[0] |= 1u << 16 | 2u << 20;                                      // S8, linear
+            *(uint64_t *)&ext[12] = dj.s_va;
+            ext[14] = dj.s_row;
+            ext[15] = dj.s_row * dj.height;
+        }
+        memcpy(area + zsd_at, dj.zsd, 32);
+    }
     rt[0] = 1u << 26;                                                           // internal format R8G8B8A8
     rt[1] = dj.rt1 | (dj.write ? 1u : 0u) | 1u << 31;                          // clean tiles written too
     *(uint64_t *)&rt[8] = dj.target_va;
@@ -808,7 +937,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move48(46, 0);                                                     // no occlusion query
     s[n++] = move32(48, dj.vary_size);
     s[n++] = move48(50, (area_va + bl_at) | dj.rts);                           // a blend descriptor a target
-    s[n++] = move48(52, d->descriptors.va + 0x1980);                           // depth/stencil: all pass
+    s[n++] = move48(52, dj.zs ? area_va + zsd_at : d->descriptors.va + 0x1980);   // depth/stencil (none: all pass)
     s[n++] = move48(54, dj.index_va);                                           // the index buffer (0: none)
     s[n++] = move32(56, dj.tiler_flags);
     s[n++] = move32(57, dj.dcd0);
@@ -831,13 +960,18 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     }
     if (!first) {
         // the targets written back as the last draw stores them (the pass's descriptors are the first draw's)
-        auto *prt = (uint32_t *)(pass_area + 0x100);
+        auto *prt = (uint32_t *)(pass_area + rt_at);
         prt[1] = (prt[1] & ~1u) | (dj.write ? 1u : 0u);
         for (unsigned i = 1; i < dj.rts; i++) {
             prt[16 * i + 1] = (prt[16 * i + 1] & ~1u) | (dj.more[i - 1].write ? 1u : 0u);
         }
+        if (dj.zs) {
+            auto *pfb = (uint32_t *)(pass_area + 0x80);
+            pfb[12] = (pfb[12] & ~(1u << 18 | 1u << 8)) | (dj.has_z && dj.z_write ? 1u << 18 : 0) |
+                (dj.has_s && dj.s_write ? 1u << 8 : 0);
+        }
     }
-    s[n++] = move48(40, (pass_va + 0x80) | 1 | (dj.rts - 1) << 2);             // the framebuffer descriptor and its targets
+    s[n++] = move48(40, (pass_va + 0x80) | 1 | (dj.zs ? 2u : 0u) | (dj.rts - 1) << 2);   // the framebuffer descriptor, its targets
     s[n++] = move32(42, 0);
     s[n++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
     s[n++] = move48(44, 0);                                                     // no tile enable map (r44 held the
@@ -860,7 +994,8 @@ bool
 samePass(const DrawJob &a, const DrawJob &b)
 {
     if (a.clear_only || b.clear_only || !b.load || a.target_va != b.target_va || a.rts != b.rts || a.width != b.width ||
-        a.height != b.height || a.row_bytes != b.row_bytes) {
+        a.height != b.height || a.row_bytes != b.row_bytes || a.zs != b.zs || a.z_va != b.z_va || a.s_va != b.s_va ||
+        (b.zs && ((b.has_z && !b.z_load) || (b.has_s && !b.s_load)))) {
         return false;
     }
     for (unsigned i = 1; i < a.rts; i++) {
@@ -874,10 +1009,10 @@ samePass(const DrawJob &a, const DrawJob &b)
     for (unsigned t = 0; t < b.texture_count; t++) {
         const hakios_metal_texture *x = b.textures[t];
         if (x == nullptr) continue;
-        uint64_t va = x->gpu();
-        if (va == a.target_va) return false;
+        uint64_t va = x->gpu(), end = va + x->span();  // (every level of a mipmapped one: a pass into one level)
+        if (a.target_va >= va && a.target_va < end) return false;
         for (unsigned i = 1; i < a.rts; i++) {
-            if (va == a.more[i - 1].va) return false;
+            if (a.more[i - 1].va >= va && a.more[i - 1].va < end) return false;
         }
     }
     return true;
@@ -887,7 +1022,8 @@ samePass(const DrawJob &a, const DrawJob &b)
 uint64_t
 drawBytes(const DrawJob &dj)
 {
-    uint64_t bytes = 0x100 + 0x40 * dj.rts + 0x40 + ((dj.vs_fau.size() * 4 + 0x3f) & ~0x3fULL) + ((dj.fs_fau.size() * 4 + 0x3f) & ~0x3fULL);
+    uint64_t bytes = 0x100 + 0x40 * dj.rts + 0x40 + (dj.zs ? 0x80 : 0) + ((dj.vs_fau.size() * 4 + 0x3f) & ~0x3fULL) +
+        ((dj.fs_fau.size() * 4 + 0x3f) & ~0x3fULL);
     if (dj.texture_count || dj.sampler_count) {
         bytes += 0x80 + (dj.texture_count * 3 + dj.sampler_count) * 32 + 0x40;
     }
@@ -1062,7 +1198,7 @@ openDraws(hakios_metal_device *d)
     pos[0] = pos[32] = 128 | 128 << 16;                 // one sample, at the pixel's centre (and the origin)
     memset(zs, 0, 32);
     zs[0] = 7 | 7 << 4 | 7 << 16;                       // stencil faces: always
-    zs[4] = 1u << 21 | 1u << 22 | 7u << 29;             // depth: always, nothing written
+    zs[4] = 1u << 21 | 1u << 22 | 1u << 23 | 2u << 25 | 7u << 29;   // depth: always, nothing written (zsOf's word 4)
     d->heap_ok = true;
     return true;
 }
@@ -1894,10 +2030,26 @@ hakios_metal_cb_dispatch_threads(hakios_metal_cb *cb, hakios_metal_kernel *k, co
 
 // ---- textures and samplers ----
 
+namespace {
+// a word in the boot-args (testing switches: metal_nozs)
+bool
+bootArg(const char *word)
+{
+    char args[1024] = {0};
+    size_t size = sizeof(args) - 1;
+    return sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, word) != nullptr;
+}
+}  // namespace
+
 hakios_metal_texture *
 hakios_metal_texture_new(hakios_metal_device *d, unsigned type, unsigned pixel_format, unsigned width, unsigned height,
     unsigned usage)
 {
+    static const bool no_zs = bootArg("metal_nozs");
+    if (no_zs && pixel_format >= 250 && pixel_format <= 261) {
+        fail("a depth or stencil texture of MTLPixelFormat %u (boot-arg metal_nozs)", pixel_format);
+        return nullptr;
+    }
     const MaliFormat *f = nullptr;
     for (const MaliFormat &m : kFormats) {
         if (m.metal == pixel_format) {
@@ -1923,8 +2075,16 @@ hakios_metal_texture_new(hakios_metal_device *d, unsigned type, unsigned pixel_f
     t->mali_format = f->mali;
     if (f->metal == 1) t->swizzle = kAlphaSwizzle;
     t->bytes = f->bytes;
-    t->stride = (width * f->bytes + 63) & ~63u;
-    if (!d->newBo(t->bo, (uint64_t)t->stride * height, BIND_NOEXEC)) {
+    t->bw = f->bw;
+    t->bh = f->bh;
+    t->stride = ((width + f->bw - 1) / f->bw * f->bytes + 63) & ~63u;
+    uint64_t size = (uint64_t)t->stride * t->levelRows(0);
+    if (pixel_format == 260) {
+        t->stencil_off = (size + 63) & ~63ULL;
+        t->stencil_stride = (width + 63) & ~63u;
+        size = t->stencil_off + (uint64_t)t->stencil_stride * height;
+    }
+    if (!d->newBo(t->bo, size, BIND_NOEXEC)) {
         delete t;
         return nullptr;
     }
@@ -1951,14 +2111,29 @@ unsigned hakios_metal_texture_usage(hakios_metal_texture *t) { return t ? t->usa
 namespace {
 int
 copyRows(hakios_metal_texture *t, unsigned x, unsigned y, unsigned w, unsigned h, uint8_t *bytes, uint64_t bytes_per_row,
-    bool in)
+    bool in, unsigned level = 0)
 {
-    if (t == nullptr || x + w > t->width || y + h > t->height || bytes_per_row < (uint64_t)w * t->bytes) {
-        fail("a texture region outside the texture, or rows shorter than its width");
+    if (t == nullptr || level >= t->levels || x + w > t->levelWidth(level) || y + h > t->levelHeight(level) ||
+        bytes_per_row < (uint64_t)(w + t->bw - 1) / t->bw * t->bytes) {
+        fail("a texture region outside the texture (level %u of %u), or rows shorter than its width", level,
+            t ? t->levels : 0);
         return -1;
     }
+    uint8_t *base = t->pixels() + t->levelOffset(level);
+    uint32_t stride = t->levelStride(level);
+    if (t->bw > 1 || t->bh > 1) {
+        // a compressed format: the region in whole blocks (its edge blocks may be partly past the level), rows of blocks
+        if (x % t->bw || y % t->bh) {
+            fail("a compressed texture region not on its %ux%u blocks", t->bw, t->bh);
+            return -1;
+        }
+        x /= t->bw;
+        y /= t->bh;
+        w = (w + t->bw - 1) / t->bw;
+        h = (h + t->bh - 1) / t->bh;
+    }
     for (unsigned row = 0; row < h; row++) {
-        uint8_t *gpu = t->pixels() + (uint64_t)(y + row) * t->stride + (uint64_t)x * t->bytes;
+        uint8_t *gpu = base + (uint64_t)(y + row) * stride + (uint64_t)x * t->bytes;
         uint8_t *cpu = bytes + row * bytes_per_row;
         if (in) {
             memcpy(gpu, cpu, (size_t)w * t->bytes);
@@ -1999,6 +2174,12 @@ hakios_metal_sampler_new(hakios_metal_device *d, const struct hakios_metal_sampl
     s->words[0] = 1 | wraps[desc->r_address] << 8 | wraps[desc->t_address] << 12 | wraps[desc->s_address] << 16 | 1u << 21 |
         1u << 23 | (desc->normalized_coordinates ? 1u << 25 : 0) | 1u << 26 | (desc->min_filter == 0 ? 1u << 27 : 0) |
         (desc->mag_filter == 0 ? 1u << 28 : 0);
+    // the levels: Metal's mip filter as the mipmap mode (NotMipmapped: none, level min_lod alone; Nearest; Linear:
+    // trilinear) and its LOD clamps, 8.8 fixed point (13 bits: up to 31.99)
+    auto ulod = [](float v) { return (uint32_t)(v <= 0 ? 0 : v >= 31.99f ? 0x1fff : v * 256); };
+    uint32_t lo = ulod(desc->lod_min_clamp), hi = desc->mip_filter == 0 ? lo : ulod(desc->lod_max_clamp);
+    s->words[0] |= (desc->mip_filter == 0 ? 1u : desc->mip_filter == 1 ? 0u : 3u) << 30;
+    s->words[1] = lo | (hi < lo ? lo : hi) << 16;
     if (desc->s_address == 4 || desc->t_address == 4 || desc->r_address == 4 || desc->border_color == 0) {
         // ClampToZero, and the transparent black border: zeros (the border colour's words stay 0)
     } else if (desc->border_color == 1) {
@@ -2121,7 +2302,8 @@ fnvImage(uint64_t &h)
 
 uint64_t
 cacheKey(const void *vs, size_t vs_size, const std::vector<mali_constant> &vc, const void *fs, size_t fs_size,
-    const std::vector<mali_constant> &fc, unsigned format, const mali_vertex_fetch *fetch)
+    const std::vector<mali_constant> &fc, unsigned format, const mali_vertex_fetch *fetch,
+    const mali_shader_blend *blend = nullptr)
 {
     uint64_t h = 14695981039346656037ULL;
     fnv(h, kCacheMagic, sizeof(kCacheMagic));
@@ -2134,6 +2316,11 @@ cacheKey(const void *vs, size_t vs_size, const std::vector<mali_constant> &vc, c
     for (const mali_constant &k : fc) fnv(h, &k, sizeof(k));
     fnv(h, &format, sizeof(format));
     if (fetch != nullptr) fnv(h, fetch, sizeof(*fetch));
+    if (blend != nullptr) {
+        static const char tag[] = "shader blend";
+        fnv(h, tag, sizeof(tag));
+        fnv(h, blend, sizeof(*blend));
+    }
     return h;
 }
 
@@ -2342,26 +2529,36 @@ bool
 compileFetch(hakios_metal_program *p)
 {
     std::lock_guard<std::mutex> g(p->lock);
-    if (!p->fetch_described || p->fetch_compiled) {
+    bool blended = p->shader_blend.mask != 0;
+    if ((!p->fetch_described && !blended) || p->fetch_compiled) {
         return p->fetch_refusal.empty();
     }
     p->fetch_compiled = true;
     if (p->device != nullptr) {
-        p->fetch_refusal = "a vertex descriptor set after the program's first draw";
+        p->fetch_refusal = "a vertex descriptor or blending set after the program's first draw";
+        return false;
+    }
+    if (p->vs_bitcode.empty() || p->fs_bitcode.empty()) {
+        p->fetch_refusal = "blending in the shader for a program without its bitcode";
         return false;
     }
     mali_kernel_binary vs = {}, fs = {};
     char why[512] = "";
     uint64_t key = cacheKey(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants, p->fs_bitcode.data(),
-                            p->fs_bitcode.size(), p->fs_constants, p->color_format, &p->fetch);
+                            p->fs_bitcode.size(), p->fs_constants, p->color_format, p->fetch_described ? &p->fetch : nullptr,
+                            blended ? &p->shader_blend : nullptr);
     if (!cacheLoad(key, &vs, &fs)) {
-        if (mali_vertex_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(),
-                                &p->fetch, &vs, why, sizeof(why)) != 0 ||
-            mali_stage_compile(p->fs_bitcode.data(), p->fs_bitcode.size(), p->fs_constants.data(), p->fs_constants.size(), 1,
-                               &vs, &fs, why, sizeof(why)) != 0) {
+        int r = p->fetch_described ?
+            mali_vertex_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(),
+                                &p->fetch, &vs, why, sizeof(why)) :
+            mali_stage_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(), 0,
+                               nullptr, &vs, why, sizeof(why));
+        if (r != 0 ||
+            mali_fragment_compile(p->fs_bitcode.data(), p->fs_bitcode.size(), p->fs_constants.data(), p->fs_constants.size(),
+                                  &vs, blended ? &p->shader_blend : nullptr, &fs, why, sizeof(why)) != 0) {
             mali_kernel_binary_free(&vs);
             mali_kernel_binary_free(&fs);
-            p->fetch_refusal = std::string("the vertex descriptor: ") + why;
+            p->fetch_refusal = std::string(p->fetch_described ? "the vertex descriptor: " : "blending in the shader: ") + why;
             return false;
         }
         cacheStore(key, vs, fs);
@@ -2452,8 +2649,10 @@ namespace {
 // one colour attachment's blend state as the fixed-function equation word, whether it reads the tile buffer, or why not
 void
 encodeBlend(int enabled, unsigned rgb_op, unsigned alpha_op, unsigned src_rgb, unsigned dst_rgb, unsigned src_alpha,
-    unsigned dst_alpha, unsigned write_mask, uint32_t &equation, bool &reads_dest, std::string &refusal)
+    unsigned dst_alpha, unsigned write_mask, uint32_t &equation, bool &reads_dest, std::string &refusal,
+    mali_blend_rt *shader = nullptr, bool *in_shader = nullptr)
 {
+    if (in_shader) *in_shader = false;
     // Metal's write mask: alpha 1, blue 2, green 4, red 8; Mali's colour mask: red bit 0 .. alpha bit 3
     uint32_t mask = (write_mask & 8 ? 1u : 0) | (write_mask & 4 ? 2u : 0) | (write_mask & 2 ? 4u : 0) | (write_mask & 1 ? 8u : 0);
     refusal.clear();
@@ -2465,8 +2664,22 @@ encodeBlend(int enabled, unsigned rgb_op, unsigned alpha_op, unsigned src_rgb, u
     const char *why = nullptr;
     uint32_t rgb = maliBlendFunction(rgb_op, src_rgb, dst_rgb, false, why);
     uint32_t alpha = why == nullptr ? maliBlendFunction(alpha_op, src_alpha, dst_alpha, true, why) : 0;
+    // in the shader instead: any operation and factor but the blend colour and the second source (not passed to the
+    // shader yet)
+    auto shaderable = [](unsigned f) { return f <= 10; };
+    if (why != nullptr && shader != nullptr && rgb_op <= 4 && alpha_op <= 4 && shaderable(src_rgb) && shaderable(dst_rgb) &&
+        shaderable(src_alpha) && shaderable(dst_alpha)) {
+        *shader = { rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask };
+        *in_shader = true;
+        equation = 0x132 | 0x132 << 12 | 0xfu << 28;    // the shader's result as it is (it applied the write mask)
+        reads_dest = true;
+        return;
+    }
     if (why != nullptr) {
-        refusal = std::string("blending: ") + why;
+        char factors[96];
+        snprintf(factors, sizeof(factors), " (operations %u/%u, factors %u %u / %u %u)", rgb_op, alpha_op, src_rgb, dst_rgb,
+            src_alpha, dst_alpha);
+        refusal = std::string("blending: ") + why + factors;
         return;
     }
     equation = rgb | alpha << 12 | mask << 28;
@@ -2482,8 +2695,10 @@ hakios_metal_program_set_blend(hakios_metal_program *p, int enabled, unsigned rg
         return;
     }
     p->blend_enabled = enabled != 0;
+    bool in_shader = false;
     encodeBlend(enabled, rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask, p->blend_equation,
-                p->blend_reads_dest, p->blend_refusal);
+                p->blend_reads_dest, p->blend_refusal, &p->shader_blend.rt[0], &in_shader);
+    p->shader_blend.mask = (p->shader_blend.mask & ~1u) | (in_shader ? 1u : 0u);
 }
 
 int
@@ -2497,8 +2712,11 @@ hakios_metal_program_set_blend_at(hakios_metal_program *p, unsigned index, int e
     if (index == 0) {
         hakios_metal_program_set_blend(p, enabled, rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask);
     } else if (p != nullptr && index <= 3) {
+        bool in_shader = false;
         encodeBlend(enabled, rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask,
-                    p->more_blend_equation[index - 1], p->more_blend_reads_dest[index - 1], p->more_blend_refusal[index - 1]);
+                    p->more_blend_equation[index - 1], p->more_blend_reads_dest[index - 1], p->more_blend_refusal[index - 1],
+                    &p->shader_blend.rt[index], &in_shader);
+        p->shader_blend.mask = (p->shader_blend.mask & ~(1u << index)) | (in_shader ? 1u << index : 0u);
     }
     return 0;
 }
@@ -2584,6 +2802,8 @@ inlineSampler(uint64_t w, uint32_t words[8])
     desc.normalized_coordinates = field(15, 1) == 0;
     desc.max_anisotropy = field(20, 4) + 1;
     desc.border_color = field(56, 2);
+    desc.lod_min_clamp = 0;                                  // (MSL's lod_clamp default: every level)
+    desc.lod_max_clamp = 1e30f;
     hakios_metal_sampler *s = hakios_metal_sampler_new(nullptr, &desc);
     if (s == nullptr) {
         return false;
@@ -2595,6 +2815,123 @@ inlineSampler(uint64_t w, uint32_t words[8])
 
 // the Load action's program (compile_mali.c's mali_preload_compile), compiled and uploaded on first use; false with
 // d->preload_error said when it cannot be
+hakios_metal_texture *attachmentOf(hakios_metal_texture *t, unsigned level, unsigned slice);
+
+// THE PASS'S DEPTH AND STENCIL into DJ (its attachments, actions, clear values; with DRAW, the draw's depth/stencil
+// state as a "Depth/stencil" descriptor), the attachments the size of WIDTH x HEIGHT; false with WHY
+bool
+zsOf(const struct hakios_metal_render_pass *pass, DrawJob &dj, unsigned width, unsigned height, bool draw, const char *&why)
+{
+    hakios_metal_texture *z = pass->depth, *st = pass->stencil;
+    if (z == nullptr && st == nullptr) {
+        if (draw && (pass->depth_state_set || pass->stencil_state_set)) {
+            // (a depth/stencil state with no attachment: Metal tests against nothing, every fragment passes)
+        }
+        return true;
+    }
+    if (pass->depth_level || pass->depth_slice) { why = "a mip level or slice of the depth attachment (not on the Mali yet)"; return false; }
+    if (z != nullptr && z->format != 252 && z->format != 250 && z->format != 260) {
+        why = "a depth attachment not Depth16Unorm, Depth32Float or Depth32Float_Stencil8 (not on the Mali yet)";
+        return false;
+    }
+    if (st != nullptr && st->format != 253 && st->format != 260) {
+        why = "a stencil attachment not Stencil8 or Depth32Float_Stencil8 (not on the Mali yet)";
+        return false;
+    }
+    if ((z && (z->width != width || z->height != height)) || (st && (st->width != width || st->height != height))) {
+        why = "depth or stencil attachments of another size than the colour attachments";
+        return false;
+    }
+    dj.zs = true;
+    {
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) {
+            fprintf(stderr, "hakios-metal: the first pass with depth/stencil: depth MTLPixelFormat %u, stencil %u, %ux%u, "
+                "depth state %d (compare %u write %d), stencil state %d\n", z ? z->format : 0, st ? st->format : 0, width,
+                height, pass->depth_state_set, pass->depth_compare, pass->depth_write, pass->stencil_state_set);
+        }
+    }
+    if (z != nullptr) {
+        dj.has_z = true;
+        dj.z_va = z->gpu();
+        dj.z_row = z->stride;
+        dj.z_format = z->format == 250 ? 1 : 14;
+        dj.z_internal = z->format == 250 ? 0 : 2;
+        dj.z_write = pass->depth_store_action == 1;
+        dj.z_load = pass->depth_load_action == 1;
+        dj.z_clear = (float)pass->clear_depth;
+    }
+    if (st != nullptr) {
+        dj.has_s = true;
+        dj.s_va = st->format == 260 ? st->gpu() + st->stencil_off : st->gpu();
+        dj.s_row = st->format == 260 ? st->stencil_stride : st->stride;
+        dj.s_write = pass->stencil_store_action == 1;
+        dj.s_load = pass->stencil_load_action == 1;
+        dj.s_clear = pass->clear_stencil & 0xff;
+    }
+    auto *w = dj.zsd;
+    memset(w, 0, 32);
+    w[0] = 7 | 7u << 4 | 7u << 16;                     // stencil faces: always (no test)
+    // (word 4: v11's separated dependency tracking 21, depth cull 22, clamp mode [0, 1] (1) at 23, depth from fixed
+    // function (2) at 25 -- the two genxml defaults that are not zero, without which the depth test did nothing)
+    const uint32_t w4 = 1u << 21 | 1u << 22 | 1u << 23 | 2u << 25;
+    w[4] = w4 | 7u << 29;                               // depth: always, nothing written
+    if (!draw) {
+        return true;
+    }
+    if (dj.has_z && pass->depth_state_set) {
+        // MTLCompareFunction is genxml's "Func" (Never 0 .. Always 7)
+        w[4] = w4 | (pass->depth_write ? 1u << 27 : 0) | (pass->depth_compare & 7) << 29;
+    }
+    if (dj.has_s && pass->stencil_state_set) {
+        // MTLStencilOperation (Keep, Zero, Replace, IncrementClamp, DecrementClamp, Invert, IncrementWrap,
+        // DecrementWrap) as genxml's "Stencil Op"
+        static const uint32_t op[8] = { 0, 2, 1, 6, 7, 3, 4, 5 };
+        const auto &f = pass->stencil_front, &b = pass->stencil_back;
+        w[0] = 7 | (f.compare & 7) << 4 | op[f.stencil_fail & 7] << 7 | op[f.depth_fail & 7] << 10 | op[f.pass & 7] << 13 |
+            (b.compare & 7) << 16 | op[b.stencil_fail & 7] << 19 | op[b.depth_fail & 7] << 22 | op[b.pass & 7] << 25 |
+            1u << 31;
+        w[1] = (f.write_mask & 0xff) | (b.write_mask & 0xff) << 8 | (f.read_mask & 0xff) << 16 | (b.read_mask & 0xff) << 24;
+        w[2] = (pass->stencil_front_reference & 0xff) | (pass->stencil_back_reference & 0xff) << 8;
+    }
+    return true;
+}
+
+// A PASS INTO A MIP LEVEL OR SLICE: the pass as one whose attachments are those levels as textures of their own
+// (attachmentOf), held in VIEWS until the caller releases them; false (and nothing held) with the reason
+bool
+passAtLevels(const struct hakios_metal_render_pass *pass, struct hakios_metal_render_pass &q, hakios_metal_texture *views[8])
+{
+    q = *pass;
+    for (unsigned i = 0; i < 8; i++) views[i] = nullptr;
+    auto release = [&] { for (unsigned i = 0; i < 8; i++) if (views[i]) { views[i]->release(); views[i] = nullptr; } };
+    if (q.color0 != nullptr && (q.color0_level || q.color0_slice)) {
+        if ((views[0] = attachmentOf(q.color0, q.color0_level, q.color0_slice)) == nullptr) return false;
+        q.color0 = views[0];
+        q.color0_level = q.color0_slice = 0;
+    }
+    for (unsigned i = 0; i < 7; i++) {
+        auto &m = q.more[i];
+        if (m.texture != nullptr && (m.level || m.slice)) {
+            if ((views[i + 1] = attachmentOf(m.texture, m.level, m.slice)) == nullptr) { release(); return false; }
+            m.texture = views[i + 1];
+            m.level = m.slice = 0;
+        }
+    }
+    return true;
+}
+
+bool
+atLevels(const struct hakios_metal_render_pass *pass)
+{
+    if (pass == nullptr) return false;
+    if (pass->color0 != nullptr && (pass->color0_level || pass->color0_slice)) return true;
+    for (unsigned i = 0; i < 7; i++) {
+        if (pass->more[i].texture != nullptr && (pass->more[i].level || pass->more[i].slice)) return true;
+    }
+    return false;
+}
+
 hakios_metal_program *
 preloadProgram(hakios_metal_device *d, unsigned targets)
 {
@@ -2623,8 +2960,22 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     hakios_metal_buffer *const *vs_buffers, const uint64_t *vs_offsets, unsigned vs_count,
     hakios_metal_buffer *const *fs_buffers, const uint64_t *fs_offsets, unsigned fs_count,
     hakios_metal_texture *const *fs_textures, unsigned fs_texture_count, hakios_metal_sampler *const *fs_samplers,
-    unsigned fs_sampler_count, const IndexInfo *ix = nullptr)
+    unsigned fs_sampler_count, const IndexInfo *ix = nullptr, const uint32_t *fs_words = nullptr, unsigned fs_word_count = 0)
 {
+    if (atLevels(pass)) {
+        struct hakios_metal_render_pass q;
+        hakios_metal_texture *views[8];
+        if (!passAtLevels(pass, q, views)) {
+            std::string why = gError;
+            fail("%s%s%s", p ? p->name : "", p ? ": " : "", why.c_str());
+            return -1;
+        }
+        int r = drawImpl(cb, p, &q, viewport, scissor, primitive, vertex_start, vertex_count, instance_count, base_instance,
+            vs_buffers, vs_offsets, vs_count, fs_buffers, fs_offsets, fs_count, fs_textures, fs_texture_count, fs_samplers,
+            fs_sampler_count, ix, fs_words, fs_word_count);
+        for (auto *v : views) if (v) v->release();     // (the draw holds what it uses)
+        return r;
+    }
     hakios_metal_device *d = cb->queue->device;
     const char *refused = nullptr;
     hakios_metal_texture *t = pass ? pass->color0 : nullptr;
@@ -2632,12 +2983,10 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     // what the Mali build draws so far; the rest by name
     if (!d->heap_ok) refused = "draws (no tiler heap on this device: hakios_metal_open said why)";
     else if (p == nullptr || t == nullptr) refused = "a draw without a program or a colour attachment";
-    else if (t->format != 70 && t->format != 71 && t->format != 80 && t->format != 81) refused = "a colour attachment not RGBA8/BGRA8 (not on the Mali yet)";
+    else if (!drawable(t->format)) refused = "a colour attachment not RGBA8/BGRA8/BGR5A1/B5G6R5 (not on the Mali yet)";
     else if (!(t->usage & HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET)) refused = "a colour attachment made without render-target usage";
     else if (pass->store_action > 1) refused = "a store action other than DontCare and Store";
-    else if (pass->depth || pass->stencil || pass->depth_state_set || pass->stencil_state_set) refused = "depth and stencil (not on the Mali yet)";
     else if (pass->visibility && pass->visibility_mode) refused = "visibility results (not on the Mali yet)";
-    else if (pass->color0_level || pass->color0_slice) refused = "a mip level or slice of the colour attachment";
     else if (!p->blend_refusal.empty()) refused = p->blend_refusal.c_str();
     else if (!compileFetch(p)) refused = p->fetch_refusal.c_str();
     else if (p->samples != 1) refused = "multisampling (not on the Mali yet)";
@@ -2655,10 +3004,10 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         const hakios_metal_render_pass::hakios_metal_color_attachment &m = pass->more[i - 1];
         if (i > 3) refused = "a fragment function writing a colour attachment past 3 (not on the Mali yet)";
         else if (m.texture == nullptr) { rts = i + 1; continue; }   // (Metal discards the output: see dj.more below)
-        else if (m.texture->format != 70 && m.texture->format != 71 && m.texture->format != 80 && m.texture->format != 81)
-            refused = "a colour attachment past 0 not RGBA8/BGRA8 (not on the Mali yet)";
-        else if (m.texture->width != t->width || m.texture->height != t->height || m.level || m.slice)
-            refused = "colour attachments of different sizes, or a level or slice of one past 0";
+        else if (!drawable(m.texture->format))
+            refused = "a colour attachment past 0 not RGBA8/BGRA8/BGR5A1/B5G6R5 (not on the Mali yet)";
+        else if (m.texture->width != t->width || m.texture->height != t->height)
+            refused = "colour attachments of different sizes";
         else if (!(m.texture->usage & HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET)) refused = "a colour attachment made without render-target usage";
         else if (m.store_action > 1) refused = "a store action other than DontCare and Store";
         else if (!p->more_blend_refusal[i - 1].empty()) refused = p->more_blend_refusal[i - 1].c_str();
@@ -2698,6 +3047,9 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     if (!stagePushConstants(p->vs, vs_buffers, vs_offsets, vs_count, scale, offset, vertex_start, base_instance, dj.vs_fau, used) ||
         !stagePushConstants(p->fs, fs_buffers, fs_offsets, fs_count, scale, offset, vertex_start, base_instance, dj.fs_fau, used)) {
         return -1;
+    }
+    for (unsigned i = 0; i < fs_word_count && i < dj.fs_fau.size(); i++) {
+        dj.fs_fau[i] = fs_words[i];                     // (the driver's own programs: their words from 0, no buffers)
     }
     // the fragment stage's textures and samplers, as a dispatch's
     for (unsigned r = 0; r < p->fs.num_resources; r++) {
@@ -2756,14 +3108,19 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             dj.tls_size = tls;
         }
     }
+    {
+        const char *why = nullptr;
+        if (!zsOf(pass, dj, t->width, t->height, true, why)) {
+            fail("%s: %s", p->name, why);
+            return -1;
+        }
+    }
     dj.vary_size = p->vs.varying_bytes;
     dj.target_va = t->gpu();
     dj.width = t->width;
     dj.height = t->height;
     dj.row_bytes = t->stride;
-    bool bgra = t->format == 80 || t->format == 81, srgb = t->format == 71 || t->format == 81;
-    uint32_t swizzle = bgra ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
-    dj.rt1 = 19 << 3 | 2 << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16;
+    rtFormat(t->format, dj.rt1);
     dj.write = pass->store_action == 1;
     if (pass->load_action == 2) {
         dj.clear = unorm8(pass->clear_color[0]) | unorm8(pass->clear_color[1]) << 8 | unorm8(pass->clear_color[2]) << 16 |
@@ -2826,11 +3183,9 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             m.blend[3] = 237u << 12;
             continue;
         }
-        bool mb = a.texture->format == 80 || a.texture->format == 81, ms = a.texture->format == 71 || a.texture->format == 81;
-        uint32_t sw = mb ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
         m.va = a.texture->gpu();
         m.row_bytes = a.texture->stride;
-        m.rt1 = 19 << 3 | 2 << 8 | (ms ? 1u << 14 : 0) | sw << 16;
+        rtFormat(a.texture->format, m.rt1);
         m.write = a.store_action == 1;
         m.load = a.load_action == 1;
         m.clear = a.load_action == 2 ? (unorm8(a.clear_color[0]) | unorm8(a.clear_color[1]) << 8 |
@@ -2851,6 +3206,11 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     // DCD0: scissor to the bounding box, cull zero area (v11); the face culled and the front's winding
     dj.dcd0 = 1u << 23 | 1u << 26 | (pass->winding == 1 ? 1u << 16 : 0) | (pass->cull_mode == 1 ? 1u << 17 : 0) |
         (pass->cull_mode == 2 ? 1u << 18 : 0);
+    if (dj.zs && ((dj.zsd[4] >> 29) != 7 || (dj.zsd[4] & 1u << 27) || (dj.zsd[0] >> 31))) {
+        // a depth or stencil test or write: pixels killed weakly early, Z/S updated late (a fragment the shader
+        // discards must not write them; whether a shader discards is not tracked here)
+        dj.dcd0 |= 2u << 2 | 3u << 4;
+    }
     dj.dcd1 = 0xffff | 1u << 16;
     dj.dcd2 = 1u << 12 | 1u << 24 | 1u << 25;
     dj.tiler_flags = dj.mode | 1u << 22 | (dj.vary_spd ? 1u << 18 : 0);   // basic FIFO; the varying shader
@@ -2883,6 +3243,12 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     cb->programs.push_back(p);
     t->retain();
     cb->held_textures.push_back(t);
+    for (hakios_metal_texture *x : { pass->depth, pass->stencil }) {
+        if (x != nullptr && dj.zs) {
+            x->retain();
+            cb->held_textures.push_back(x);
+        }
+    }
     for (unsigned i = 1; i < dj.rts; i++) {
         dj.more[i - 1].texture->retain();
         cb->held_textures.push_back(dj.more[i - 1].texture);
@@ -2970,6 +3336,8 @@ textureOver(hakios_metal_device *d, const Bo &bo, uint64_t offset, uint32_t stri
     t->mali_format = f->mali;
     if (f->metal == 1) t->swizzle = kAlphaSwizzle;
     t->bytes = f->bytes;
+    t->bw = f->bw;
+    t->bh = f->bh;
     t->stride = stride;
     t->origin = origin;
     return t;
@@ -3021,23 +3389,63 @@ hakios_metal_texture_new_buffer(hakios_metal_buffer *b, unsigned type, unsigned 
     return t;
 }
 
+namespace {
+// levels BASE .. BASE + COUNT - 1 of P as a texture of their own over P's memory (P held): level BASE its level 0; a
+// view of one level is described as any one-level texture, of more through P's plane descriptors
+hakios_metal_texture *
+levelsOf(hakios_metal_texture *p, const MaliFormat *f, unsigned pixel_format, unsigned type, unsigned base, unsigned count)
+{
+    hakios_metal_texture *t = textureOver(p->device, p->bo, p->offset + p->levelOffset(base), p->levelStride(base), type, f,
+        pixel_format, p->levelWidth(base), p->levelHeight(base), p->usage, 4);
+    t->depth = p->depth;
+    t->levels = count;
+    for (unsigned l = 0; l < count; l++) {
+        t->level_off[l] = p->levelOffset(base + l) - p->levelOffset(base);
+        t->level_stride[l] = p->levelStride(base + l);
+    }
+    t->planes_off = count > 1 && p->planes_off != 0 ? p->planes_off + 32 * base : 0;
+    if (base == 0) {
+        t->stencil_off = p->stencil_off;
+        t->stencil_stride = p->stencil_stride;
+    }
+    p->retain();
+    t->parent = p;
+    t->surface = p->surface;
+    return t;
+}
+
+// a render pass's attachment: level LEVEL (and a 3D texture's depth plane SLICE) of T as a one-level 2D texture, or
+// nullptr with the reason
+hakios_metal_texture *
+attachmentOf(hakios_metal_texture *t, unsigned level, unsigned slice)
+{
+    if (level >= t->levels || slice >= (t->type == 7 ? t->depth : 1)) {
+        fail("an attachment at level %u, slice %u of a texture of %u level(s) and %u slice(s)", level, slice, t->levels,
+            t->type == 7 ? t->depth : 1);
+        return nullptr;
+    }
+    hakios_metal_texture *v = levelsOf(t, findFormat(t->format), t->format, t->type == 7 ? 2 : t->type, level, 1);
+    if (slice != 0) {
+        v->offset += (uint64_t)v->stride * v->height * slice;
+    }
+    v->depth = 1;
+    return v;
+}
+}  // namespace
+
 hakios_metal_texture *
 hakios_metal_texture_new_view(hakios_metal_texture *p, unsigned pixel_format, unsigned type, unsigned base_level,
     unsigned levels, unsigned base_slice, unsigned slices)
 {
     const MaliFormat *f = findFormat(pixel_format);
-    if (p == nullptr || f == nullptr || f->bytes != p->bytes || type != p->type || base_level != 0 || levels != 1 ||
-        base_slice != 0 || slices != 1) {
-        fail("a texture view of MTLPixelFormat %u, type %u, levels %u+%u, slices %u+%u (the Mali build views level 0 of "
-            "a 2D texture, as a format of the same size)", pixel_format, type, base_level, levels, base_slice, slices);
+    if (p == nullptr || f == nullptr || f->bytes != p->bytes || type != p->type || levels == 0 ||
+        base_level + levels > p->levels || base_slice != 0 || slices != 1) {
+        fail("a texture view of MTLPixelFormat %u, type %u, levels %u+%u, slices %u+%u of one with %u level(s) (the Mali "
+            "build views levels of a texture, as a format of the same size, all its slices)", pixel_format, type,
+            base_level, levels, base_slice, slices, p ? p->levels : 0);
         return nullptr;
     }
-    hakios_metal_texture *t = textureOver(p->device, p->bo, p->offset, p->stride, type, f, pixel_format, p->width,
-        p->height, p->usage, 4);
-    p->retain();
-    t->parent = p;
-    t->surface = p->surface;
-    return t;
+    return levelsOf(p, f, pixel_format, type, base_level, levels);
 }
 
 hakios_metal_texture *
@@ -3068,15 +3476,44 @@ hakios_metal_texture *
 hakios_metal_texture_new_levels(hakios_metal_device *d, unsigned type, unsigned pixel_format, unsigned width,
     unsigned height, unsigned levels, unsigned usage)
 {
-    // mipmapped: its first level alone for now -- a sample past it clamps to it (blurrier, not wrong); an upload to
-    // a later level is refused where it is asked for
-    if (levels > 1) {
-        static std::atomic<bool> told{false};
-        if (!told.exchange(true)) {
-            fprintf(stderr, "hakios-metal: a texture of %u mip levels is given its first level only (Mali: not yet)\n", levels);
-        }
+    hakios_metal_texture *t = hakios_metal_texture_new(d, type, pixel_format, width, height, usage);
+    if (t == nullptr || levels <= 1) {
+        return t;
     }
-    return hakios_metal_texture_new(d, type, pixel_format, width, height, usage);
+    // MIPMAPPED: every level in one BO, each level's rows 64-byte aligned after the one before, then the levels' plane
+    // descriptors ("Generic Plane", level 0 first: the texture descriptor's Surfaces, Levels and Maximum LOD)
+    unsigned most = 1;
+    while (most < 16 && ((width >> most) || (type != 0 && (height >> most)))) most++;
+    if (levels > most) levels = most;
+    t->levels = levels;
+    uint64_t at = 0;
+    for (unsigned l = 0; l < levels; l++) {
+        t->level_off[l] = at;
+        t->level_stride[l] = ((t->levelWidth(l) + t->bw - 1) / t->bw * t->bytes + 63) & ~63u;
+        at += ((uint64_t)t->level_stride[l] * t->levelRows(l) + 63) & ~63ULL;
+    }
+    Bo bigger;
+    if (!d->newBo(bigger, at + 32 * levels, BIND_NOEXEC)) {
+        t->release();
+        return nullptr;
+    }
+    d->freeBo(t->bo);
+    t->bo = bigger;
+    t->planes_off = at;
+    for (unsigned l = 0; l < levels; l++) {
+        auto *plane = (uint32_t *)((uint8_t *)t->bo.cpu + at + 32 * l);
+        uint64_t va = t->gpu() + t->level_off[l];
+        uint32_t w = t->levelWidth(l), h = t->levelHeight(l);
+        memset(plane, 0, 32);
+        plane[0] = planeWord0(t);
+        plane[1] = t->level_stride[l] * t->levelRows(l);
+        plane[2] = (uint32_t)va;
+        plane[3] = (uint32_t)(va >> 32);
+        plane[4] = t->level_stride[l];
+        plane[6] = t->level_stride[l] * t->levelRows(l);
+        plane[7] = (w - 1) | (h - 1) << 16;
+    }
+    return t;
 }
 
 hakios_metal_texture *
@@ -3131,9 +3568,8 @@ hakios_metal_texture *
 hakios_metal_texture_new_compressed(hakios_metal_device *d, unsigned pixel_format, unsigned width, unsigned height,
     unsigned usage)
 {
-    (void)d; (void)usage;
-    fail("a compressed texture of MTLPixelFormat %u, %u x %u (not on the Mali yet)", pixel_format, width, height);
-    return nullptr;
+    // (the plug-in's UBWC on the Adreno; on the Mali, AFBC is not done yet: a linear texture, read the same way)
+    return hakios_metal_texture_new(d, 2, pixel_format, width, height, usage);
 }
 
 unsigned hakios_metal_texture_iosurface(hakios_metal_texture *t) { return t ? t->surface : 0; }
@@ -3155,7 +3591,8 @@ hakios_metal_format_block(unsigned pixel_format, unsigned *block_w, unsigned *bl
         fail("MTLPixelFormat %u is not served on the Mali yet", pixel_format);
         return 0;
     }
-    *block_w = *block_h = 1;
+    *block_w = f->bw;
+    *block_h = f->bh;
     *bytes = f->bytes;
     return 1;
 }
@@ -3166,12 +3603,21 @@ hakios_metal_texture_plan_bytes(unsigned type, unsigned pixel_format, unsigned w
 {
     (void)usage;
     const MaliFormat *f = findFormat(pixel_format);
-    if (f == nullptr || type != 2 || depth > 1 || levels > 1 || samples > 1) {
+    if (f == nullptr || type != 2 || depth > 1 || samples > 1 || width == 0 || height == 0) {
         fail("a texture of type %u, MTLPixelFormat %u, %u levels, %u samples (not on the Mali yet)", type, pixel_format,
             levels, samples);
         return -1;
     }
-    *bytes = (((uint64_t)((width * f->bytes + 63) & ~63u) * height) + 0x3fff) & ~0x3fffULL;
+    // as hakios_metal_texture_new(_levels) lays it out: each level's rows (of blocks) 64-byte aligned, the levels' plane
+    // descriptors after them
+    uint64_t at = 0;
+    unsigned l = 0;
+    for (; l < (levels ? levels : 1) && l < 16 && (l == 0 || (width >> l) || (height >> l)); l++) {
+        unsigned w = width >> l ? width >> l : 1, h = height >> l ? height >> l : 1;
+        at += ((uint64_t)(((w + f->bw - 1) / f->bw * f->bytes + 63) & ~63u) * ((h + f->bh - 1) / f->bh) + 63) & ~63ULL;
+    }
+    if (l > 1) at += 32 * l;
+    *bytes = (at + 0x3fff) & ~0x3fffULL;
     return 0;
 }
 
@@ -3179,22 +3625,14 @@ int
 hakios_metal_texture_read_level(hakios_metal_texture *t, unsigned level, unsigned x, unsigned y, unsigned w, unsigned h,
     void *bytes, uint64_t bytes_per_row)
 {
-    if (level != 0) {
-        fail("a texture's level %u (one level only on the Mali yet)", level);
-        return -1;
-    }
-    return hakios_metal_texture_read(t, x, y, w, h, bytes, bytes_per_row);
+    return copyRows(t, x, y, w, h, (uint8_t *)bytes, bytes_per_row, false, level);
 }
 
 int
 hakios_metal_texture_replace_level(hakios_metal_texture *t, unsigned level, unsigned x, unsigned y, unsigned w,
     unsigned h, const void *bytes, uint64_t bytes_per_row)
 {
-    if (level != 0) {
-        fail("a texture's level %u (one level only on the Mali yet)", level);
-        return -1;
-    }
-    return hakios_metal_texture_replace(t, x, y, w, h, bytes, bytes_per_row);
+    return copyRows(t, x, y, w, h, (uint8_t *)bytes, bytes_per_row, true, level);
 }
 
 int
@@ -3225,52 +3663,105 @@ hakios_metal_texture_replace_3d(hakios_metal_texture *t, unsigned level, unsigne
 int
 hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass *pass)
 {
-    hakios_metal_texture *t = pass ? pass->color0 : nullptr;
-    if (cb == nullptr || t == nullptr) {
+    if (cb != nullptr && atLevels(pass)) {
+        struct hakios_metal_render_pass q;
+        hakios_metal_texture *views[8];
+        if (!passAtLevels(pass, q, views)) return -1;
+        int r = hakios_metal_cb_clear(cb, &q);
+        for (auto *v : views) if (v) v->release();
+        return r;
+    }
+    // THE ATTACHMENTS CLEARED (Clear load action), any of the eight: four a Mali pass (the tile buffer's four kilobytes
+    // a tile), each its own render target -- one not cleared is not in the pass at all
+    struct Cleared { hakios_metal_texture *t; const double *color; unsigned store; };
+    Cleared c[8];
+    unsigned nc = 0;
+    if (cb == nullptr || pass == nullptr || pass->color0 == nullptr) {
         fail("a clear without a colour attachment");
         return -1;
     }
-    if (pass->load_action != 2) {
+    if (pass->load_action == 2) c[nc++] = { pass->color0, pass->clear_color, pass->store_action };
+    for (unsigned i = 0; i < 7; i++) {
+        const auto &m = pass->more[i];
+        if (m.texture != nullptr && m.load_action == 2) c[nc++] = { m.texture, m.clear_color, m.store_action };
+    }
+    bool zs_clear = (pass->depth && pass->depth_load_action == 2) || (pass->stencil && pass->stencil_load_action == 2);
+    static const double kNone[4] = { 0, 0, 0, 0 };
+    if (nc == 0 && !zs_clear) {
         return 0;                                       // nothing cleared, nothing drawn: nothing to do
     }
-    if (!cb->queue->device->heap_ok || (t->format != 70 && t->format != 71 && t->format != 80 && t->format != 81) ||
-        !(t->usage & HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET) || pass->depth || pass->stencil) {
-        fail("a clear of MTLPixelFormat %u%s (RGBA8/BGRA8 colour alone on the Mali yet)", t->format,
-            pass->depth || pass->stencil ? " with depth or stencil" : "");
-        return -1;
+    if (nc == 0) {
+        c[nc++] = { pass->color0, kNone, 0 };           // (depth or stencil alone: colour 0 in the pass, not written)
     }
-    for (unsigned i = 0; i < 7; i++) {
-        if (pass->more[i].texture) {
-            fail("a clear of colour attachments past 0 (not on the Mali yet)");
+    hakios_metal_texture *t0 = c[0].t;
+    for (unsigned i = 0; i < nc; i++) {
+        hakios_metal_texture *t = c[i].t;
+        if (!cb->queue->device->heap_ok || !drawable(t->format) || t->width != t0->width || t->height != t0->height) {
+            fail("a clear of MTLPixelFormat %u, %ux%u (RGBA8/BGRA8/BGR5A1/B5G6R5 attachments of one size on the Mali yet)",
+                t->format, t->width, t->height);
             return -1;
         }
     }
-    DrawJob dj = {};
-    dj.clear_only = true;
-    dj.target_va = t->gpu();
-    dj.width = t->width;
-    dj.height = t->height;
-    dj.row_bytes = t->stride;
-    bool bgra = t->format == 80 || t->format == 81, srgb = t->format == 71 || t->format == 81;
-    uint32_t swizzle = bgra ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
-    dj.rt1 = 19 << 3 | 2 << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16;
-    dj.write = pass->store_action == 1;
-    dj.clear = unorm8(pass->clear_color[0]) | unorm8(pass->clear_color[1]) << 8 | unorm8(pass->clear_color[2]) << 16 |
-        (uint32_t)unorm8(pass->clear_color[3]) << 24;
-    dj.blend[0] = 1u << 9;
-    dj.blend[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
-    dj.blend[2] = 1 | 3 << 3;
-    dj.blend[3] = 237u << 12;
-    dj.mode = 8;
-    dj.instances = 1;
-    dj.scissor_max = (t->width - 1) | (t->height - 1) << 16;
-    Job j = {};
-    j.shader = DRAW;
-    j.dst = cb->draws.size();
-    cb->draws.push_back(dj);
-    cb->blits.push_back(j);
-    t->retain();
-    cb->held_textures.push_back(t);
+    auto rt1Of = [](const hakios_metal_texture *t) { uint32_t w = 0; rtFormat(t->format, w); return w; };
+    auto colourOf = [](const double *k) {
+        return unorm8(k[0]) | unorm8(k[1]) << 8 | unorm8(k[2]) << 16 | (uint32_t)unorm8(k[3]) << 24;
+    };
+    for (unsigned at = 0; at < nc; at += 4) {
+        DrawJob dj = {};
+        hakios_metal_texture *t = c[at].t;
+        dj.clear_only = true;
+        dj.target_va = t->gpu();
+        dj.width = t->width;
+        dj.height = t->height;
+        dj.row_bytes = t->stride;
+        dj.rt1 = rt1Of(t);
+        dj.write = c[at].store == 1;
+        dj.clear = colourOf(c[at].color);
+        dj.blend[0] = 1u << 9;
+        dj.blend[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
+        dj.blend[2] = 1 | 3 << 3;
+        dj.blend[3] = 237u << 12;
+        dj.rts = nc - at < 4 ? nc - at : 4;
+        for (unsigned i = 1; i < dj.rts; i++) {
+            DrawJob::More &m = dj.more[i - 1];
+            hakios_metal_texture *u = c[at + i].t;
+            m.va = u->gpu();
+            m.row_bytes = u->stride;
+            m.rt1 = rt1Of(u);
+            m.clear = colourOf(c[at + i].color);
+            m.write = c[at + i].store == 1;
+            m.texture = u;
+            m.blend[0] = 1u << 9;
+            m.blend[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
+            m.blend[2] = 1 | 3 << 3 | i << 16;
+            m.blend[3] = 237u << 12;
+        }
+        if (at == 0 && zs_clear) {
+            const char *why = nullptr;
+            if (!zsOf(pass, dj, t->width, t->height, false, why)) {
+                fail("a clear: %s", why);
+                return -1;
+            }
+            for (hakios_metal_texture *x : { pass->depth, pass->stencil }) {
+                if (x != nullptr) {
+                    x->retain();
+                    cb->held_textures.push_back(x);
+                }
+            }
+        }
+        dj.mode = 8;
+        dj.instances = 1;
+        dj.scissor_max = (t->width - 1) | (t->height - 1) << 16;
+        Job j = {};
+        j.shader = DRAW;
+        j.dst = cb->draws.size();
+        cb->draws.push_back(dj);
+        cb->blits.push_back(j);
+        for (unsigned i = 0; i < dj.rts; i++) {
+            c[at + i].t->retain();
+            cb->held_textures.push_back(c[at + i].t);
+        }
+    }
     return 0;
 }
 
@@ -3306,26 +3797,188 @@ hakios_metal_cb_refuse(hakios_metal_cb *cb, const char *why)
 
 void hakios_metal_cb_skip_refused(hakios_metal_cb *cb, int on) { if (cb) cb->skip_refused = on != 0; }
 
-// the rest: Adreno's GMEM and its tuning, profiles and counts (none here), and what is refused by name
+// TEXTURE COPIES AND SCALED BLITS. A copy of the same size between formats of one texel size is a byte copy, row by
+// row, on the compute blit shaders (any format); a scale, a rotation, or a big copy into an RGBA8/BGRA8 texture is a draw
+// of the driver's blit program (mali_blit_compile): the source level sampled at each destination pixel's centre.
+namespace {
+hakios_metal_program *
+blitProgram(hakios_metal_device *d)
+{
+    std::lock_guard<std::mutex> g(d->preload_lock);
+    if (d->blit_prog != nullptr || d->blit_failed) {
+        if (d->blit_prog == nullptr) fail("the driver's blit draw could not be built");
+        return d->blit_prog;
+    }
+    auto *p = new hakios_metal_program;
+    char why[256] = "";
+    if (mali_blit_compile(&p->vs, &p->fs, why, sizeof(why)) != 0 || !p->upload(d)) {
+        fail("the driver's blit draw: %s", why[0] ? why : gError.c_str());
+        d->blit_failed = true;
+        p->release();
+        return nullptr;
+    }
+    snprintf(p->name, sizeof(p->name), "hakios_blit");
+    d->blit_prog = p;
+    return p;
+}
+
+unsigned linearOf(unsigned f) { return f == 71 ? 70 : f == 81 ? 80 : f; }
+
+// a draw of FROM's level FL into the DW x DH rectangle at (DX, DY) of TO's level TL, the destination pixel (x, y) (its
+// centre) sampled at normalized (x m0 + y m1 + m2, x m3 + y m4 + m5) of the source level
+int
+blitDraw(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned fl, hakios_metal_texture *to, unsigned tl, unsigned dx,
+    unsigned dy, unsigned dw, unsigned dh, const float m[6], bool linear, bool raw)
+{
+    hakios_metal_device *d = cb->queue->device;
+    hakios_metal_program *bp = blitProgram(d);
+    if (bp == nullptr) return -1;
+    // the two levels as textures of their own; a byte copy reads and writes them without sRGB conversion
+    unsigned ff = raw ? linearOf(from->format) : from->format, tf = raw ? linearOf(to->format) : to->format;
+    hakios_metal_texture *src = levelsOf(from, findFormat(ff), ff, from->type == 7 ? 2 : from->type, fl, 1);
+    hakios_metal_texture *dst = levelsOf(to, findFormat(tf), tf, 2, tl, 1);
+    src->depth = dst->depth = 1;
+    dst->usage |= HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET;   // (the Mali draws into any RGBA8 texture)
+    hakios_metal_sampler smp;
+    memset(smp.words, 0, sizeof(smp.words));
+    smp.words[0] = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 23 | 1u << 25 | 1u << 26 |
+        (linear ? 0u : 1u << 27 | 1u << 28);
+    struct hakios_metal_render_pass pass;
+    memset(&pass, 0, sizeof(pass));
+    pass.color0 = dst;
+    pass.load_action = dx == 0 && dy == 0 && dw == dst->width && dh == dst->height ? 0 : 1;
+    pass.store_action = 1;
+    struct hakios_metal_viewport vp = { (double)dx, (double)dy, (double)dw, (double)dh, 0, 1 };
+    struct hakios_metal_scissor sc = { dx, dy, dw, dh };
+    uint32_t words[6];
+    memcpy(words, m, sizeof(words));
+    hakios_metal_texture *texs[1] = { src };
+    hakios_metal_sampler *smps[1] = { &smp };
+    int r = drawImpl(cb, bp, &pass, &vp, &sc, 3, 0, 3, 1, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, texs, 1, smps, 1,
+        nullptr, words, 6);
+    src->release();
+    dst->release();
+    return r;
+}
+}  // namespace
+
 int
 hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned sx, unsigned sy,
     unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned dx, unsigned dy, unsigned dw, unsigned dh,
     int linear)
 {
-    (void)from; (void)from_level; (void)sx; (void)sy; (void)sw; (void)sh; (void)to; (void)to_level; (void)dx; (void)dy;
-    (void)dw; (void)dh; (void)linear;
-    fail("a scaled texture blit (not on the Mali yet)");
-    if (cb) hakios_metal_cb_fail(cb, gError.c_str());
-    return -1;
+    const char *why = nullptr;
+    if (cb == nullptr || from == nullptr || to == nullptr) why = "a texture copy without its two textures";
+    else if (from->samples > 1 || to->samples > 1) why = "a multisample resolve (not on the Mali yet)";
+    else if (from_level >= from->levels || to_level >= to->levels) why = "a texture copy of a level the texture has not got";
+    else if (sw == 0 || sh == 0 || dw == 0 || dh == 0) return 0;
+    else if (sx + sw > from->levelWidth(from_level) || sy + sh > from->levelHeight(from_level) ||
+             dx + dw > to->levelWidth(to_level) || dy + dh > to->levelHeight(to_level))
+        why = "a texture copy outside a texture";
+    if (why != nullptr) {
+        fail("%s", why);
+        if (cb) hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
+    }
+    bool same = sw == dw && sh == dh;
+    bool blocks = from->bw > 1 || from->bh > 1 || to->bw > 1 || to->bh > 1;
+    if (blocks && !same && (to->bw > 1 || to->bh > 1)) {
+        fail("a scaled copy into a compressed texture (MTLPixelFormat %u)", to->format);
+        hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
+    }
+    blocks = blocks && same;                            // (a scale from a compressed one: drawn, the GPU decodes it)
+    if (blocks) {
+        // a compressed format: copied block for block, between two of one block size, on block boundaries
+        if (!same || from->bw != to->bw || from->bh != to->bh || from->bytes != to->bytes || sx % from->bw || sy % from->bh ||
+            dx % to->bw || dy % to->bh) {
+            fail("a copy of a compressed texture other than block for block (MTLPixelFormat %u into %u)", from->format,
+                to->format);
+            hakios_metal_cb_fail(cb, gError.c_str());
+            return -1;
+        }
+        sx /= from->bw; dx /= from->bw; sw = (sw + from->bw - 1) / from->bw;
+        sy /= from->bh; dy /= from->bh; sh = (sh + from->bh - 1) / from->bh;
+    }
+    if (same && from->bytes == to->bytes && (blocks || !drawable(to->format) || sh <= 16)) {
+        // A BYTE COPY: one compute blit for rows that follow each other in both, else one a row
+        uint64_t src = from->gpu() + from->levelOffset(from_level), dst = to->gpu() + to->levelOffset(to_level);
+        uint32_t ss = from->levelStride(from_level), ds = to->levelStride(to_level), row = sw * from->bytes;
+        bool whole = sx == 0 && dx == 0 && ss == ds && row == ss;
+        unsigned jobs = whole ? 1 : sh;
+        if (jobs > 256) {
+            fail("a texture copy of %u rows of MTLPixelFormat %u (one a row: a copy that big is drawn, RGBA8/BGRA8 only)",
+                sh, to->format);
+            hakios_metal_cb_fail(cb, gError.c_str());
+            return -1;
+        }
+        for (unsigned r = 0; r < jobs; r++) {
+            uint64_t s = src + (uint64_t)(sy + r) * ss + (uint64_t)sx * from->bytes;
+            uint64_t t = dst + (uint64_t)(dy + r) * ds + (uint64_t)dx * to->bytes;
+            uint64_t n = whole ? (uint64_t)row * sh : row;
+            bool w = ((s | t | n) & 3) == 0;
+            Job j = {};
+            j.shader = w ? 0u : 2u;
+            j.dst = t;
+            j.src = s;
+            j.count = (uint32_t)(w ? n / 4 : n);
+            cb->blits.push_back(j);
+        }
+        from->retain();
+        cb->held_textures.push_back(from);
+        to->retain();
+        cb->held_textures.push_back(to);
+        return 0;
+    }
+    if (!drawable(to->format) || (same && from->bytes != to->bytes)) {
+        fail("a %s texture copy from MTLPixelFormat %u into %u (into RGBA8/BGRA8 only on the Mali yet)", same ? "" : "scaled",
+            from->format, to->format);
+        hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
+    }
+    // A DRAW: destination pixel x (centre) -> source x' = sx + (x - dx) * sw / dw, normalized by the source level's width
+    float W = (float)from->levelWidth(from_level), H = (float)from->levelHeight(from_level);
+    float ku = (float)sw / dw / W, kv = (float)sh / dh / H;
+    float m[6] = { ku, 0, (float)sx / W - dx * ku, 0, kv, (float)sy / H - dy * kv };
+    if (blitDraw(cb, from, from_level, to, to_level, dx, dy, dw, dh, m, linear && !same, same) != 0) {
+        hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
+    }
+    return 0;
 }
 
 int
 hakios_metal_cb_blit_rotated(hakios_metal_cb *cb, hakios_metal_texture *from, hakios_metal_texture *to, unsigned rotation)
 {
-    (void)from; (void)to;
-    fail("a rotated texture blit (%u, not on the Mali yet)", rotation);
-    if (cb) hakios_metal_cb_fail(cb, gError.c_str());
-    return -1;
+    // destination pixel (x, y) of TO (w x h) from FROM (W x H), normalized: 1 a quarter turn (TO's sides FROM's swapped):
+    // u = y / H... each case the source position of the destination's, as a6xx_rotation turns
+    if (cb == nullptr || from == nullptr || to == nullptr || rotation > 5 || !drawable(to->format)) {
+        fail("a rotated texture blit (%u) into MTLPixelFormat %u (RGBA8/BGRA8, rotations 0 to 5)", rotation, to ? to->format : 0);
+        if (cb) hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
+    }
+    float W = (float)from->width, H = (float)from->height, w = (float)to->width, h = (float)to->height;
+    bool swap = rotation == 1 || rotation == 3;
+    if ((swap ? (to->width != from->height || to->height != from->width) : (to->width != from->width || to->height != from->height))) {
+        fail("a rotated texture blit (%u) between textures of %ux%u and %ux%u", rotation, from->width, from->height, to->width,
+            to->height);
+        hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
+    }
+    float m[6];
+    switch (rotation) {
+    case 0: { float a[6] = { 1 / W, 0, 0, 0, 1 / H, 0 }; memcpy(m, a, sizeof(m)); break; }
+    case 1: { float a[6] = { 0, 1 / W, 0, -1 / H, 0, w / H }; memcpy(m, a, sizeof(m)); break; }      // 90 clockwise
+    case 2: { float a[6] = { -1 / W, 0, 1, 0, -1 / H, 1 }; memcpy(m, a, sizeof(m)); break; }         // 180
+    case 3: { float a[6] = { 0, -1 / W, h / W, 1 / H, 0, 0 }; memcpy(m, a, sizeof(m)); break; }      // 270
+    case 4: { float a[6] = { -1 / W, 0, 1, 0, 1 / H, 0 }; memcpy(m, a, sizeof(m)); break; }          // flip left-right
+    default: { float a[6] = { 1 / W, 0, 0, 0, -1 / H, 1 }; memcpy(m, a, sizeof(m)); break; }         // flip top-bottom
+    }
+    if (blitDraw(cb, from, 0, to, 0, 0, 0, to->width, to->height, m, false, true) != 0) {
+        hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
+    }
+    return 0;
 }
 
 int
@@ -3339,12 +3992,17 @@ hakios_metal_cb_append(hakios_metal_cb *cb, hakios_metal_cb *other)
 int
 hakios_metal_cb_generate_mipmaps(hakios_metal_cb *cb, hakios_metal_texture *t)
 {
-    (void)cb;
-    if (t != nullptr && t->levels <= 1) {
+    if (t == nullptr || t->levels <= 1) {
         return 0;                                       // one level: nothing to make
     }
-    fail("mipmaps (not on the Mali yet)");
-    return -1;
+    // each level from the one above, halved with linear filtering
+    for (unsigned l = 1; l < t->levels; l++) {
+        if (hakios_metal_cb_blit(cb, t, l - 1, 0, 0, t->levelWidth(l - 1), t->levelHeight(l - 1), t, l, 0, 0, t->levelWidth(l),
+                t->levelHeight(l), 1) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int
