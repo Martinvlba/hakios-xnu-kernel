@@ -1,0 +1,3 @@
+# rc.jobs.scroll's Settings part, staying in Settings at the end (for a screenshot)
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8
+/redwood/bin/rwtouch tap 0.376 0.758 wait 5 zigzag 0.5 0.75 0.35 500 6 wait 2 swipe 0.5 0.8 0.5 0.3 150 wait 2 swipe 0.5 0.3 0.5 0.8 150

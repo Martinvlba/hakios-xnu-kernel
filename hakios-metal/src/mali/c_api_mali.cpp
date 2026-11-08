@@ -25,6 +25,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <sys/sysctl.h>
+#include <chrono>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <dlfcn.h>
@@ -660,10 +661,13 @@ struct DrawJob {
     float z_clear = 0;
     uint32_t s_clear = 0;
     uint32_t zsd[8] = {};
+    const char *name = "";                              // the program's (boot-arg metal_stats; held by the cb)
     uint32_t tls_size = 0;                              // bytes a thread spills (the larger stage's): a local storage
                                                         // descriptor of its own at the area's end (drawBytes)
     // the Load action: the preload draw first, in the same Mali pass (compile_mali.c's mali_preload_compile)
     bool load = false;
+    bool load0 = false;                                 // colour attachment 0 itself loads (else the preload leaves
+                                                        // it to its clear: another target is what loads)
     uint64_t pre_pos_spd = 0, pre_frag_spd = 0;
     std::vector<uint32_t> pre_vs_fau, pre_fs_fau;
     hakios_metal_texture *pre_target = nullptr;
@@ -834,7 +838,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         uint64_t pbl_at = (psrt_at + 0x80 + (2 * nt + 1) * 32 + 0x3f) & ~0x3fULL;
         auto *pbl = (uint32_t *)(area + pbl_at);
         for (unsigned i = 0; i < nt; i++) {
-            bool loads = i == 0 || (dj.more[i - 1].load && !dj.more[i - 1].missing);
+            bool loads = i == 0 ? dj.load0 : (dj.more[i - 1].load && !dj.more[i - 1].missing);
             auto *b = pbl + 4 * i;
             b[0] = 1u << 9 | (loads ? 0u : 1u);
             b[1] = 0x132 | 0x132 << 12 | (loads ? 0xfu : 0u) << 28;
@@ -993,7 +997,7 @@ constexpr unsigned DRAW_WORDS = 62 + 45; // (instructions emitDraw writes, at mo
 bool
 samePass(const DrawJob &a, const DrawJob &b)
 {
-    if (a.clear_only || b.clear_only || !b.load || a.target_va != b.target_va || a.rts != b.rts || a.width != b.width ||
+    if (a.clear_only || b.clear_only || !b.load || !b.load0 || a.target_va != b.target_va || a.rts != b.rts || a.width != b.width ||
         a.height != b.height || a.row_bytes != b.row_bytes || a.zs != b.zs || a.z_va != b.z_va || a.s_va != b.s_va ||
         (b.zs && ((b.has_z && !b.z_load) || (b.has_s && !b.s_load)))) {
         return false;
@@ -1038,8 +1042,14 @@ drawBytes(const DrawJob &dj)
 }
 }  // namespace
 
+namespace {
+void passStats(hakios_metal_cb *cb);
+bool bootArg(const char *word);
+}  // namespace
+
 struct hakios_metal_cb {
     hakios_metal_queue *queue;
+    std::chrono::steady_clock::time_point committed_at; // (boot-arg metal_stats)
     std::vector<Job> blits;
     std::vector<hakios_metal_buffer *> held;    // retained until the GPU is done
     std::vector<hakios_metal_kernel *> kernels;
@@ -1151,6 +1161,10 @@ struct hakios_metal_queue {
                 }
                 uint64_t nothing = 0;
                 device->call(0x7f, &nothing, sizeof(nothing));        // (HakiosGPU: the queues and heaps into its log)
+            }
+            static const bool stats = bootArg("metal_stats");
+            if (stats) {
+                passStats(cb);
             }
             device->freeBo(cb->stream);
             cb->letGo();
@@ -1523,6 +1537,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
 
     cb->callback = callback;
     cb->context = context;
+    cb->committed_at = std::chrono::steady_clock::now();
     cb->status = HAKIOS_METAL_COMMITTED;
     if (!cb->error.empty()) {
         cb->status = HAKIOS_METAL_ERROR;
@@ -2031,6 +2046,64 @@ hakios_metal_cb_dispatch_threads(hakios_metal_cb *cb, hakios_metal_kernel *k, co
 // ---- textures and samplers ----
 
 namespace {
+// BOOT-ARG metal_stats: a command buffer that took 40 ms or more from its commit to its completion, said pass by pass
+// (each Mali pass: target size, draws, whether it preloads, its first program; the copies and dispatches between)
+void
+passStats(hakios_metal_cb *cb)
+{
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cb->committed_at).count();
+    if (ms < 40) {
+        return;
+    }
+    unsigned passes = 0, draws = 0, loads = 0, other = 0;
+    uint64_t pixels = 0;
+    std::string list;
+    for (size_t i = 0; i < cb->blits.size(); i++) {
+        const Job &b = cb->blits[i];
+        if (b.shader != DRAW) {
+            other++;
+            continue;
+        }
+        const DrawJob &dj = cb->draws[b.dst];
+        size_t k = i;
+        unsigned n = 1;
+        while (k + 1 < cb->blits.size() && cb->blits[k + 1].shader == DRAW && samePass(cb->draws[cb->blits[k].dst],
+                                                                                         cb->draws[cb->blits[k + 1].dst])) {
+            k++;
+            n++;
+        }
+        // why the next draw (into the same target) opened a pass of its own
+        const char *why = "";
+        if (k + 1 < cb->blits.size() && cb->blits[k + 1].shader == DRAW) {
+            const DrawJob &a = cb->draws[cb->blits[k].dst], &c = cb->draws[cb->blits[k + 1].dst];
+            if (a.target_va == c.target_va) {
+                why = c.clear_only || a.clear_only ? "clear" : !c.load ? "no load" : a.rts != c.rts ? "targets" :
+                    a.zs != c.zs ? "zs" : "samples a target";
+                for (unsigned m = 1; m < a.rts && m < c.rts; m++) {
+                    if (a.more[m - 1].va != c.more[m - 1].va) why = "other target n";
+                    else if (a.more[m - 1].missing != c.more[m - 1].missing) why = "missing n";
+                    else if (!c.more[m - 1].missing && !c.more[m - 1].load) why = "target n not loaded";
+                }
+            }
+        }
+        passes++;
+        draws += n;
+        loads += dj.load;
+        pixels += (uint64_t)dj.width * dj.height;
+        if (list.size() < 1500) {
+            char one[160];
+            snprintf(one, sizeof(one), " [%ux%u %u%s%s %s rts %u%s%s%s]", dj.width, dj.height, n, dj.load ? " L" : "",
+                dj.clear_only ? " C" : "", dj.name ? dj.name : "", dj.rts,
+                dj.rts > 1 ? (dj.more[0].missing ? "m" : dj.more[0].load ? "l" : dj.more[0].write ? "w" : "-") : "",
+                why[0] ? " | " : "", why);
+            list += one;
+        }
+        i = k;
+    }
+    fprintf(stderr, "hakios-metal: stats: %.1f ms: %u Mali passes (%u preload), %u draws, %u copies/dispatches, %.1f MP of "
+        "targets:%s\n", ms, passes, loads, draws, other, pixels / 1e6, list.c_str());
+}
+
 // a word in the boot-args (testing switches: metal_nozs)
 bool
 bootArg(const char *word)
@@ -3013,6 +3086,19 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         else if (!p->more_blend_refusal[i - 1].empty()) refused = p->more_blend_refusal[i - 1].c_str();
         rts = i + 1;
     }
+    // EVERY ATTACHMENT OF THE PASS IN EVERY DRAW (up to 4 targets): one the fragment function does not write is still
+    // in the Mali pass -- loaded, stored, cleared as the pass says -- its blend writing nothing. Without this a pass
+    // whose draws wrote attachment 1 only now and then (CoreAnimation's in Settings) split into a Mali pass at every
+    // change, each preloading and writing back the whole screen: 20-36 passes a frame, 100-240 ms.
+    for (unsigned i = rts; refused == nullptr && i <= 3; i++) {
+        const hakios_metal_render_pass::hakios_metal_color_attachment &m = pass->more[i - 1];
+        if (m.texture == nullptr) continue;
+        if (!drawable(m.texture->format) || m.texture->width != t->width || m.texture->height != t->height ||
+            m.store_action > 1) {
+            break;                                      // (left out, as before: a later one too)
+        }
+        rts = i + 1;
+    }
     for (unsigned i = rts; refused == nullptr && i < 8; i++) {
         if (pass->more[i - 1].texture != nullptr && pass->more[i - 1].load_action == 2) {
             static std::atomic<bool> told{false};
@@ -3023,7 +3109,8 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     bool loads = refused == nullptr && pass->load_action == 1;
     for (unsigned i = 1; refused == nullptr && i < rts; i++) {
-        loads = loads || (pass->more[i - 1].texture != nullptr && pass->more[i - 1].load_action == 1);
+        loads = loads || (pass->more[i - 1].texture != nullptr &&
+                          (pass->more[i - 1].load_action == 1 || !(p->fs.rt_written & 1u << i)));
     }
     hakios_metal_program *pre = loads ? preloadProgram(d, rts) : nullptr;
     if (loads && pre == nullptr) refused = d->preload_error.c_str();
@@ -3095,6 +3182,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             return -1;
         }
     }
+    dj.name = p->name;
     dj.pos_spd = p->pos_spd;
     dj.vary_spd = p->vary_spd;
     dj.frag_spd = p->frag_spd;
@@ -3134,6 +3222,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             return -1;
         }
         dj.load = true;
+        dj.load0 = pass->load_action == 1;
         dj.pre_pos_spd = pre->pos_spd;
         dj.pre_frag_spd = pre->frag_spd;
         dj.pre_target = t;                              // (held with the draw's target below)
@@ -3191,6 +3280,19 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         m.clear = a.load_action == 2 ? (unorm8(a.clear_color[0]) | unorm8(a.clear_color[1]) << 8 |
                                         unorm8(a.clear_color[2]) << 16 | (uint32_t)unorm8(a.clear_color[3]) << 24) : 0;
         m.texture = a.texture;
+        if (!(p->fs.rt_written & 1u << i)) {
+            // not written by this draw: in the pass only to keep the pass whole, exactly as it is -- loaded and stored
+            // back unchanged, never cleared here (as when it was left out: CoreAnimation's Settings showed another
+            // cell's label when this draw applied the attachment's Clear/DontCare)
+            m.load = true;
+            m.write = true;
+            m.clear = 0;
+            m.blend[0] = 1u << 9 | 1u;
+            m.blend[1] = 0x132 | 0x132 << 12;           // colour mask 0
+            m.blend[2] = 2u | 3 << 3 | i << 16;
+            m.blend[3] = 237u << 12;
+            continue;
+        }
         bool reads = p->more_blend_reads_dest[i - 1] || (p->fs.rt_read & 1u << i);
         m.blend[0] = 1u << 9 | (reads ? 1u : 0);
         m.blend[1] = p->more_blend_equation[i - 1];
