@@ -1572,6 +1572,9 @@ hakios_metal_cb_fill(hakios_metal_cb *cb, hakios_metal_buffer *buffer, uint64_t 
     Job j = {};
     j.shader = words ? 1u : 3u;
     j.dst = buffer->bo.va + offset;
+    if (getenv("HAKIOS_MALI_FAULT_TEST") != nullptr) {
+        j.dst = 0x1000;                                 // (a test of the kernel's recovery: an address nothing maps)
+    }
     j.value = words ? value * 0x01010101u : value;
     j.count = (uint32_t)(words ? length / 4 : length);
     cb->blits.push_back(j);
