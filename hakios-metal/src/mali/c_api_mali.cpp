@@ -242,6 +242,38 @@ struct hakios_metal_device {
         freeBo(bo);
     }
 
+    // COMMAND BUFFERS' STREAM BUFFERS, KEPT FOR THE NEXT: a buffer made, mapped and bound for each command buffer and
+    // unbound after cost 100-400 us of the commit (metal_cbtime); sizes powers of two from 64 KiB, at most 16 kept
+    std::vector<Bo> stream_pool;
+    bool takeStream(Bo &bo, uint64_t size)
+    {
+        uint64_t want = 64 * 1024;
+        while (want < size) want <<= 1;
+        {
+            std::lock_guard<std::mutex> g(lock);
+            for (size_t i = 0; i < stream_pool.size(); i++) {
+                if (stream_pool[i].size == want) {
+                    bo = stream_pool[i];
+                    stream_pool.erase(stream_pool.begin() + i);
+                    return true;
+                }
+            }
+        }
+        return newBo(bo, want, BIND_NOEXEC);
+    }
+    void giveStream(Bo &bo)
+    {
+        {
+            std::lock_guard<std::mutex> g(lock);
+            if (bo.handle != 0 && stream_pool.size() < 16) {
+                stream_pool.push_back(bo);
+                bo = Bo();
+                return;
+            }
+        }
+        freeBo(bo);
+    }
+
     void freeBo(Bo &bo)
     {
         std::lock_guard<std::mutex> g(lock);
@@ -1051,6 +1083,7 @@ struct hakios_metal_cb {
     hakios_metal_queue *queue;
     std::chrono::steady_clock::time_point committed_at; // (boot-arg metal_stats)
     Bo timestamps;                                      // ... the GPU's timestamp at each Mali pass's start and end
+    std::chrono::steady_clock::time_point bo_at, submitted_at, waited_at;   // (boot-arg metal_cbtime)
     unsigned timestamp_count = 0;
     std::vector<Job> blits;
     std::vector<hakios_metal_buffer *> held;    // retained until the GPU is done
@@ -1133,6 +1166,7 @@ struct hakios_metal_queue {
                     std::lock_guard<std::mutex> g(device->lock);
                     r = device->call(SYNCOBJ_WAIT, &w, sizeof(w));
                 }
+                cb->waited_at = std::chrono::steady_clock::now();
                 std::lock_guard<std::mutex> g(cb->lock);
                 if (r != 0) {
                     cb->error = "the GPU did not finish the command buffer in 10 s";
@@ -1164,11 +1198,24 @@ struct hakios_metal_queue {
                 uint64_t nothing = 0;
                 device->call(0x7f, &nothing, sizeof(nothing));        // (HakiosGPU: the queues and heaps into its log)
             }
-            static const bool stats = bootArg("metal_stats");
+            static const bool stats = bootArg("metal_stats"), cbtime = bootArg("metal_cbtime");
             if (stats) {
                 passStats(cb);
             }
-            device->freeBo(cb->stream);
+            if (cbtime) {
+                // commit -> stream BO made -> built and submitted -> the GPU's wait returned -> here (freed, called back)
+                static unsigned said;
+                auto us = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+                    return (long)std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
+                };
+                if (said++ < 400) {
+                    auto now = std::chrono::steady_clock::now();
+                    fprintf(stderr, "hakios-metal: cbtime: bo %ld, build+submit %ld, wait %ld, after %ld us (%zu jobs)\n",
+                        us(cb->committed_at, cb->bo_at), us(cb->bo_at, cb->submitted_at),
+                        us(cb->submitted_at, cb->waited_at), us(cb->waited_at, now), cb->blits.size());
+                }
+            }
+            device->giveStream(cb->stream);
             if (cb->timestamps.size != 0) {
                 device->freeBo(cb->timestamps);
                 cb->timestamps.size = 0;
@@ -1371,6 +1418,10 @@ hakios_metal_close(hakios_metal_device *d)
     if (d == nullptr) {
         return;
     }
+    for (Bo &b : d->stream_pool) {
+        d->freeBo(b);
+    }
+    d->stream_pool.clear();
     d->freeBo(d->descriptors);
     d->freeBo(d->heapdesc);
     if (d->heap_handle != 0) {
@@ -1573,7 +1624,9 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                 fau_size += 0x80 + (cb->blits[i].texture_count * 3 + cb->blits[i].sampler_count) * 32 + 0x40;
             }
         }
-        if (!d->newBo(cb->stream, fau_area + fau_size, BIND_NOEXEC)) {
+        bool stream_ok = d->takeStream(cb->stream, fau_area + fau_size);
+        cb->bo_at = std::chrono::steady_clock::now();
+        if (!stream_ok) {
             cb->error = gError;
             cb->status = HAKIOS_METAL_ERROR;
         } else {
@@ -1756,7 +1809,9 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                 qs.syncs = { sizeof(signal), 1, (uint64_t)(uintptr_t)&signal };
                 gs.group_handle = d->group;
                 gs.queue_submits = { sizeof(qs), 1, (uint64_t)(uintptr_t)&qs };
-                if (d->call(GROUP_SUBMIT, &gs, sizeof(gs)) != 0) {
+                int submitted = d->call(GROUP_SUBMIT, &gs, sizeof(gs));
+                cb->submitted_at = std::chrono::steady_clock::now();
+                if (submitted != 0) {
                     cb->error = "HakiosGPU did not take the submission";
                     cb->status = HAKIOS_METAL_ERROR;
                 } else {
