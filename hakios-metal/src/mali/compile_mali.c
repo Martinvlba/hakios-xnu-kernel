@@ -27,6 +27,7 @@
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_lower_blend.h"
 #include "compiler/glsl_types.h"
 #include "compiler/air/nir_air.h"
 #include "panfrost/compiler/pan_compiler.h"
@@ -427,6 +428,57 @@ lower_f2b1(nir_builder *b, nir_alu_instr *alu, void *data)
 	return true;
 }
 
+/* the blend mali_fragment_compile asks for (this thread's compile only) */
+static __thread const struct mali_shader_blend *blend_now;
+
+/* Metal's MTLBlendFactor as gallium's (nir_lower_blend's) */
+static enum pipe_blendfactor
+pipe_factor(unsigned metal)
+{
+	static const enum pipe_blendfactor table[19] = {
+		PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_SRC_COLOR, PIPE_BLENDFACTOR_INV_SRC_COLOR,
+		PIPE_BLENDFACTOR_SRC_ALPHA, PIPE_BLENDFACTOR_INV_SRC_ALPHA, PIPE_BLENDFACTOR_DST_COLOR, PIPE_BLENDFACTOR_INV_DST_COLOR,
+		PIPE_BLENDFACTOR_DST_ALPHA, PIPE_BLENDFACTOR_INV_DST_ALPHA, PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE,
+		PIPE_BLENDFACTOR_CONST_COLOR, PIPE_BLENDFACTOR_INV_CONST_COLOR, PIPE_BLENDFACTOR_CONST_ALPHA,
+		PIPE_BLENDFACTOR_INV_CONST_ALPHA, PIPE_BLENDFACTOR_SRC1_COLOR, PIPE_BLENDFACTOR_INV_SRC1_COLOR,
+		PIPE_BLENDFACTOR_SRC1_ALPHA, PIPE_BLENDFACTOR_INV_SRC1_ALPHA,
+	};
+	return metal < 19 ? table[metal] : PIPE_BLENDFACTOR_ONE;
+}
+
+/* BLENDING IN THE SHADER (what fixed function cannot do: two different multipliers, min/max): each such target's output
+ * replaced by blend(output, the target's pixel read from the tile buffer) -- Mesa's nir_lower_blend, as panfrost's blend
+ * shaders use it; the tile buffer holds R8G8B8A8 (c_api_mali.cpp's internal format for every target it serves). The
+ * hardware then writes the result as it is (c_api_mali.cpp: that target's equation a replace that reads the tile). */
+static void
+lower_shader_blend(nir_shader *s, const struct mali_shader_blend *blend, struct mali_kernel_binary *out)
+{
+	nir_lower_blend_options o;
+
+	memset(&o, 0, sizeof(o));
+	for (unsigned i = 0; i < 8; i++) {
+		nir_lower_blend_rt *rt = &o.rt[i];
+		const struct mali_blend_rt *m = i < 4 ? &blend->rt[i] : NULL;
+
+		rt->format = PIPE_FORMAT_R8G8B8A8_UNORM;
+		rt->colormask = 0xf;
+		rt->rgb = (nir_lower_blend_channel){ PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO };
+		rt->alpha = rt->rgb;
+		if (m == NULL || !(blend->mask & 1u << i)) {
+			continue;               /* a replace: nothing done to that target */
+		}
+		/* (Metal's write mask: alpha 1, blue 2, green 4, red 8) */
+		rt->colormask = (m->write_mask & 8 ? 1u : 0) | (m->write_mask & 4 ? 2u : 0) | (m->write_mask & 2 ? 4u : 0) |
+		    (m->write_mask & 1 ? 8u : 0);
+		rt->rgb = (nir_lower_blend_channel){ (enum pipe_blend_func)m->rgb_op, pipe_factor(m->src_rgb), pipe_factor(m->dst_rgb) };
+		rt->alpha = (nir_lower_blend_channel){ (enum pipe_blend_func)m->alpha_op, pipe_factor(m->src_alpha),
+		    pipe_factor(m->dst_alpha) };
+	}
+	o.scalar_blend_const = true;
+	NIR_PASS(_, s, nir_lower_blend, &o);
+	out->rt_read |= blend->mask;
+}
+
 static int
 compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, struct mali_kernel_binary *out, char *error,
     size_t error_size)
@@ -451,6 +503,12 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 	if (want == MESA_SHADER_COMPUTE) {
 		bound_to_grid(s);
 	}
+	if (want == MESA_SHADER_FRAGMENT && !s->info.fs.pixel_center_integer) {
+		/* Metal's [[position]] is the pixel's centre (x + 0.5, y + 0.5); panfrost's frag_coord is the pixel's corner
+		 * (nir_lower_frag_coord_to_pixel_coord: "pixel-center lowering already applied", as a Vulkan driver does with
+		 * this pass). Without it every position a shader read was half a pixel up and left. */
+		NIR_PASS(_, s, nir_lower_wpos_center);
+	}
 	pan_preprocess_nir(s, GPU_ID);
 	if (want != MESA_SHADER_COMPUTE) {
 		/* the stage's inputs and outputs from variables to I/O intrinsics, as gallium panfrost does after
@@ -460,6 +518,9 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 		NIR_PASS(_, s, nir_lower_indirect_derefs_to_if_else_trees, nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
 		NIR_PASS(_, s, nir_lower_io, nir_var_shader_in | nir_var_shader_out, attribute_slots,
 		    nir_lower_io_use_interpolated_input_intrinsics);
+		if (want == MESA_SHADER_FRAGMENT && blend_now != NULL && blend_now->mask != 0) {
+			lower_shader_blend(s, blend_now, out);
+		}
 		NIR_PASS(_, s, nir_opt_constant_folding);
 	}
 	NIR_PASS(_, s, nir_shader_instructions_pass, lower_res_indices, nir_metadata_control_flow, NULL);
@@ -725,6 +786,19 @@ mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant 
 }
 
 int
+mali_fragment_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
+    const struct mali_kernel_binary *vertex, const struct mali_shader_blend *blend, struct mali_kernel_binary *out, char *error,
+    size_t error_size)
+{
+	int r;
+
+	blend_now = blend;
+	r = mali_stage_compile(bitcode, size, constants, count, 1, vertex, out, error, error_size);
+	blend_now = NULL;
+	return r;
+}
+
+int
 mali_vertex_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
     const struct mali_vertex_fetch *fetch, struct mali_kernel_binary *out, char *error, size_t error_size)
 {
@@ -795,6 +869,75 @@ mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *f
 		var->data.location = FRAG_RESULT_DATA0 + t;
 		nir_store_var(&b, var, &tex->def, 0xf);
 		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, t, 0, 1, 0 };
+	}
+	if (compile_nir(b.shader, MESA_SHADER_FRAGMENT, vs->varyings, fs, error, error_size) != 0) {
+		goto done;
+	}
+	result = 0;
+done:
+	ralloc_free(mem);
+	if (result != 0) {
+		mali_kernel_binary_free(vs);
+		mali_kernel_binary_free(fs);
+	}
+	return result;
+}
+
+/*
+ * The driver's blit draw (c_api_mali.cpp: scaled texture copies, mipmap generation): the preload's triangle over the
+ * viewport, its fragment texture 0 sampled with sampler 0 at level 0, at the normalized coordinate
+ * u = x * w0 + y * w1 + w2, v = x * w3 + y * w4 + w5 of the fragment's position (x, y) -- push constant words 0 to 5,
+ * which a draw with no buffers leaves free.
+ */
+int
+mali_blit_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size)
+{
+	struct mali_kernel_binary pre_fs;
+	void *mem = ralloc_context(NULL);
+	nir_builder b;
+	nir_variable *var;
+	int result = -1;
+
+	memset(fs, 0, sizeof(*fs));
+	/* the vertex stage is the preload's */
+	if (mali_preload_compile(vs, &pre_fs, 1, error, error_size) != 0) {
+		ralloc_free(mem);
+		return -1;
+	}
+	mali_kernel_binary_free(&pre_fs);
+	snprintf(vs->name, sizeof(vs->name), "hakios_blit_vs");
+
+	b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_FRAGMENT, false), "hakios_blit_fs");
+	ralloc_steal(mem, b.shader);
+	b.shader->info.fs.origin_upper_left = true;
+	fs->stage = 2;
+	snprintf(fs->name, sizeof(fs->name), "hakios_blit_fs");
+	{
+		nir_def *fc = nir_load_frag_coord(&b);
+		nir_def *x = nir_channel(&b, fc, 0), *y = nir_channel(&b, fc, 1);
+		nir_def *mu = push_words(&b, 0, 3, 32), *mv = push_words(&b, 3, 3, 32);
+		nir_def *uv = nir_vec2(&b,
+		    nir_ffma(&b, x, nir_channel(&b, mu, 0), nir_ffma(&b, y, nir_channel(&b, mu, 1), nir_channel(&b, mu, 2))),
+		    nir_ffma(&b, x, nir_channel(&b, mv, 0), nir_ffma(&b, y, nir_channel(&b, mv, 1), nir_channel(&b, mv, 2))));
+		nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+
+		tex->op = nir_texop_txl;
+		tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+		tex->dest_type = nir_type_float32;
+		tex->coord_components = 2;
+		tex->texture_index = 0;
+		tex->sampler_index = 0;
+		tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, uv);
+		tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(&b, 0.0f));
+		nir_def_init(&tex->instr, &tex->def, 4, 32);
+		nir_builder_instr_insert(&b, &tex->instr);
+
+		var = nir_variable_create(b.shader, nir_var_shader_out, glsl_vec4_type(), "color");
+		var->data.location = FRAG_RESULT_DATA0;
+		nir_store_var(&b, var, &tex->def, 0xf);
+		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, 0, 0, 1, 0 };
+		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_SAMPLER, 0, 0, 1, 0 };
 	}
 	if (compile_nir(b.shader, MESA_SHADER_FRAGMENT, vs->varyings, fs, error, error_size) != 0) {
 		goto done;
