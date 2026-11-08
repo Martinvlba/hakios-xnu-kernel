@@ -334,6 +334,54 @@ depth_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 	return ok;
 }
 
+/* 7. what a full-screen (1080x2340) pass costs with one tiny draw: clear+store, clear alone, load+store, load+store of
+ * two attachments; each the mean of 20 command buffers, wall time commit to done */
+static void
+pass_bench(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
+{
+	const unsigned w = 1080, h = 2340, rt = 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET;
+	hakios_metal_texture *a = hakios_metal_texture_new(d, 2, 80, w, h, rt), *b = hakios_metal_texture_new(d, 2, 80, w, h, rt);
+	struct hakios_metal_scissor sc = { 0, 0, 16, 16 };
+	hakios_metal_buffer *small = hakios_metal_buffer_new(d, 256);
+	static const char *names[5] = { "empty command buffer", "clear+store", "clear, no store", "load+store",
+	    "load+store, 2 attachments" };
+
+	if (a == NULL || b == NULL) {
+		printf("mali_draw_test: bench: no textures (%s)\n", hakios_metal_error());
+		return;
+	}
+	for (int v = 0; v < 5; v++) {
+		long total = 0;
+		for (int r = 0; r < 21; r++) {
+			struct hakios_metal_render_pass pass;
+			struct timespec t0, t1;
+			hakios_metal_cb *cb = hakios_metal_cb_new(q);
+
+			memset(&pass, 0, sizeof(pass));
+			pass.color0 = a;
+			pass.load_action = v == 1 || v == 2 ? 2 : 1;
+			pass.store_action = v == 2 ? 0 : 1;
+			if (v == 4) {
+				pass.more[0].texture = b;
+				pass.more[0].load_action = 1;
+				pass.more[0].store_action = 1;
+			}
+			if (v > 0) hakios_metal_cb_draw(cb, flat, &pass, NULL, &sc, 3, 0, 3, 1, NULL, NULL, 0, NULL, NULL, 0);
+			else hakios_metal_cb_fill(cb, small, 0, 256, 0);
+			clock_gettime(CLOCK_MONOTONIC, &t0);
+			hakios_metal_cb_commit(cb, NULL, NULL);
+			hakios_metal_cb_wait(cb);
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			if (r > 0) total += (t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000;
+			hakios_metal_cb_free(cb);
+		}
+		printf("mali_draw_test: bench 1080x2340: %s: %ld us\n", names[v], total / 20);
+	}
+	hakios_metal_texture_free(a);
+	hakios_metal_texture_free(b);
+	hakios_metal_buffer_free(small);
+}
+
 int
 main(void)
 {
@@ -444,6 +492,7 @@ main(void)
 	/* mip levels, blits, clears past attachment 0, ASTC (hakios-metal 11-09) */
 	right = levels_and_blits(d, q, flat) && right;
 	right = depth_test(d, q, flat, col) && right;
+	pass_bench(d, q, flat);
 	/* sustained load, for the GPU's clock governor: 300 draws back to back, the first and last 20 timed */
 	{
 		long first = 0, last = 0;

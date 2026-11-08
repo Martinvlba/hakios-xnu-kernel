@@ -1050,6 +1050,8 @@ bool bootArg(const char *word);
 struct hakios_metal_cb {
     hakios_metal_queue *queue;
     std::chrono::steady_clock::time_point committed_at; // (boot-arg metal_stats)
+    Bo timestamps;                                      // ... the GPU's timestamp at each Mali pass's start and end
+    unsigned timestamp_count = 0;
     std::vector<Job> blits;
     std::vector<hakios_metal_buffer *> held;    // retained until the GPU is done
     std::vector<hakios_metal_kernel *> kernels;
@@ -1167,6 +1169,10 @@ struct hakios_metal_queue {
                 passStats(cb);
             }
             device->freeBo(cb->stream);
+            if (cb->timestamps.size != 0) {
+                device->freeBo(cb->timestamps);
+                cb->timestamps.size = 0;
+            }
             cb->letGo();
             cb->done.notify_all();
             if (cb->callback) {
@@ -1543,7 +1549,14 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
         cb->status = HAKIOS_METAL_ERROR;
     } else if (!cb->blits.empty()) {
         // the stream (from 0), then each job's push constants: 32 bytes for a blit, a kernel's fau_words for a dispatch
-        size_t words = 18 + cb->blits.size() * 20 + cb->draws.size() * DRAW_WORDS;
+        static const bool stats = bootArg("metal_stats");
+        size_t words = 18 + cb->blits.size() * 20 + cb->draws.size() * (DRAW_WORDS + (stats ? 4 : 0));
+        if (stats && !cb->draws.empty() && cb->timestamps.size == 0) {
+            if (!d->newBo(cb->timestamps, ((cb->draws.size() * 16) + 0xfff) & ~0xfffULL, BIND_NOEXEC)) {
+                cb->timestamps.size = 0;
+            }
+        }
+        cb->timestamp_count = 0;
         uint64_t fau_area = (words * 8 + 0xff) & ~0xffULL, fau_size = 0;
         std::vector<uint64_t> fau_at(cb->blits.size());
         for (size_t i = 0; i < cb->blits.size(); i++) {
@@ -1599,7 +1612,18 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                         pass_area = pc;
                         pass_va = cb->stream.va + fau_at[i];
                     }
+                    // (metal_stats: STORE_STATE timestamp, opcode 40, into the command buffer's timestamps, r80:r81
+                    // the address; after everything before it is done)
+                    auto stamp = [&] {
+                        if (cb->timestamps.size != 0 && (cb->timestamp_count + 1) * 8 <= cb->timestamps.size) {
+                            s[n++] = WAIT_ALL;
+                            s[n++] = move48(80, cb->timestamps.va + 8ULL * cb->timestamp_count++);
+                            s[n++] = 40ULL << 56 | 80ULL << 40 | 0ULL << 32;
+                        }
+                    };
+                    if (first) stamp();
                     emitDraw(d, dj, pc, cb->stream.va + fau_at[i], s, n, first, last, pass_area, pass_va);
+                    if (last) stamp();
                     cb->draw_areas.push_back(fau_at[i]);
                     if (last) {
                         pass_area = nullptr;
@@ -2086,13 +2110,18 @@ passStats(hakios_metal_cb *cb)
                 }
             }
         }
+        double gpu_us = -1;
+        if (cb->timestamps.size != 0 && 2 * passes + 1 < cb->timestamp_count) {
+            auto *ts = (volatile uint64_t *)cb->timestamps.cpu;
+            gpu_us = (double)(ts[2 * passes + 1] - ts[2 * passes]) / 24.576;    // (the system counter: 24.576 MHz)
+        }
         passes++;
         draws += n;
         loads += dj.load;
         pixels += (uint64_t)dj.width * dj.height;
         if (list.size() < 1500) {
             char one[160];
-            snprintf(one, sizeof(one), " [%ux%u %u%s%s %s rts %u%s%s%s]", dj.width, dj.height, n, dj.load ? " L" : "",
+            snprintf(one, sizeof(one), " [%.0fus %ux%u %u%s%s %s rts %u%s%s%s]", gpu_us, dj.width, dj.height, n, dj.load ? " L" : "",
                 dj.clear_only ? " C" : "", dj.name ? dj.name : "", dj.rts,
                 dj.rts > 1 ? (dj.more[0].missing ? "m" : dj.more[0].load ? "l" : dj.more[0].write ? "w" : "-") : "",
                 why[0] ? " | " : "", why);
