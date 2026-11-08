@@ -247,6 +247,26 @@ static int (*orig_function_supported)(void *context);
  * address it touched and where it was, both as they would be in the shared cache as built, which
  * "ipsw dyld a2s" turns into a name. Then the signal is let through to kill the process as before.
  */
+/* " ADDR" in the shared cache as built (unslid: ipsw dyld a2s), or " IMAGE+OFFSET" for an image outside it (the
+ * Metal plug-in, a program's own code): a frame of the crash line */
+static size_t
+say_frame(char *out, size_t size, uintptr_t address)
+{
+	size_t length = 0;
+	uintptr_t cache = (uintptr_t)_dyld_get_shared_cache_range(&length);
+	Dl_info info;
+
+	if (address >= cache && address < cache + length) {
+		return (size_t)snprintf(out, size, " %#lx", address - slide);
+	}
+	if (dladdr((void *)address, &info) != 0 && info.dli_fname != NULL) {
+		const char *image = strrchr(info.dli_fname, '/');
+		return (size_t)snprintf(out, size, " %s+%#lx", image != NULL ? image + 1 : info.dli_fname,
+		    address - (uintptr_t)info.dli_fbase);
+	}
+	return (size_t)snprintf(out, size, " ?%#lx", address);
+}
+
 static void
 say_the_fault(int signal_number, siginfo_t *info, void *context_in)
 {
@@ -262,21 +282,24 @@ say_the_fault(int signal_number, siginfo_t *info, void *context_in)
 	 * at [fp] and its return address at [fp + 8]. The crash itself is usually in a library
 	 * function -- strdup of a null name, say -- and the frame that matters is two or three up.
 	 */
-	char frames[8 * 20 + 1] = "";
+	char frames[16 * 48 + 1] = "";
 	size_t used = 0;
 	uintptr_t fp = context != NULL && context->uc_mcontext != NULL ? (uintptr_t)context->uc_mcontext->__ss.__fp : 0;
 
-	for (unsigned i = 0; i < 8 && fp != 0 && (fp & 7) == 0; i++) {
+	for (unsigned i = 0; i < 16 && fp != 0 && (fp & 7) == 0; i++) {
 		uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
 
 		if (ret == 0) {
 			break;
 		}
-		used += (size_t)snprintf(frames + used, sizeof(frames) - used, " %#lx", ret - slide);
+		used += say_frame(frames + used, sizeof(frames) - used, ret);
 		fp = next > fp ? next : 0;      /* the chain only ever goes up the stack */
 	}
-	say("hakios: signal %d at %p, pc %#lx, lr %#lx, called from%s (unslid)\n", signal_number,
-	    info != NULL ? info->si_addr : NULL, pc - slide, lr - slide, frames);
+	char pcs[2][64] = { "", "" };
+	say_frame(pcs[0], sizeof(pcs[0]), pc);
+	say_frame(pcs[1], sizeof(pcs[1]), lr);
+	say("hakios: signal %d at %p, pc%s, lr%s, called from%s (in the shared cache unslid, else IMAGE+offset)\n",
+	    signal_number, info != NULL ? info->si_addr : NULL, pcs[0], pcs[1], frames);
 	signal(signal_number, SIG_DFL);
 	raise(signal_number);
 }
@@ -1176,6 +1199,8 @@ hakios_init(void)
 	if (strcmp(name, "backboardd") == 0) {
 		char arguments[1024] = "";
 		size_t size = sizeof(arguments) - 1;
+
+		watch_for_faults();     /* (whichever renderer: the Metal one's crashes said nothing) */
 
 		/*
 		 * Boot-arg ca_vbl=1: CoreAnimation's frame clock from the display driver's refresh

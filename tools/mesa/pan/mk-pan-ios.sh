@@ -1,12 +1,12 @@
 #!/bin/bash
-# Mesa 26.2.5's panfrost compiler cross-built for the phone (arm64 iOS 16.5): the libraries the Metal driver's Mali
+# Mesa 26.2.6's panfrost compiler cross-built for the phone (arm64 iOS 16.5): the libraries the Metal driver's Mali
 # back end links, to compile shaders on the Pixel 8a itself for its Mali-G715 -- what tools/mk-mesa.sh does with 25.0.7
 # for redwood's Adreno, with the same cross compiler (xnu-deps/host/bin/xnu-clang) and SDK. Only the compiler's
 # archives are built (NIR, the compiler's glue, panfrost's compiler, util); the configuration is mk-pan-host.sh's.
 #
 #   tools/mesa/pan/mk-pan-ios.sh       -> xnu-deps/build/mesa26/build-ios/...  (archives listed in out-ios/archives)
 set -e
-VERSION=26.2.5
+VERSION=${MESA_VERSION:-26.2.6}
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)
 source "$ROOT/xnu-env.sh"
 B=$ROOT/xnu-deps/build/mesa26

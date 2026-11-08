@@ -18,6 +18,8 @@
  * tools/mesa/pan/mk-pan-ios.sh) plus -DAIR_MESA_NEW_NIR; `make ios-mali` reads them.
  */
 #include <pthread.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -409,6 +411,22 @@ lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
  * post-processing, I/O variables to intrinsics, the resource tables, the draw's system values, pan_shader_compile; OUT's
  * stage, name and resources are the caller's. 0, or -1 with ERROR (OUT then partly filled: the caller frees it).
  */
+/* f2u1/f2i1 -> x != 0.0: the Mali back end has no instruction for them (bi_emit_alu: "Unhandled ALU op f2u1", a trap);
+ * the front end avoids them, but NIR's own passes still make some (variable_blur_frag_lph); 0 and 1 (-1) are the only
+ * results in range, the rest are undefined */
+static bool
+lower_f2b1(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+	(void)data;
+	if ((alu->op != nir_op_f2u1 && alu->op != nir_op_f2i1)) {
+		return false;
+	}
+	b->cursor = nir_before_instr(&alu->instr);
+	nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
+	nir_def_replace(&alu->def, nir_fneu_imm(b, x, 0.0));
+	return true;
+}
+
 static int
 compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, struct mali_kernel_binary *out, char *error,
     size_t error_size)
@@ -468,6 +486,7 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 	NIR_PASS(_, s, nir_opt_algebraic);
 	NIR_PASS(_, s, nir_opt_constant_folding);
 	NIR_PASS(_, s, nir_opt_dce);
+	NIR_PASS(_, s, nir_shader_alu_pass, lower_f2b1, nir_metadata_control_flow, NULL);
 	if ((why = refusal(s)) != NULL) {
 		say(error, error_size, "%s: %s", out->name, why);
 		goto done;
@@ -528,6 +547,56 @@ done:
 	return result;
 }
 
+
+/*
+ * A COMPILE THAT TRAPS IS A COMPILE THAT FAILED, not a dead window server: Mesa's back end ends a case it has no code
+ * for in a trap or an abort (bi_emit_alu's "Unhandled ALU op f2u1" took backboardd down, and launchd started it again
+ * for the same end). While a thread compiles, SIGTRAP, SIGABRT and SIGILL on that thread jump back out of the compile,
+ * which then fails with the signal named (its memory is left behind); on any other thread they go to the handler there
+ * was before (the window server's own crash line, inject.c), and then as they would have.
+ */
+static __thread sigjmp_buf *compile_guard;
+static struct sigaction guard_before[3];
+static const int guard_signals[3] = { SIGTRAP, SIGABRT, SIGILL };
+static pthread_once_t guard_once = PTHREAD_ONCE_INIT;
+
+static void
+guard_handler(int signal_number, siginfo_t *info, void *context)
+{
+	if (compile_guard != NULL) {
+		siglongjmp(*compile_guard, signal_number);
+	}
+	for (int i = 0; i < 3; i++) {
+		if (guard_signals[i] != signal_number) {
+			continue;
+		}
+		const struct sigaction *b = &guard_before[i];
+		if ((b->sa_flags & SA_SIGINFO) && b->sa_sigaction != NULL) {
+			b->sa_sigaction(signal_number, info, context);
+			return;
+		}
+		if (b->sa_handler != SIG_DFL && b->sa_handler != SIG_IGN && b->sa_handler != NULL) {
+			b->sa_handler(signal_number);
+			return;
+		}
+	}
+	signal(signal_number, SIG_DFL);
+	raise(signal_number);
+}
+
+static void
+guard_install(void)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = guard_handler;
+	action.sa_flags = SA_SIGINFO | SA_NODEFER;
+	for (int i = 0; i < 3; i++) {
+		sigaction(guard_signals[i], &action, &guard_before[i]);
+	}
+}
+
 static int
 compile_stage(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, mesa_shader_stage want,
     const void *vs_varyings, const struct mali_vertex_fetch *fetch, struct mali_kernel_binary *out, char *error,
@@ -544,6 +613,18 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 
 	memset(out, 0, sizeof(*out));
 	pthread_once(&types_once, types_init);
+	pthread_once(&guard_once, guard_install);
+	sigjmp_buf jump;
+	sigjmp_buf *volatile outer = compile_guard;
+	int caught = sigsetjmp(jump, 1);
+	if (caught != 0) {
+		compile_guard = outer;
+		say(error, error_size, "the compiler stopped (signal %d) on %s", caught, out->name[0] ? out->name : "a function");
+		out->code = NULL;
+		out->varyings = NULL;
+		return -1;
+	}
+	compile_guard = &jump;
 	if (count != 0) {
 		values = ralloc_array(mem, struct air_constant_value, count);
 		for (unsigned i = 0; i < count; i++) {
@@ -616,6 +697,7 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 	}
 	result = compile_nir(s, want, vs_varyings, out, error, error_size);
 done:
+	compile_guard = outer;
 	ralloc_free(mem);
 	if (result != 0) {
 		mali_kernel_binary_free(out);

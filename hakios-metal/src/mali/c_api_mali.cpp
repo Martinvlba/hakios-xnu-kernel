@@ -133,6 +133,11 @@ struct hakios_metal_device {
     struct hakios_metal_program *preload_for[4] = {};  // the Load action's draw for 1 to 4 targets (preloadProgram)
     bool preload_failed_for[4] = {};
     std::mutex preload_lock;
+    // where a colour output with no attachment goes (DrawJob::More::missing): the GPU writes such a target back even
+    // with its write disabled -- at address 0 it faulted (AS1, a write at 0x80200) and the queue stopped
+    Bo scratch_rt;
+    uint64_t scratch_rt_size = 0;
+    std::mutex scratch_lock;
     std::string preload_error;
 
     int call(uint32_t selector, void *request, size_t size)
@@ -550,6 +555,8 @@ struct DrawJob {
     unsigned texture_count, sampler_count;
     uint64_t index_va = 0, index_size = 0;              // an indexed draw's indices (0: none)
     bool clear_only = false;                            // a pass with no geometry: the clear (hakios_metal_cb_clear)
+    uint32_t tls_size = 0;                              // bytes a thread spills (the larger stage's): a local storage
+                                                        // descriptor of its own at the area's end (drawBytes)
     // the Load action: the preload draw first, in the same Mali pass (compile_mali.c's mali_preload_compile)
     bool load = false;
     uint64_t pre_pos_spd = 0, pre_frag_spd = 0;
@@ -562,6 +569,7 @@ struct DrawJob {
         unsigned row_bytes;
         uint32_t rt1, clear, blend[4];
         bool write, load;
+        bool missing;                                   // written by the fragment function, absent from the pass
         hakios_metal_texture *texture;
     } more[3] = {};
 };
@@ -589,6 +597,8 @@ hierarchyMask(unsigned w, unsigned h, unsigned levels)
 // stages' push constants, the fragment stage's resource table; then RUN_IDVS, FINISH_TILING, RUN_FRAGMENT, each after a
 // WAIT for the one before. Registers in v11's layout (upstream Mesa's genxml v11.xml: v10's plus TILER_FLAGS2 at r61);
 // what each value is, hakios-kernel's the port's log ("render pipelines") and userland/src/mali_test.c.
+uint64_t drawBytes(const DrawJob &dj);
+
 void
 emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area_va, uint64_t *s, unsigned &n,
     bool first = true, bool last = true, uint8_t *pass_area = nullptr, uint64_t pass_va = 0)
@@ -695,7 +705,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         uint64_t pbl_at = (psrt_at + 0x80 + (2 * nt + 1) * 32 + 0x3f) & ~0x3fULL;
         auto *pbl = (uint32_t *)(area + pbl_at);
         for (unsigned i = 0; i < nt; i++) {
-            bool loads = i == 0 || dj.more[i - 1].load;
+            bool loads = i == 0 || (dj.more[i - 1].load && !dj.more[i - 1].missing);
             auto *b = pbl + 4 * i;
             b[0] = 1u << 9 | (loads ? 0u : 1u);
             b[1] = 0x132 | 0x132 << 12 | (loads ? 0xfu : 0u) << 28;
@@ -766,7 +776,22 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move48(16, dj.pos_spd);
     s[n++] = move48(18, dj.vary_spd);
     s[n++] = move48(20, dj.frag_spd);
-    s[n++] = move48(24, d->descriptors.va + 0x1200);                           // local storage: none
+    if (dj.tls_size != 0) {
+        // SPILLED REGISTERS: a shader too big for its registers (CoreAnimation's fixed_frag_lph_cpf) spills to thread
+        // local storage, which a draw had none of -- its stores went to addresses near 0 and the GPU faulted (AS1,
+        // writes at 0x600000, 0x8000000, ...). The descriptor as a dispatch's: per thread 16 << word 0 bytes, no
+        // threadgroup memory (word 1 = 31), the device's spill buffer (sized in drawImpl)
+        uint64_t ls_at = (drawBytes(dj) - 0x80 + 0x3f) & ~0x3fULL;
+        auto *ls = (uint32_t *)(area + ls_at);
+        memset(ls, 0, 32);
+        ls[0] = log2u((dj.tls_size + 15) / 16);
+        ls[1] = 31;
+        ls[2] = (uint32_t)(d->tls.va >> 8);
+        ls[3] = (uint32_t)(d->tls.va >> 40) | 1u << 28;
+        s[n++] = move48(24, area_va + ls_at);
+    } else {
+        s[n++] = move48(24, d->descriptors.va + 0x1200);                       // local storage: none
+    }
     s[n++] = move32(32, 0);
     s[n++] = move32(33, dj.count);
     s[n++] = move32(34, dj.instances);
@@ -839,7 +864,8 @@ samePass(const DrawJob &a, const DrawJob &b)
         return false;
     }
     for (unsigned i = 1; i < a.rts; i++) {
-        if (a.more[i - 1].va != b.more[i - 1].va || !b.more[i - 1].load) {
+        if (a.more[i - 1].va != b.more[i - 1].va || a.more[i - 1].missing != b.more[i - 1].missing ||
+            (!b.more[i - 1].missing && !b.more[i - 1].load)) {
             return false;
         }
     }
@@ -864,6 +890,9 @@ drawBytes(const DrawJob &dj)
     uint64_t bytes = 0x100 + 0x40 * dj.rts + 0x40 + ((dj.vs_fau.size() * 4 + 0x3f) & ~0x3fULL) + ((dj.fs_fau.size() * 4 + 0x3f) & ~0x3fULL);
     if (dj.texture_count || dj.sampler_count) {
         bytes += 0x80 + (dj.texture_count * 3 + dj.sampler_count) * 32 + 0x40;
+    }
+    if (dj.tls_size != 0) {
+        bytes += 0x80;                                  // (the local storage descriptor, 64-byte aligned, last)
     }
     if (dj.load) {
         bytes += 0x40 + ((dj.pre_vs_fau.size() * 4 + 0x3f) & ~0x3fULL) + ((dj.pre_fs_fau.size() * 4 + 0x3f) & ~0x3fULL) + 0x80 +
@@ -2625,7 +2654,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         if (!(w & 1)) continue;
         const hakios_metal_render_pass::hakios_metal_color_attachment &m = pass->more[i - 1];
         if (i > 3) refused = "a fragment function writing a colour attachment past 3 (not on the Mali yet)";
-        else if (m.texture == nullptr) refused = "a fragment function writing a colour attachment the pass does not have";
+        else if (m.texture == nullptr) { rts = i + 1; continue; }   // (Metal discards the output: see dj.more below)
         else if (m.texture->format != 70 && m.texture->format != 71 && m.texture->format != 80 && m.texture->format != 81)
             refused = "a colour attachment past 0 not RGBA8/BGRA8 (not on the Mali yet)";
         else if (m.texture->width != t->width || m.texture->height != t->height || m.level || m.slice)
@@ -2645,7 +2674,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     bool loads = refused == nullptr && pass->load_action == 1;
     for (unsigned i = 1; refused == nullptr && i < rts; i++) {
-        loads = loads || pass->more[i - 1].load_action == 1;
+        loads = loads || (pass->more[i - 1].texture != nullptr && pass->more[i - 1].load_action == 1);
     }
     hakios_metal_program *pre = loads ? preloadProgram(d, rts) : nullptr;
     if (loads && pre == nullptr) refused = d->preload_error.c_str();
@@ -2717,6 +2746,16 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.pos_spd = p->pos_spd;
     dj.vary_spd = p->vary_spd;
     dj.frag_spd = p->frag_spd;
+    {
+        uint32_t tls = p->vs.tls_size > p->fs.tls_size ? p->vs.tls_size : p->fs.tls_size;
+        if (tls != 0) {
+            if (!grow(d, d->tls, (uint64_t)npot((tls + 15) & ~15u) * d->max_threads * d->core_range)) {
+                fail("draw with %s: no memory for %u bytes of spilled registers a thread", p->name, tls);
+                return -1;
+            }
+            dj.tls_size = tls;
+        }
+    }
     dj.vary_size = p->vs.varying_bytes;
     dj.target_va = t->gpu();
     dj.width = t->width;
@@ -2755,6 +2794,38 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     for (unsigned i = 1; i < rts; i++) {
         const hakios_metal_render_pass::hakios_metal_color_attachment &a = pass->more[i - 1];
         DrawJob::More &m = dj.more[i - 1];
+        if (a.texture == nullptr) {
+            // AN OUTPUT WITH NO ATTACHMENT, which Metal discards: a target of its own in the tile buffer, never written
+            // back, whose blend writes no channel (CoreAnimation's fixed_frag_lph_cpf writes two in passes of one: its
+            // draws were refused, pieces missing while the home screen moved)
+            m.missing = true;
+            m.row_bytes = (t->width * 4 + 63) & ~63u;
+            {
+                std::lock_guard<std::mutex> g(d->scratch_lock);
+                uint64_t need = (uint64_t)m.row_bytes * t->height;
+                if (d->scratch_rt_size < need) {
+                    if (d->scratch_rt_size != 0) {
+                        d->freeBo(d->scratch_rt);       // (a draw in flight may still write the old one: rare, and only
+                    }                                   //  its own scratch pixels, which nobody reads)
+                    d->scratch_rt_size = d->newBo(d->scratch_rt, need, BIND_NOEXEC) ? need : 0;
+                }
+                if (d->scratch_rt_size == 0) {
+                    fail("no scratch memory for a colour output with no attachment");
+                    return -1;
+                }
+                m.va = d->scratch_rt.va;
+            }
+            m.rt1 = 19 << 3 | 2 << 8;
+            m.write = false;
+            m.load = false;
+            m.clear = 0;
+            m.texture = t;                              // (only for the preload's table: its blend writes nothing here)
+            m.blend[0] = 1u << 9 | 1u;
+            m.blend[1] = 0x132 | 0x132 << 12;           // colour mask 0
+            m.blend[2] = 2u | 3 << 3 | i << 16;
+            m.blend[3] = 237u << 12;
+            continue;
+        }
         bool mb = a.texture->format == 80 || a.texture->format == 81, ms = a.texture->format == 71 || a.texture->format == 81;
         uint32_t sw = mb ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
         m.va = a.texture->gpu();
