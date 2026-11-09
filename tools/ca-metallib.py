@@ -7,7 +7,9 @@ already specialised for the pipelines pipelines.desc names. The window server's 
 itself, with the rest of CoreAnimation's functions (blurs, clears, paths, copies): those are taken from the air64
 slice of THIS MAC's QuartzCore.framework/default.metallib (a later CoreAnimation, read where it lies and never put
 in the repository), with one variant of each of the four uber shaders put in their place -- the plug-in compiles the
-variant a pipeline's label names (userland/src/HakiosMetalCA.m, hm_bitcode_for()).
+variant a pipeline's label names (userland/src/HakiosMetalCA.m, hm_bitcode_for()). From an iPhone's own library of
+the same CoreAnimation (below) the uber shaders are kept generic and specialised on the phone with each pipeline's
+function constants.
 
 OUTDIR/QuartzCore-default.metallib is written; build the image with EXTRA_SHARE=OUTDIR and run with
 ca_metallib=/redwood/share/<OUTDIR's name>/QuartzCore-default.metallib (userland/src/inject.c).
@@ -65,15 +67,24 @@ def main():
         raise SystemExit('%s: not found. Off a Mac, name a later CoreAnimation\'s library: CA_QC_METALLIB=FILE '
                          '(a Mac\'s QuartzCore default.metallib copied over, or iOS 17\'s out of its IPSW)' % MAC_QC)
     mac = os.path.join(out, '.air64.metallib')
-    open(mac, 'wb').write(air64_slice(MAC_QC))
+    air = air64_slice(MAC_QC)
+    open(mac, 'wb').write(air)
     lib = merge_metallib.read(mac)
-    lib['funcs'] = [variants[n][0] if (n := dict(f['tags'])[b'NAME']) in variants else f for f in lib['funcs']]
-    lib['head'] = next(iter(variants.values()))[1]
+    # An iPhone's own library (a plain MTLB: the iPhone 11's 20F66, the same CoreAnimation as this image) keeps its
+    # uber shaders as they are: generic, with the function constants CoreAnimation sets per pipeline (fc_color_opcodes0
+    # 58, fc_color_inputs0 56, ...), which the plug-in's compiler specialises on the phone for every pipeline exactly.
+    # Swapped for one of this image's variants each (a later CoreAnimation's, whose constants are not this one's, has
+    # to be), the pipelines the variants do not name were drawn by the nearest variant: whole frames blue or cyan at an
+    # app's launch (11-09). CA_UBER=variants swaps them anyway.
+    keep = air[:4] == b'MTLB' and os.environ.get('CA_UBER') != 'variants'
+    if not keep:
+        lib['funcs'] = [variants[n][0] if (n := dict(f['tags'])[b'NAME']) in variants else f for f in lib['funcs']]
+        lib['head'] = next(iter(variants.values()))[1]
     merge_metallib.write([lib], os.path.join(out, 'QuartzCore-default.metallib'))
     os.remove(tmp)
     os.remove(mac)
-    print('%s: %d functions, %d of them this image\'s uber shaders' %
-          (os.path.join(out, 'QuartzCore-default.metallib'), len(lib['funcs']), len(variants)))
+    print('%s: %d functions, %s' % (os.path.join(out, 'QuartzCore-default.metallib'), len(lib['funcs']),
+          'the uber shaders its own (generic)' if keep else '%d of them this image\'s uber shader variants' % len(variants)))
 
 
 if __name__ == '__main__':

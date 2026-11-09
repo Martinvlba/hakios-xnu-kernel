@@ -1005,6 +1005,17 @@ done:
 	return result;
 }
 
+unsigned
+mali_bitcode_constant_count(const void *bitcode, size_t size)
+{
+	void *mem = ralloc_context(NULL);
+	struct air_constant_value *values = NULL;
+	unsigned n = air_module_function_constants(mem, bitcode, size, &values);
+
+	ralloc_free(mem);
+	return n;
+}
+
 void
 mali_kernel_binary_free(struct mali_kernel_binary *binary)
 {
