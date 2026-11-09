@@ -19,6 +19,70 @@
 #include "util/hash_table.h"
 #include "util/u_math.h"
 
+static struct air_global_plan *foldable_global_plan(struct air_ctx *c, const struct air_value *v);
+
+/* A scratch pointer's byte offset, when it is known at translation */
+static bool
+scratch_const_offset(const struct air_ptr *p, uint64_t *off)
+{
+   if (p->class != AIR_PTR_SCRATCH)
+      return false;
+   if (!p->offset) {
+      *off = 0;
+      return true;
+   }
+   if (!nir_def_is_const(p->offset))
+      return false;
+   *off = nir_const_value_as_uint(nir_def_as_load_const(p->offset)->value[0], p->offset->bit_size);
+   return true;
+}
+
+/* a constant the static initializers stored at scratch offset OFF */
+static void
+known_mem_record(struct air_ctx *c, uint64_t off, nir_def *v)
+{
+   unsigned bytes = v->num_components * v->bit_size / 8;
+   /* a later store over the same bytes replaces what was known of them */
+   for (unsigned k = 0; k < c->num_known_mem; k++) {
+      uint64_t kb = c->known_mem[k].comps * c->known_mem[k].bit_size / 8;
+      if (c->known_mem[k].offset < off + bytes && off < c->known_mem[k].offset + kb)
+         c->known_mem[k] = c->known_mem[--c->num_known_mem], k--;
+   }
+   if (c->num_known_mem == ARRAY_SIZE(c->known_mem))
+      return;
+   unsigned n = c->num_known_mem++;
+   c->known_mem[n].offset = off;
+   c->known_mem[n].comps = v->num_components;
+   c->known_mem[n].bit_size = v->bit_size;
+   for (unsigned i = 0; i < v->num_components; i++)
+      c->known_mem[n].bits[i] = nir_const_value_as_uint(nir_def_as_load_const(v)->value[i], v->bit_size);
+}
+
+/* a load of TYPE at scratch offset OFF that is exactly a known store: its
+ * constant (NULL otherwise, or when the bytes are a variable the body writes)
+ */
+static nir_def *
+known_mem_load(struct air_ctx *c, uint64_t off, const struct air_type *type)
+{
+   if (c->in_static_init || c->scratch_dirty_all || !type)
+      return NULL;
+   unsigned comps = air_nir_components(type), bits = air_nir_bit_size(c, type);
+   if (bits < 8 || comps > 4)
+      return NULL;
+   for (unsigned d = 0; d < c->num_scratch_dirty; d++)
+      if (off >= c->scratch_dirty[d].lo && off < c->scratch_dirty[d].hi)
+         return NULL;
+   for (unsigned k = 0; k < c->num_known_mem; k++) {
+      if (c->known_mem[k].offset != off || c->known_mem[k].comps != comps || c->known_mem[k].bit_size != bits)
+         continue;
+      nir_def *parts[4];
+      for (unsigned i = 0; i < comps; i++)
+         parts[i] = nir_imm_intN_t(&c->b, c->known_mem[k].bits[i], bits);
+      return comps == 1 ? parts[0] : nir_vec(&c->b, parts, comps);
+   }
+   return NULL;
+}
+
 bool
 air_error(struct air_ctx *c, const char *fmt, ...)
 {
@@ -235,6 +299,50 @@ air_constant_val(struct air_ctx *c, const struct air_constant *k)
       if (k->expr_op == AIR_OP_CAST && k->expr_sub == AIR_CAST_BITCAST &&
           k->base.type->kind == AIR_TYPE_POINTER)
          return air_get(c, k->operands[0]);
+      /* ... and a constant getelementptr: the base pointer with a constant
+       * byte offset and a narrowed pointee (CoreAnimation's generic uber
+       * shaders name a module constant's field so; ported from tools/mesa/air)
+       */
+      if (k->expr_op == AIR_OP_GEP) {
+         if (k->num_operands < 2 || !k->src_type)
+            return air_error(c, "instruction: a constant getelementptr with no base "
+                                "or no source type"), NULL;
+         struct air_val *base = air_get(c, k->operands[0]);
+         if (!base)
+            return NULL;
+         if (base->kind != AIR_VAL_PTR)
+            return air_error(c, "instruction: a constant getelementptr on something "
+                                "that is not a pointer"), NULL;
+         struct air_ptr p = base->ptr;
+         const struct air_type *t = k->src_type;
+         uint64_t off = 0, idx = 0;
+         if (!air_const_uint(k->operands[1], &idx))
+            return air_error(c, "instruction: a constant getelementptr whose first "
+                                "index is not a constant"), NULL;
+         off += idx * air_type_alloc_size(c->m, t);
+         for (unsigned i = 2; i < k->num_operands; i++) {
+            if (!air_const_uint(k->operands[i], &idx))
+               return air_error(c, "instruction: a constant getelementptr with an index "
+                                   "that is not a constant"), NULL;
+            if (t->kind == AIR_TYPE_STRUCT) {
+               if (idx >= t->num_members)
+                  return air_error(c, "instruction: a constant getelementptr to struct "
+                                      "field %u of %u", (unsigned)idx, t->num_members), NULL;
+               off += air_struct_member_offset(c->m, t, idx);
+               t = t->members[idx];
+            } else if (t->kind == AIR_TYPE_ARRAY || t->kind == AIR_TYPE_VECTOR) {
+               off += idx * (t->kind == AIR_TYPE_ARRAY ? air_type_alloc_size(c->m, t->elem)
+                                                       : MAX2(air_type_bit_size(t->elem) / 8, 1));
+               t = t->elem;
+            } else {
+               return air_error(c, "instruction: a constant getelementptr into a scalar"), NULL;
+            }
+         }
+         p.pointee = t;
+         if (off)
+            p = air_ptr_add(c, p, nir_imm_int(&c->b, off));
+         return air_val_ptr(c, p);
+      }
       return air_error(c, "instruction: constant expression %u", k->expr_op), NULL;
    }
    return air_error(c, "instruction: constant kind %u", k->ckind), NULL;
@@ -299,11 +407,18 @@ air_load_ptr(struct air_ctx *c, struct air_ptr ptr, const struct air_type *type,
       for (unsigned i = 0; c->options && i < c->options->num_constants; i++)
          if (c->options->constants[i].index == ptr.binding)
             v = &c->options->constants[i];
-      if (!v)
-         return air_error(c, "interface: function constant %u has no value", ptr.binding), NULL;
-      if (comps != 1)
-         return air_error(c, "interface: a function constant of %u components", comps), NULL;
-      res = nir_imm_intN_t(&c->b, v->bits, as_bool ? 8 : bits);
+      /* one the pipeline did not supply reads as zero (Metal: undefined; a
+       * shader asks air.is_function_constant_defined first); a vector's
+       * component i is at bit i * its width (fc_color_opcodes0, a uchar3)
+       */
+      uint64_t value = v ? v->bits : 0;
+      unsigned width = as_bool ? 8 : bits;
+      if (comps * width > 64)
+         return air_error(c, "interface: a function constant of %u x %u bits", comps, width), NULL;
+      nir_def *parts[NIR_MAX_VEC_COMPONENTS];
+      for (unsigned i = 0; i < comps; i++)
+         parts[i] = nir_imm_intN_t(&c->b, width == 64 ? value : (value >> (i * width)) & ((1ull << width) - 1), width);
+      res = comps == 1 ? parts[0] : nir_vec(&c->b, parts, comps);
       break;
    }
    default:
@@ -1146,6 +1261,24 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
    case AIR_OP_GEP:
       return translate_gep(c, in);
    case AIR_OP_SELECT: {
+      /* a select between two POINTERS (a module constant when the pipeline's
+       * function constant says no buffer is bound): answered when its
+       * condition is known, which a function constant's is; kept as a choice
+       * at run time it is not, yet
+       */
+      struct air_val *pa = air_get(c, in->operands[1]);
+      struct air_val *pb = air_get(c, in->operands[2]);
+      if (!pa || !pb)
+         return false;
+      if (pa->kind == AIR_VAL_PTR || pb->kind == AIR_VAL_PTR) {
+         nir_def *pcond = air_get_ssa(c, in->operands[0]);
+         if (!pcond)
+            return false;
+         if (pcond->num_components != 1 || !nir_def_is_const(pcond))
+            return air_error(c, "instruction: a select between pointers decided while the shader runs");
+         air_set(c, &in->base, nir_const_value_as_bool(nir_def_as_load_const(pcond)->value[0], pcond->bit_size) ? pa : pb);
+         return true;
+      }
       nir_def *cond = air_get_ssa(c, in->operands[0]);
       nir_def *x = air_get_ssa(c, in->operands[1]);
       nir_def *y = air_get_ssa(c, in->operands[2]);
@@ -1283,11 +1416,40 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
       return true;
    }
    case AIR_OP_LOAD: {
+      /* a program-scope variable whose one static-initialiser store was a
+       * constant: the load is that constant (plan_global_folding)
+       */
+      struct air_global_plan *gpl = foldable_global_plan(c, in->operands[0]);
+      if (gpl && gpl->known) {
+         air_set(c, &in->base, air_val_ssa(c, nir_imm_intN_t(&c->b, gpl->bits, gpl->bit_size)));
+         return true;
+      }
       struct air_val *p = air_get(c, in->operands[0]);
       if (!p)
          return false;
       if (p->kind != AIR_VAL_PTR)
          return air_error(c, "instruction: a load from something that is not a pointer");
+      if (in->base.type && in->base.type->kind == AIR_TYPE_POINTER) {
+         /* a pointer read back from a local it was stored into */
+         uint64_t off;
+         if (scratch_const_offset(&p->ptr, &off)) {
+            for (unsigned k = 0; k < c->num_scratch_ptrs; k++) {
+               if (c->scratch_ptrs[k].offset == off) {
+                  air_set(c, &in->base, c->scratch_ptrs[k].val);
+                  return true;
+               }
+            }
+            return air_error(c, "instruction: a pointer loaded from a local nothing stored one into");
+         }
+      }
+      {
+         uint64_t loff;
+         nir_def *known;
+         if (scratch_const_offset(&p->ptr, &loff) && (known = known_mem_load(c, loff, in->base.type))) {
+            air_set(c, &in->base, air_val_ssa(c, known));
+            return true;
+         }
+      }
       nir_def *res = air_load_ptr(c, p->ptr, in->base.type, in->align);
       if (!res)
          return false;
@@ -1296,11 +1458,44 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
    }
    case AIR_OP_STORE: {
       struct air_val *p = air_get(c, in->operands[1]);
+      struct air_val *sv = air_get(c, in->operands[0]);
+      if (!p || !sv)
+         return false;
+      if (sv->kind == AIR_VAL_PTR) {
+         /* a pointer into a local: kept as the value it is */
+         uint64_t off;
+         if (p->kind != AIR_VAL_PTR || !scratch_const_offset(&p->ptr, &off))
+            return air_error(c, "instruction: a store of a pointer into memory that is not a local");
+         unsigned k = 0;
+         while (k < c->num_scratch_ptrs && c->scratch_ptrs[k].offset != off)
+            k++;
+         if (k == ARRAY_SIZE(c->scratch_ptrs))
+            return air_error(c, "instruction: more than %u pointers stored into locals",
+                             (unsigned)ARRAY_SIZE(c->scratch_ptrs));
+         if (k == c->num_scratch_ptrs)
+            c->num_scratch_ptrs++;
+         c->scratch_ptrs[k].offset = off;
+         c->scratch_ptrs[k].val = sv;
+         return true;
+      }
       nir_def *v = air_get_ssa(c, in->operands[0]);
-      if (!p || !v)
+      if (!v)
          return false;
       if (p->kind != AIR_VAL_PTR)
          return air_error(c, "instruction: a store to something that is not a pointer");
+      /* the one store into a foldable variable: its value kept when it is a
+       * constant; the memory is written either way (dead when the fold answers)
+       */
+      uint64_t soff;
+      if (c->in_static_init && scratch_const_offset(&p->ptr, &soff) && nir_def_is_const(v) &&
+          v->num_components <= 4 && v->bit_size >= 8)
+         known_mem_record(c, soff, v);
+      struct air_global_plan *gpl = foldable_global_plan(c, in->operands[1]);
+      if (gpl && v->num_components == 1 && nir_def_is_const(v)) {
+         gpl->known = true;
+         gpl->bits = nir_const_value_as_uint(nir_def_as_load_const(v)->value[0], v->bit_size);
+         gpl->bit_size = v->bit_size;
+      }
       return air_store_ptr(c, p->ptr, v, in->align);
    }
    case AIR_OP_CALL: {
@@ -1545,6 +1740,7 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    c->phi_cursors = _mesa_pointer_hash_table_create(c->mem_ctx);
    c->phi_regs = _mesa_pointer_hash_table_create(c->mem_ctx);
    c->b = nir_builder_at(nir_before_impl(nir_function_impl_create(fn)));
+   c->b.constant_fold_alu = true;   /* (see main's builder) */
    /* as for the entry point: this translator emits an unstructured CFG with
     * nir_goto, and nir_goto_if asserts on a structured impl. A new impl is
     * structured by default, so a callee crashed on its first branch -- which
@@ -1783,8 +1979,78 @@ wrap_library_function(struct air_ctx *c, const struct air_md *out_md)
    return true;
 }
 
+/* Can the edge FROM -> TO be taken? FROM reachable, and its terminator going
+ * to TO: always for an unconditional branch or one decided while the shader
+ * runs; for one on a known value, only where that value says. (FROM's
+ * terminator is translated before TO's phis: reverse post-order.)
+ */
+static bool
+edge_live(struct air_ctx *c, const struct air_block *from, const struct air_block *to)
+{
+   if (!c->reachable || !_mesa_set_search(c->reachable, from) || !from->num_insts)
+      return false;
+   const struct air_inst *term = from->insts[from->num_insts - 1];
+   if (term->op == AIR_OP_BR && term->num_targets == 2) {
+      struct air_val *cv = air_get(c, term->operands[0]);
+      nir_def *cond = cv && cv->kind == AIR_VAL_SSA ? cv->def : NULL;
+      if (cond && cond->num_components == 1 && nir_def_is_const(cond)) {
+         bool taken = nir_const_value_as_bool(nir_def_as_load_const(cond)->value[0], cond->bit_size);
+         return term->targets[taken ? 0 : 1] == to;
+      }
+      return term->targets[0] == to || term->targets[1] == to;
+   }
+   if (term->op == AIR_OP_SWITCH) {
+      struct air_val *cv = air_get(c, term->operands[0]);
+      nir_def *cond = cv && cv->kind == AIR_VAL_SSA ? cv->def : NULL;
+      if (cond && cond->num_components == 1 && nir_def_is_const(cond)) {
+         uint64_t sel = nir_const_value_as_uint(nir_def_as_load_const(cond)->value[0], cond->bit_size);
+         const struct air_block *dest = term->targets[0];
+         for (unsigned k = 0; k + 1 < term->num_targets; k++) {
+            struct air_val *kv = air_get(c, term->operands[1 + k]);
+            nir_def *kd = kv && kv->kind == AIR_VAL_SSA ? kv->def : NULL;
+            if (kd && nir_def_is_const(kd) &&
+                nir_const_value_as_uint(nir_def_as_load_const(kd)->value[0], kd->bit_size) == sel) {
+               dest = term->targets[1 + k];
+               break;
+            }
+         }
+         return dest == to;
+      }
+   }
+   for (unsigned t = 0; t < term->num_targets; t++)
+      if (term->targets[t] == to)
+         return true;
+   return false;
+}
+
+/* two pointers that are one: the same value, or the same handle */
+static bool
+same_pointer(const struct air_val *a, const struct air_val *b)
+{
+   if (a == b)
+      return true;
+   if (a->kind != AIR_VAL_PTR || b->kind != AIR_VAL_PTR)
+      return false;
+   return a->ptr.class == b->ptr.class && a->ptr.binding == b->ptr.binding &&
+          a->ptr.offset == b->ptr.offset;
+}
+
+static bool translate_body_blocks(struct air_ctx *c);
+
+/* (each function's own reachable set: a callee is translated in the middle of
+ * its caller's walk, and the caller's set must survive it)
+ */
 static bool
 translate_body(struct air_ctx *c)
+{
+   struct set *outer = c->reachable;
+   bool ok = translate_body_blocks(c);
+   c->reachable = outer;
+   return ok;
+}
+
+static bool
+translate_body_blocks(struct air_ctx *c)
 {
    const struct air_function *f = c->fn;
 
@@ -1799,6 +2065,8 @@ translate_body(struct air_ctx *c)
          const struct air_inst *in = blk->insts[i];
          if (in->op != AIR_OP_PHI)
             continue;
+         if (in->base.type->kind == AIR_TYPE_POINTER)
+            continue;   /* a phi between pointers: chosen at translation (below) */
          nir_def *reg = nir_decl_reg(&entry, air_nir_components(in->base.type),
                                      air_nir_bit_size(c, in->base.type), 0);
          _mesa_hash_table_insert(c->phi_regs, in, reg);
@@ -1809,6 +2077,8 @@ translate_body(struct air_ctx *c)
     * are reached, and nir_lower_goto_ifs puts them in order afterwards
     */
    _mesa_hash_table_insert(c->blocks, &f->blocks[0], nir_start_block(c->b.impl));
+   c->reachable = _mesa_pointer_set_create(c->mem_ctx);
+   _mesa_set_add(c->reachable, &f->blocks[0]);
 
    unsigned *order = rzalloc_array(c->mem_ctx, unsigned, MAX2(f->num_blocks, 1));
    unsigned num_order = reverse_post_order(c, f, order);
@@ -1816,6 +2086,14 @@ translate_body(struct air_ctx *c)
    for (unsigned oi = 0; oi < num_order; oi++) {
       unsigned bi = order[oi];
       const struct air_block *blk = &f->blocks[bi];
+      /* a block that branches on known values never reach is not translated:
+       * nothing jumps to it (a known condition jumps to its one target), and
+       * what it would compute is used nowhere that runs -- the generic uber
+       * shaders' features a pipeline did not ask for, with the null pointers
+       * they were handed
+       */
+      if (!_mesa_set_search(c->reachable, blk))
+         continue;
       nir_block *nb = nir_block_of(c, blk);
       c->b.cursor = nir_after_block(nb);
 
@@ -1824,6 +2102,31 @@ translate_body(struct air_ctx *c)
          const struct air_inst *in = blk->insts[i];
          if (in->op != AIR_OP_PHI)
             continue;
+         if (in->base.type->kind == AIR_TYPE_POINTER) {
+            /* the pointer of the one edge that can be taken (or of several
+             * that bring the same one)
+             */
+            struct air_val *chosen = NULL;
+            for (unsigned k = 0; k < in->num_operands && k < in->num_targets; k++) {
+               if (!edge_live(c, in->targets[k], blk))
+                  continue;
+               struct air_val *v = air_get(c, in->operands[k]);
+               if (!v)
+                  return false;
+               if (chosen && !same_pointer(chosen, v))
+                  return air_error(c, "instruction: a phi between pointers chosen while the shader runs "
+                                      "(block %u)", bi);
+               chosen = v;
+            }
+            if (!chosen) {
+               /* a block nothing reaches: any value will do, it never runs */
+               chosen = in->num_operands ? air_get(c, in->operands[0]) : NULL;
+               if (!chosen)
+                  return false;
+            }
+            air_set(c, &in->base, chosen);
+            continue;
+         }
          struct hash_entry *e = _mesa_hash_table_search(c->phi_regs, in);
          air_set(c, &in->base,
                  air_val_ssa(c, nir_load_reg(&c->b, e->data)));
@@ -1856,6 +2159,11 @@ translate_body(struct air_ctx *c)
                               ralloc_memdup(c->mem_ctx, &at_end, sizeof(at_end)));
 
       const struct air_inst *term = blk->insts[blk->num_insts - 1];
+      if (_mesa_set_search(c->reachable, blk)) {
+         for (unsigned t = 0; t < term->num_targets; t++)
+            if (edge_live(c, blk, term->targets[t]))
+               _mesa_set_add(c->reachable, term->targets[t]);
+      }
       switch (term->op) {
       case AIR_OP_RET:
          if (!emit_return(c, term))
@@ -1871,6 +2179,9 @@ translate_body(struct air_ctx *c)
                return false;
             if (term->targets[0] == term->targets[1])
                nir_goto(&c->b, nir_block_of(c, term->targets[0]));
+            else if (cond->num_components == 1 && nir_def_is_const(cond))
+               nir_goto(&c->b, nir_block_of(c, term->targets[nir_const_value_as_bool(
+                  nir_def_as_load_const(cond)->value[0], cond->bit_size) ? 0 : 1]));
             else
                nir_goto_if(&c->b, nir_block_of(c, term->targets[0]), cond,
                            nir_block_of(c, term->targets[1]));
@@ -1994,6 +2305,176 @@ function_constant_index(struct air_ctx *c, const struct air_global *g)
  * records rather than builds -- making the value needs a builder, and which
  * function's builder matters (see materialise_globals).
  */
+/* Does constant V mention TARGET (a global), through aggregates and constant
+ * expressions? (from tools/mesa/air: on the kind, DATA has no elems)
+ */
+static bool
+const_mentions(const struct air_value *v, const struct air_value *target, unsigned depth)
+{
+   if (!v || depth == 0)
+      return false;
+   if (v == target)
+      return true;
+   const struct air_constant *k = air_value_as_constant(v);
+   if (!k)
+      return false;
+   switch (k->ckind) {
+   case AIR_CONST_AGGREGATE:
+      for (unsigned i = 0; i < k->num_elems; i++)
+         if (const_mentions(k->elems[i], target, depth - 1))
+            return true;
+      return false;
+   case AIR_CONST_EXPR:
+      for (unsigned i = 0; i < k->num_operands; i++)
+         if (const_mentions(k->operands[i], target, depth - 1))
+            return true;
+      return false;
+   default:
+      return false;
+   }
+}
+
+/* Which program-scope variables are a VALUE rather than memory (tools/mesa/air's
+ * census, ported): a scalar integer of 8/16/32/64 bits; every instruction
+ * naming it names it as the whole pointer of a load or a store of its own
+ * type; no constant and no other global's initialiser mentions it; exactly one
+ * store, in an air.static_init function (run_static_initializers inlines those
+ * at the top of the entry point, before the body). Whether its value is a
+ * constant is known only when that store is translated (`known`).
+ */
+static void
+plan_global_folding(struct air_ctx *c)
+{
+   for (unsigned i = 0; i < c->m->num_globals; i++) {
+      struct air_global_plan *pl = &c->global_plan[i];
+      const struct air_global *g = c->m->globals[i];
+      if (pl->skip || pl->class != AIR_PTR_SCRATCH)
+         continue;
+      const struct air_type *t = g->value_type;
+      if (!t || t->kind != AIR_TYPE_INT ||
+          (t->bits != 8 && t->bits != 16 && t->bits != 32 && t->bits != 64))
+         continue;
+      bool ok = true;
+      unsigned stores = 0;
+      for (unsigned k = 0; ok && k < c->m->num_globals; k++)
+         if (k != i && const_mentions(c->m->globals[k]->init, &g->base, 8))
+            ok = false;
+      for (unsigned fi = 0; ok && fi < c->m->num_functions; fi++) {
+         const struct air_function *f = c->m->functions[fi];
+         bool is_init = f->section && !strcmp(f->section, "air.static_init");
+         for (unsigned bi = 0; ok && bi < f->num_blocks; bi++) {
+            const struct air_block *blk = &f->blocks[bi];
+            for (unsigned ii = 0; ok && ii < blk->num_insts; ii++) {
+               const struct air_inst *in = blk->insts[ii];
+               for (unsigned oi = 0; ok && oi < in->num_operands; oi++) {
+                  const struct air_value *v = in->operands[oi];
+                  if (v == &g->base) {
+                     if (in->op == AIR_OP_LOAD && oi == 0 && in->base.type == t)
+                        continue;
+                     if (in->op == AIR_OP_STORE && oi == 1 && in->operands[0]->type == t && is_init) {
+                        stores++;
+                        continue;
+                     }
+                     ok = false;
+                  } else if (const_mentions(v, &g->base, 8)) {
+                     ok = false;
+                  }
+               }
+            }
+         }
+      }
+      if (ok && stores == 1)
+         pl->fold = true;
+   }
+}
+
+/* the globals a store's pointer can be rooted in, followed through
+ * getelementptr, casts, selects and phis (instructions and constant
+ * expressions); each one's scratch range marked as written outside the
+ * static initializers
+ */
+static void
+mark_store_roots(struct air_ctx *c, const struct air_value *v, unsigned depth)
+{
+   if (!v || depth == 0)
+      return;
+   if (v->kind == AIR_VALUE_GLOBAL) {
+      for (unsigned i = 0; i < c->m->num_globals; i++) {
+         if (&c->m->globals[i]->base != v)
+            continue;
+         const struct air_global_plan *pl = &c->global_plan[i];
+         if (pl->class != AIR_PTR_SCRATCH || !pl->has_offset)
+            return;
+         if (c->num_scratch_dirty == ARRAY_SIZE(c->scratch_dirty)) {
+            c->scratch_dirty_all = true;
+            return;
+         }
+         c->scratch_dirty[c->num_scratch_dirty].lo = pl->offset;
+         c->scratch_dirty[c->num_scratch_dirty].hi =
+            pl->offset + air_type_alloc_size(c->m, c->m->globals[i]->value_type);
+         c->num_scratch_dirty++;
+         return;
+      }
+      return;
+   }
+   const struct air_constant *k = air_value_as_constant(v);
+   if (k) {
+      if (k->ckind == AIR_CONST_EXPR)
+         for (unsigned i = 0; i < k->num_operands; i++)
+            mark_store_roots(c, k->operands[i], depth - 1);
+      return;
+   }
+   if (v->kind != AIR_VALUE_INSTRUCTION)
+      return;
+   const struct air_inst *in = (const struct air_inst *)v;
+   switch (in->op) {
+   case AIR_OP_GEP:
+   case AIR_OP_CAST:
+      mark_store_roots(c, in->operands[0], depth - 1);
+      break;
+   case AIR_OP_SELECT:
+      mark_store_roots(c, in->operands[1], depth - 1);
+      mark_store_roots(c, in->operands[2], depth - 1);
+      break;
+   case AIR_OP_PHI:
+      for (unsigned i = 0; i < in->num_operands; i++)
+         mark_store_roots(c, in->operands[i], depth - 1);
+      break;
+   default:
+      break;
+   }
+}
+
+static void
+plan_scratch_dirty(struct air_ctx *c)
+{
+   for (unsigned fi = 0; fi < c->m->num_functions; fi++) {
+      const struct air_function *f = c->m->functions[fi];
+      if (f->section && !strcmp(f->section, "air.static_init"))
+         continue;
+      for (unsigned bi = 0; bi < f->num_blocks; bi++)
+         for (unsigned ii = 0; ii < f->blocks[bi].num_insts; ii++) {
+            const struct air_inst *in = f->blocks[bi].insts[ii];
+            if (in->op == AIR_OP_STORE)
+               mark_store_roots(c, in->operands[1], 16);
+            else if (in->op == AIR_OP_ATOMICRMW || in->op == AIR_OP_CMPXCHG)
+               mark_store_roots(c, in->operands[0], 16);
+         }
+   }
+}
+
+/* the plan of the global V is, when it is a foldable one */
+static struct air_global_plan *
+foldable_global_plan(struct air_ctx *c, const struct air_value *v)
+{
+   if (!c->global_plan || !v || v->kind != AIR_VALUE_GLOBAL)
+      return NULL;
+   for (unsigned i = 0; i < c->m->num_globals; i++)
+      if (&c->m->globals[i]->base == v)
+         return c->global_plan[i].fold ? &c->global_plan[i] : NULL;
+   return NULL;
+}
+
 static void
 plan_globals(struct air_ctx *c)
 {
@@ -2091,7 +2572,110 @@ materialise_globals(struct air_ctx *c)
          .offset = pl->has_offset ? nir_imm_int(&c->b, pl->offset) : NULL,
       };
       air_set(c, &g->base, air_val_ptr(c, p));
+      /* a program-scope constant holding POINTERS (CoreAnimation's
+       * unused_sampler: { ptr @__air_sampler_state }): memory cannot hold
+       * them, so they go to the local-pointer table at their offsets, where a
+       * load of a pointer from it finds them
+       */
+      if (pl->class == AIR_PTR_SCRATCH && pl->has_offset && g->init && g->value_type) {
+         const struct air_constant *k = air_value_as_constant(g->init);
+         const struct air_type *t = g->value_type;
+         if (k && k->ckind == AIR_CONST_AGGREGATE && t->kind == AIR_TYPE_STRUCT) {
+            for (unsigned m = 0; m < k->num_elems && m < t->num_members; m++) {
+               if (t->members[m]->kind != AIR_TYPE_POINTER)
+                  continue;
+               struct air_val *pv = air_get(c, k->elems[m]);
+               if (!pv)
+                  return;
+               uint64_t off = pl->offset + air_struct_member_offset(c->m, t, m);
+               unsigned n = 0;
+               while (n < c->num_scratch_ptrs && c->scratch_ptrs[n].offset != off)
+                  n++;
+               if (n == ARRAY_SIZE(c->scratch_ptrs))
+                  return (void)air_error(c, "interface: more than %u pointers in program-scope constants",
+                                         (unsigned)ARRAY_SIZE(c->scratch_ptrs));
+               if (n == c->num_scratch_ptrs)
+                  c->num_scratch_ptrs++;
+               c->scratch_ptrs[n].offset = off;
+               c->scratch_ptrs[n].val = pv;
+            }
+         }
+      }
    }
+}
+
+/* A static initializer with branches, run at translation: every condition in it
+ * is decided by function constants (CoreAnimation's generic fixed_frag_lph_cph
+ * and _cpf: short-circuit tests of which constants are defined), so its blocks
+ * are walked along the path actually taken -- each instruction translated in
+ * place at the top of the entry point, as a straight one's are; a phi takes
+ * the value from the block the walk came from; a branch goes where its
+ * (constant) condition says. Its stores then carry constants, which is what
+ * plan_global_folding's loads answer with. A condition known only while the
+ * shader runs is refused by name.
+ */
+static bool
+walk_static_initializer(struct air_ctx *c, const struct air_function *f)
+{
+   const struct air_block *blk = &f->blocks[0], *from = NULL;
+   for (unsigned steps = 0; steps < 4096; steps++) {
+      const struct air_inst *term = NULL;
+      for (unsigned k = 0; k < blk->num_insts; k++) {
+         const struct air_inst *in = blk->insts[k];
+         if (in->op == AIR_OP_PHI) {
+            struct air_val *v = NULL;
+            for (unsigned t = 0; t < in->num_targets && t < in->num_operands; t++)
+               if (in->targets[t] == from)
+                  v = air_get(c, in->operands[t]);
+            if (!v)
+               return air_error(c, "interface: a static initializer's phi with no value from block %u",
+                                from ? from->index : 0), false;
+            air_set(c, &in->base, v);
+            continue;
+         }
+         if (in->op == AIR_OP_RET || in->op == AIR_OP_BR || in->op == AIR_OP_SWITCH ||
+             in->op == AIR_OP_UNREACHABLE) {
+            term = in;
+            break;
+         }
+         if (!translate_instruction(c, in))
+            return false;
+      }
+      if (!term || term->op == AIR_OP_RET)
+         return true;
+      if (term->op == AIR_OP_UNREACHABLE)
+         return air_error(c, "interface: a static initializer reached unreachable"), false;
+      const struct air_block *to = NULL;
+      if (term->op == AIR_OP_BR && term->num_targets == 1) {
+         to = term->targets[0];
+      } else {
+         nir_def *cond = air_get_ssa(c, term->operands[0]);
+         if (!cond)
+            return false;
+         if (cond->num_components != 1 || !nir_def_is_const(cond))
+            return air_error(c, "interface: a static initializer branching on a value known only while the "
+                                "shader runs"), false;
+         uint64_t sel = nir_const_value_as_uint(nir_def_as_load_const(cond)->value[0], cond->bit_size);
+         if (term->op == AIR_OP_BR) {
+            to = sel ? term->targets[0] : term->targets[1];
+         } else {
+            to = term->targets[0];
+            for (unsigned k = 0; k + 1 < term->num_targets; k++) {
+               nir_def *cv = air_get_ssa(c, term->operands[1 + k]);
+               if (!cv)
+                  return false;
+               if (nir_def_is_const(cv) &&
+                   nir_const_value_as_uint(nir_def_as_load_const(cv)->value[0], cv->bit_size) == sel) {
+                  to = term->targets[1 + k];
+                  break;
+               }
+            }
+         }
+      }
+      from = blk;
+      blk = to;
+   }
+   return air_error(c, "interface: a static initializer that does not end"), false;
 }
 
 /* The functions of @llvm.global_ctors, inlined at the top of the entry point:
@@ -2105,19 +2689,31 @@ run_static_initializers(struct air_ctx *c)
       const struct air_function *f = c->m->functions[i];
       if (f->is_declaration || !f->section || strcmp(f->section, "air.static_init"))
          continue;
-      if (f->num_args || f->num_blocks != 1) {
-         air_error(c, "interface: a static initializer with arguments or branches");
+      if (f->num_args) {
+         air_error(c, "interface: a static initializer with arguments");
          return;
+      }
+      if (f->num_blocks != 1) {
+         c->in_static_init = true;
+         bool ok = walk_static_initializer(c, f);
+         c->in_static_init = false;
+         if (!ok)
+            return;
+         continue;
       }
       /* its instructions, in place, without its ret */
       const struct air_block *blk = &f->blocks[0];
+      c->in_static_init = true;
       for (unsigned k = 0; k < blk->num_insts; k++) {
          const struct air_inst *in = blk->insts[k];
          if (in->op == AIR_OP_RET)
             continue;
-         if (!translate_instruction(c, in))
+         if (!translate_instruction(c, in)) {
+            c->in_static_init = false;
             return;
+         }
       }
+      c->in_static_init = false;
    }
 }
 
@@ -2203,6 +2799,12 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
    nir_function *main = nir_function_create(c.nir, "main");
    main->is_entrypoint = true;
    c.b = nir_builder_at(nir_before_impl(nir_function_impl_create(main)));
+   /* operations on values already known fold as they are built: a function
+    * constant compared with zero is a constant, and so is the select or the
+    * branch it decides (CoreAnimation's generic uber shaders choose a module
+    * constant over a buffer so, and dispatch on dozens of such tests)
+    */
+   c.b.constant_fold_alu = true;
    c.b.impl->structured = false;
 
    c.values = _mesa_pointer_hash_table_create(ctx);
@@ -2257,8 +2859,11 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
          air_error(&c, "interface: parameter %u has no metadata", i);
    }
 
-   if (!c.error[0])
+   if (!c.error[0]) {
       plan_globals(&c);
+      plan_global_folding(&c);
+      plan_scratch_dirty(&c);
+   }
    if (!c.error[0] && c.tg_arg_param_plus1 && c.params[c.tg_arg_param_plus1 - 1]) {
       /* the threadgroup argument past the static arrays (at 0 the two would
        * share their first bytes; hakios-metal's tg_arg is the test) */
