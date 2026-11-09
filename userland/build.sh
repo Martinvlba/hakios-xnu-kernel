@@ -216,6 +216,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/cputop src/cputop.c
 		# iOS's thermal pressure level from the kernel's sensors, in thermalmonitord's place (com.hakios.thermalstate)
 		$DYN -o obj/thermal_state src/thermal_state.c
+		# the kernel's log kept in a file on the data partition (com.hakios.klogsave; the boot before's end on the console)
+		$DYN -o obj/klogsave src/klogsave.c
 		# the photos for a trusted computer over USB, as an iPhone's PTP storage (com.hakios.ptp; /dev/hakios-ptp)
 		$DYN -o obj/ptp_responder src/ptp_responder.c
 		# the Pixel 8a's GPU through HakiosGPU, panthor's interface by hand (src/mali_test.c; rc.jobs.mali)
@@ -372,6 +374,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/thermal_state ] && cp obj/thermal_state root/bin/
+	[ -f obj/klogsave ] && cp obj/klogsave root/bin/
 	[ -f obj/ptp_responder ] && cp obj/ptp_responder root/bin/
 	[ -f obj/mali_test ] && cp obj/mali_test root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
@@ -491,6 +494,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist com.hakios.ptp.plist root/LaunchDaemons/
+	[ -f obj/klogsave ] && cp com.hakios.klogsave.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
