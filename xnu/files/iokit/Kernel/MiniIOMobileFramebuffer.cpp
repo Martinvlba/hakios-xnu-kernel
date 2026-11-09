@@ -372,6 +372,31 @@ hakios_scanout_give(int slot)
 	IOLockUnlock(gZCLock);
 }
 
+/*
+ * Until the panel reads BASE: the display driver puts a scan-out on the panel at its next frame done (up to a refresh,
+ * 8.3 ms at 120 Hz) and says so in scanned(); until then the panel still reads what it showed before, which must not be
+ * let go of -- or CoreAnimation draws its next frame into it while it is shown (11-10, the tester's videos: frames half
+ * one picture and half the next, modules missing, dashed bands). 25 ms at most.
+ */
+static uint64_t gZCWaitAbs, gZCWaits, gZCWaitLate;
+
+static void
+zcWaitScanned(uint64_t base)
+{
+	uint64_t t0 = mach_absolute_time();
+	unsigned i;
+
+	if (hakios_display_ops->scanned == NULL) {
+		return;
+	}
+	for (i = 0; i < 25 && hakios_display_ops->scanned() != base; i++) {
+		IOSleep(1);
+	}
+	gZCWaitAbs += mach_absolute_time() - t0;
+	gZCWaits++;
+	gZCWaitLate += i == 25;
+}
+
 /* SLOT now on the panel: one let go of while it was shown is free */
 static void
 zcShown(int slot)
@@ -1785,18 +1810,27 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				fGraphics = true;
 				PE_initialize_console(NULL, kPEGraphicsMode);
 			}
-			hakios_display_ops->scanout(gZCBase[s->scanoutSlot], s->info.bytesPerRow);
-			zcShown(s->scanoutSlot);
-			/* held while it is shown (in use to CoreAnimation); the one shown before let go of */
+			/* held, and in use (IOSurfaceIsInUse), while the panel shows it or may still read it */
 			MiniIOSurface * held = MiniIOSurfaceCopy(swapWord(swap, SWAP_SURFACE(0)));
+
+			MiniIOSurfaceDisplayUse(held, 1);
+			hakios_display_ops->scanout(gZCBase[s->scanoutSlot], s->info.bytesPerRow);
+			/* the one shown before is let go of once the panel has left it (its next refresh), not before */
+			zcWaitScanned(gZCBase[s->scanoutSlot]);
+			zcShown(s->scanoutSlot);
 			if (fZCHeld != NULL) {
+				MiniIOSurfaceDisplayUse(fZCHeld, -1);
 				MiniIOSurfaceDrop(fZCHeld);
 			}
 			fZCHeld = held;
 			gShownSurface = swapWord(swap, SWAP_SURFACE(0));
 			if (++gZCFrames % 600 == 1) {
-				IOLog("MiniIOMobileFramebuffer: zero copy: %u frames scanned out where they were drawn, %u copied\n",
-				    gZCFrames, gZCCopied);
+				uint64_t waited = 0;
+
+				absolutetime_to_nanoseconds(gZCWaitAbs, &waited);
+				IOLog("MiniIOMobileFramebuffer: zero copy: %u frames scanned out where they were drawn, %u copied; "
+				    "the panel took them %llu us after on average (%llu not within 25 ms)\n", gZCFrames, gZCCopied,
+				    gZCWaits ? waited / 1000 / gZCWaits : 0, gZCWaitLate);
 			}
 			drawn = mach_absolute_time();
 			fSwapsShown++;
@@ -1858,8 +1892,10 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	if (gZC && gZCShown != 0) {
 		/* (a copied frame: the framebuffer's own buffer back on the panel; the surface held for the last let go of) */
 		hakios_display_ops->scanout(gZCPhys[0], fRowBytes);
+		zcWaitScanned(gZCPhys[0]);
 		zcShown(0);
 		if (fZCHeld != NULL) {
+			MiniIOSurfaceDisplayUse(fZCHeld, -1);
 			MiniIOSurfaceDrop(fZCHeld);
 			fZCHeld = NULL;
 		}

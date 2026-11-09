@@ -168,6 +168,12 @@ void            MiniIOSurfaceClearKept(void);
 bool            MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds);
 MiniIOSurface * MiniIOSurfaceCreateSimple(uint32_t width, uint32_t height, uint32_t pixelFormat);
 void            MiniIOSurfaceDrop(MiniIOSurface * surface);
+/*
+ * The display's own use of a surface (+1 while the panel shows it or may still read it, -1 after): it is part of the
+ * use count that IOSurfaceIsInUse reads, as a display driver keeps it on an iPhone, so that CoreAnimation draws the
+ * next frame into another surface (11-10: without it frames were drawn into the one being scanned out: torn frames).
+ */
+void            MiniIOSurfaceDisplayUse(MiniIOSurface * surface, int delta);
 /* A Mach send right for the surface in the task (what IOSurfaceCreateMachPort gives); 0 on failure. */
 mach_port_name_t MiniIOSurfaceMakeSendRight(task_t task, MiniIOSurface * surface);
 
