@@ -1,0 +1,4 @@
+/redwood/bin/rwtouch wait 20
+/redwood/bin/mali_draw_test irmsaa 300 6
+/redwood/bin/mali_draw_test irmsaa 20000 6
+/redwood/bin/mali_draw_test

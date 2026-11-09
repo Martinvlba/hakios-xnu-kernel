@@ -818,6 +818,30 @@ mali_vertex_compile(const void *bitcode, size_t size, const struct mali_constant
 	return compile_stage(bitcode, size, constants, count, MESA_SHADER_VERTEX, NULL, fetch, out, error, error_size);
 }
 
+/* texture INDEX's texel at the fragment's pixel (plus OFFSET, an ivec2, or NULL), read with txf; of a multisample
+ * texture (MS) sample SAMPLE's, with txf_ms. A vec4 of TYPE. */
+static nir_def *
+texel_here(nir_builder *b, unsigned index, nir_alu_type type, bool ms, nir_def *sample, nir_def *offset)
+{
+	nir_def *xy = nir_f2i32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2));
+	nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
+
+	if (offset != NULL) {
+		xy = nir_iadd(b, xy, offset);
+	}
+	tex->op = ms ? nir_texop_txf_ms : nir_texop_txf;
+	tex->sampler_dim = ms ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
+	tex->dest_type = type;
+	tex->coord_components = 2;
+	tex->texture_index = index;
+	tex->sampler_index = 0;
+	tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, xy);
+	tex->src[1] = ms ? nir_tex_src_for_ssa(nir_tex_src_ms_index, sample) : nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
+	nir_def_init(&tex->instr, &tex->def, 4, 32);
+	nir_builder_instr_insert(b, &tex->instr);
+	return &tex->def;
+}
+
 /*
  * The tile buffer's preload, as a draw (c_api_mali.cpp: a pass that loads draws this first, in the same Mali pass): one
  * triangle over the whole target from [[vertex_id]] 0..2, its fragment the target's own texel at the fragment's
@@ -876,45 +900,22 @@ mali_preload_zs_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary
 	/* colour attachment n from texture n, for each of TARGETS (1 to 4) */
 	fs->stage = 2;
 	snprintf(fs->name, sizeof(fs->name), zs ? "hakios_preload_fs%u_zs%u" : "hakios_preload_fs%u", targets, zs);
+	/* (ZS 4: the attachments multisample -- each sample its own, the shader run a sample: txf_ms at the sample id) */
+	const bool ms = (zs & 4) != 0;
+	nir_def *sample = ms ? nir_load_sample_id(&b) : NULL;
 	for (unsigned t = 0; t < targets && t < 4; t++) {
-		nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, nir_load_frag_coord(&b), 2));
-		nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
-
-		tex->op = nir_texop_txf;
-		tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
-		tex->dest_type = nir_type_float32;
-		tex->coord_components = 2;
-		tex->texture_index = t;
-		tex->sampler_index = 0;
-		tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, xy);
-		tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
-		nir_def_init(&tex->instr, &tex->def, 4, 32);
-		nir_builder_instr_insert(&b, &tex->instr);
+		nir_def *v = texel_here(&b, t, nir_type_float32, ms, sample, NULL);
 
 		var = nir_variable_create(b.shader, nir_var_shader_out, glsl_vec4_type(), "color");
 		var->data.location = FRAG_RESULT_DATA0 + t;
-		nir_store_var(&b, var, &tex->def, 0xf);
+		nir_store_var(&b, var, v, 0xf);
 		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, t, 0, 1, 0 };
 	}
 	for (unsigned k = 0, index = targets; k < 2; k++) {
 		if (!(zs & (1u << k))) {
 			continue;
 		}
-		nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, nir_load_frag_coord(&b), 2));
-		nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
-
-		tex->op = nir_texop_txf;
-		tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
-		tex->dest_type = k == 0 ? nir_type_float32 : nir_type_uint32;
-		tex->coord_components = 2;
-		tex->texture_index = index;
-		tex->sampler_index = 0;
-		tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, xy);
-		tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
-		nir_def_init(&tex->instr, &tex->def, 4, 32);
-		nir_builder_instr_insert(&b, &tex->instr);
-
-		nir_def *v = nir_channel(&b, &tex->def, 0);
+		nir_def *v = nir_channel(&b, texel_here(&b, index, k == 0 ? nir_type_float32 : nir_type_uint32, ms, sample, NULL), 0);
 		var = nir_variable_create(b.shader, nir_var_shader_out, k == 0 ? glsl_float_type() : glsl_uint_type(),
 		    k == 0 ? "depth" : "stencil");
 		var->data.location = k == 0 ? FRAG_RESULT_DEPTH : FRAG_RESULT_STENCIL;
@@ -1012,4 +1013,56 @@ mali_kernel_binary_free(struct mali_kernel_binary *binary)
 	binary->code = NULL;
 	binary->varyings = NULL;
 	binary->size = 0;
+}
+
+/*
+ * The driver's resolve draw (c_api_mali.cpp: hakios_metal_cb_blit from a multisample texture): the preload's triangle,
+ * its fragment the mean of texture 0's SAMPLES samples at the fragment's pixel plus (push words 0, 1) -- the copy's
+ * source origin less its destination's.
+ */
+int
+mali_resolve_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned samples, char *error,
+    size_t error_size)
+{
+	struct mali_kernel_binary pre_fs;
+	void *mem = ralloc_context(NULL);
+	nir_builder b;
+	nir_variable *var;
+	int result = -1;
+
+	if (mali_preload_compile(vs, &pre_fs, 1, error, error_size) != 0) {
+		ralloc_free(mem);
+		return -1;
+	}
+	mali_kernel_binary_free(&pre_fs);
+	snprintf(vs->name, sizeof(vs->name), "hakios_resolve_vs");
+	b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_FRAGMENT, false), "hakios_resolve_fs");
+	ralloc_steal(mem, b.shader);
+	b.shader->info.fs.origin_upper_left = true;
+	fs->stage = 2;
+	snprintf(fs->name, sizeof(fs->name), "hakios_resolve_fs%u", samples);
+	{
+		nir_def *offset = push_words(&b, 0, 2, 32), *sum = NULL;
+		for (unsigned i = 0; i < samples; i++) {
+			nir_def *v = texel_here(&b, 0, nir_type_float32, true, nir_imm_int(&b, (int)i), offset);
+			sum = sum ? nir_fadd(&b, sum, v) : v;
+		}
+		var = nir_variable_create(b.shader, nir_var_shader_out, glsl_vec4_type(), "color");
+		var->data.location = FRAG_RESULT_DATA0;
+		nir_store_var(&b, var, nir_fmul_imm(&b, sum, 1.0 / samples), 0xf);
+		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, 0, 0, 1, 0 };
+		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_SAMPLER, 0, 0, 1, 0 };
+	}
+	if (compile_nir(b.shader, MESA_SHADER_FRAGMENT, vs->varyings, fs, error, error_size) != 0) {
+		goto done;
+	}
+	result = 0;
+done:
+	ralloc_free(mem);
+	if (result != 0) {
+		mali_kernel_binary_free(vs);
+		mali_kernel_binary_free(fs);
+	}
+	return result;
 }

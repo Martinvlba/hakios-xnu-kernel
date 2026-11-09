@@ -107,12 +107,16 @@ int mali_fragment_compile(const void *bitcode, size_t size, const struct mali_co
  * TARGETS (1 to 4) attachments */
 int mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, char *error,
     size_t error_size);
-/* ... with depth (ZS 1) and/or stencil (ZS 2) loaded too, from textures TARGETS and on (TARGETS may be 0) */
+/* ... with depth (ZS 1) and/or stencil (ZS 2) loaded too, from textures TARGETS and on (TARGETS may be 0); ZS 4: of
+ * multisample attachments, run a sample (txf_ms at the sample id) */
 int mali_preload_zs_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, unsigned zs,
     char *error, size_t error_size);
 /* the driver's blit draw: texture 0 through sampler 0 at (x w0 + y w1 + w2, x w3 + y w4 + w5), normalized, of the
  * fragment's position (x, y) */
 int mali_blit_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size);
+/* the driver's resolve draw: the mean of multisample texture 0's SAMPLES samples at the fragment's pixel + (words 0, 1) */
+int mali_resolve_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned samples, char *error,
+    size_t error_size);
 void mali_kernel_binary_free(struct mali_kernel_binary *binary);
 
 #ifdef __cplusplus
