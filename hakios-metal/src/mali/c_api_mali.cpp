@@ -1372,6 +1372,9 @@ drawBytes(const DrawJob &dj)
 namespace {
 void passStats(hakios_metal_cb *cb);
 void glitchScan(hakios_metal_cb *cb, bool before);
+void glitchWatch(const char *event, hakios_metal_cb *cb);
+void glitchWatchCommit(hakios_metal_cb *cb);
+void glitchWatchDone();
 bool bootArg(const char *word);
 }  // namespace
 
@@ -1395,6 +1398,7 @@ struct hakios_metal_cb {
     bool skip_refused = false;                  // a refused piece left out, not the whole command buffer failed
     unsigned skipped = 0;
     std::string skip_reason;
+    unsigned seq = 0;                           // (boot-arg metal_glitchwatch: its number, in commit order)
     Bo stream;
     uint32_t sync = 0;
     void (*callback)(hakios_metal_cb *, void *) = nullptr;
@@ -1512,6 +1516,8 @@ struct hakios_metal_queue {
                 }
             }
             glitchScan(cb, false);
+            glitchWatch("completion", cb);
+            glitchWatchDone();
             device->giveStream(cb->stream);
             if (cb->timestamps.size != 0) {
                 device->freeBo(cb->timestamps);
@@ -1906,6 +1912,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
     cb->callback = callback;
     cb->context = context;
     cb->committed_at = std::chrono::steady_clock::now();
+    glitchWatchCommit(cb);
     glitchScan(cb, true);
     cb->status = HAKIOS_METAL_COMMITTED;
     if (!cb->error.empty()) {
@@ -2529,6 +2536,138 @@ glitchScan(hakios_metal_cb *cb, bool before)
     }
 }
 
+// BOOT-ARG metal_glitchwatch: every 1080x2340-class screen target (4 bytes a texel, the screen's width, drawn into)
+// kept watched, scanned (a row in 32) at every commit and every completion of any command buffer, and at CPU uploads:
+// the moment one turns blue/cyan is said with the event, the command buffer and its jobs (copies/fills with whether
+// they land in it, draws with their attachments). metal_glitchsync too: a commit first waits (up to 200 ms) for every
+// command buffer in flight, so "turned at the commit of N" means between N-1's completion and N's commit: no GPU work
+// of ours -- a CPU write (ours, CoreAnimation's, another process's) or the kernel.
+std::mutex gwLock;
+std::vector<std::pair<hakios_metal_texture *, bool>> gwTargets;  // (retained) and whether it was blue at the last scan
+std::atomic<unsigned> gwSeq{0}, gwInFlight{0};
+
+unsigned
+gwBlueRows(hakios_metal_texture *t, unsigned step, unsigned *first)
+{
+    bool bgra = t->format == 80 || t->format == 81;
+    std::vector<uint32_t> row(t->width);
+    unsigned bad = 0;
+    for (unsigned y = 0; y < t->height; y += step) {
+        if (hakios_metal_texture_read(t, 0, y, t->width, 1, row.data(), t->width * 4) != 0) break;
+        unsigned n = 0;
+        for (unsigned x = 0; x < t->width; x++) {
+            uint32_t v = row[x];
+            unsigned r = bgra ? (v >> 16) & 0xff : v & 0xff, g = (v >> 8) & 0xff, b = bgra ? v & 0xff : (v >> 16) & 0xff;
+            n += (b == 255 && g < 8 && r < 8) || (b == 255 && g == 255 && r < 100);
+        }
+        if (n * 10 > t->width * 6 && bad++ == 0 && first) *first = y;
+    }
+    return bad;
+}
+
+void
+gwDescribe(hakios_metal_cb *cb, hakios_metal_texture *t)
+{
+    if (cb == nullptr) return;
+    uint64_t lo = t->gpu(), hi = lo + t->span();
+    static const char *kinds[] = { "copy_u32", "fill_u32", "copy_u8", "fill_u8", "dispatch", "draw" };
+    for (size_t i = 0; i < cb->blits.size(); i++) {
+        const Job &b = cb->blits[i];
+        if (b.shader == DRAW) {
+            if (b.dst >= cb->draws.size()) continue;
+            const DrawJob &dj = cb->draws[b.dst];
+            std::string more;
+            for (unsigned k = 1; k < dj.rts; k++) {
+                char one[96];
+                snprintf(one, sizeof(one), " rt%u %p%s%s%s", k, (void *)dj.more[k - 1].texture,
+                    dj.more[k - 1].missing ? " missing" : "", dj.more[k - 1].write ? " w" : "",
+                    dj.more[k - 1].va >= lo && dj.more[k - 1].va < hi ? " IN-IT" : "");
+                more += one;
+            }
+            fprintf(stderr, "hakios-metal: glitchwatch:  job %zu draw %s into %p %ux%u%s load %d clear_only %d write %d%s\n", i,
+                dj.name, (void *)dj.target_tex, dj.width, dj.height, dj.target_va >= lo && dj.target_va < hi ? " (IT)" : "",
+                dj.load, dj.clear_only, dj.write, more.c_str());
+        } else if (b.shader == DISPATCH) {
+            bool in = false;
+            for (unsigned k = 0; k < MALI_KERNEL_BUFFERS; k++) in |= b.buffers[k] >= lo && b.buffers[k] < hi;
+            for (unsigned k = 0; k < b.texture_count; k++) in |= b.textures[k] == t;
+            fprintf(stderr, "hakios-metal: glitchwatch:  job %zu dispatch %ux%ux%u%s\n", i, b.groups[0], b.groups[1],
+                b.groups[2], in ? " (USES IT)" : "");
+        } else {
+            unsigned unit = b.shader <= 1 ? 4 : 1;
+            bool in = b.dst < hi && b.dst + (uint64_t)b.count * unit > lo;
+            fprintf(stderr, "hakios-metal: glitchwatch:  job %zu %s dst 0x%llx count %u value %08x src 0x%llx%s\n", i,
+                kinds[b.shader < 6 ? b.shader : 5], (unsigned long long)b.dst, b.count, b.value,
+                (unsigned long long)b.src, in ? " (INTO IT)" : "");
+        }
+    }
+}
+
+void
+glitchWatch(const char *event, hakios_metal_cb *cb)
+{
+    static const bool on = bootArg("metal_glitchwatch");
+    static std::atomic<unsigned> said{0};
+    if (!on) return;
+    std::lock_guard<std::mutex> g(gwLock);
+    if (cb != nullptr) {
+        // new screen targets this command buffer draws into (the four most recent kept)
+        for (const DrawJob &dj : cb->draws) {
+            hakios_metal_texture *t = dj.target_tex;
+            if (t == nullptr || t->bytes != 4 || t->samples != 1 || t->width < 1000 || t->height < 2000) continue;
+            bool known = false;
+            for (auto &w : gwTargets) known |= w.first == t;
+            if (known) continue;
+            t->retain();
+            gwTargets.push_back({ t, false });
+            if (gwTargets.size() > 4) {
+                gwTargets.front().first->release();
+                gwTargets.erase(gwTargets.begin());
+            }
+        }
+    }
+    for (auto &w : gwTargets) {
+        unsigned first = 0, bad = gwBlueRows(w.first, 32, &first);
+        bool blue = bad * 32 >= 512;     // ~16 sampled rows (about a fifth of the screen) or more
+        if (blue == w.second) continue;
+        w.second = blue;
+        if (said >= 40) continue;
+        said++;
+        fprintf(stderr, "hakios-metal: glitchwatch: target %p %ux%u %s at the %s of command buffer #%u (%zu jobs, %zu draws; "
+            "%u in flight)\n", (void *)w.first, w.first->width, w.first->height, blue ? "TURNED BLUE/CYAN" : "is clean again",
+            event, cb ? cb->seq : 0, cb ? cb->blits.size() : 0, cb ? cb->draws.size() : 0, gwInFlight.load());
+        if (blue) {
+            char line[64];
+            snprintf(line, sizeof(line), " (%u sampled rows from y %u)", bad, first);
+            fprintf(stderr, "hakios-metal: glitchwatch: %s\n", line);
+            gwDescribe(cb, w.first);
+        }
+    }
+}
+
+void
+glitchWatchCommit(hakios_metal_cb *cb)
+{
+    static const bool on = bootArg("metal_glitchwatch"), sync = bootArg("metal_glitchsync");
+    if (!on) return;
+    cb->seq = ++gwSeq;
+    if (sync) {
+        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        while (gwInFlight.load() != 0 && std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
+    glitchWatch("commit", cb);
+    gwInFlight++;
+}
+
+void
+glitchWatchDone()
+{
+    static const bool on = bootArg("metal_glitchwatch");
+    if (on) gwInFlight--;
+}
+
 void
 passStats(hakios_metal_cb *cb)
 {
@@ -2709,6 +2848,7 @@ hakios_metal_texture_replace(hakios_metal_texture *t, unsigned x, unsigned y, un
     uint64_t bytes_per_row)
 {
     int r = copyRows(t, x, y, w, h, (uint8_t *)bytes, bytes_per_row, true);
+    glitchWatch("CPU upload (texture replace)", nullptr);
     // (boot-arg metal_glitchsay: what a CPU upload of 64 rows or more brings that is mostly pure blue or cyan, with the
     // caller -- the screen surface was found blue BEFORE any command buffer drew it, 11-09)
     static const bool say = bootArg("metal_glitchsay");
