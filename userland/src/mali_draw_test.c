@@ -670,6 +670,49 @@ msaa_test(hakios_metal_device *d, hakios_metal_queue *q)
 	return ok;
 }
 
+/* 6e. sampling an RGBA16Float texture (CoreAnimation's 256x1 gradient tables, format 115, in the draws that turned the
+ * screen cyan/blue, 11-09): a 256x1 gradient of halves (r = i/255, g = 1 - i/255, b = 0.5, a = 1) drawn scaled into a
+ * 128x1 RGBA8 texture (the driver's blit samples it): each byte within 3 of what it should be */
+static int
+half_texture_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	hakios_metal_texture *h = hakios_metal_texture_new(d, 2, 115, 256, 1, 1);
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 128, 1, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	static __fp16 src[256 * 4];
+	uint32_t out[128];
+	unsigned right = 0;
+	int ok;
+
+	if (h == NULL || t == NULL) {
+		printf("mali_draw_test: RGBA16Float: no textures (%s)\n", hakios_metal_error());
+		return 0;
+	}
+	for (int i = 0; i < 256; i++) {
+		src[4 * i] = (__fp16)(i / 255.0f);
+		src[4 * i + 1] = (__fp16)(1.0f - i / 255.0f);
+		src[4 * i + 2] = (__fp16)0.5f;
+		src[4 * i + 3] = (__fp16)1.0f;
+	}
+	hakios_metal_texture_replace(h, 0, 0, 256, 1, src, sizeof(src));
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_blit(cb, h, 0, 0, 0, 256, 1, t, 0, 0, 0, 128, 1, 0) != 0)
+		printf("mali_draw_test: RGBA16Float: the blit refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "RGBA16Float");
+	hakios_metal_texture_read(t, 0, 0, 128, 1, out, sizeof(out));
+	for (int x = 0; x < 128; x++) {
+		/* destination pixel x samples the source at (x + 0.5) * 2 -- texel 2x or 2x+1, nearest */
+		int i = 2 * x + 1, r = (int)(out[x] & 0xff), g = (int)((out[x] >> 8) & 0xff), b = (int)((out[x] >> 16) & 0xff);
+		int a = (int)(out[x] >> 24);
+		right += abs(r - i) <= 3 && abs(g - (255 - i)) <= 3 && abs(b - 128) <= 3 && a == 255;
+	}
+	ok = ok && right >= 120;
+	printf("mali_draw_test: RGBA16Float sampled: %u of 128 right (pixel 0 0x%08x, 64 0x%08x, 127 0x%08x): %s\n", right, out[0],
+	    out[64], out[127], ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(h);
+	hakios_metal_texture_free(t);
+	return ok;
+}
+
 /* 7. what a full-screen (1080x2340) pass costs with one tiny draw: clear+store, clear alone, load+store, load+store of
  * two attachments; each the mean of 20 command buffers, wall time commit to done */
 static void
@@ -1063,6 +1106,7 @@ main(int argc, char **argv)
 	right = stencil_test(d, q, flat, col, 1) && right;
 	right = blend_test(d, q) && right;
 	right = msaa_test(d, q) && right;
+	right = half_texture_test(d, q) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;
 	/* sustained load, for the GPU's clock governor: 300 draws back to back, the first and last 20 timed */
