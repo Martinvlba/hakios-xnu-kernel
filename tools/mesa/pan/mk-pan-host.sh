@@ -60,6 +60,15 @@ HM=${HAKIOS_METAL:-$(cd "$ROOT/.." && pwd)/hakios-metal}
 [ -f "$HM/tools/kernels/fill_id.ll" ] || HM=$HOME/akita/ref/hakios-metal
 llvm-as "$HM/tools/kernels/fill_id.ll" -o fill_id.bc
 ./air_pan fill_id.bc "" "$ROOT/userland/src/mali_air_fill_id.h"
+# a render pipeline's two stages compiled here as the phone compiles them (hakios-metal's compile_mali.c), with function
+# constants: mali_stage_host LIB.metallib VERTEX FRAGMENT "VS-CONSTANTS" "FS-CONSTANTS" (MALI_STAGE_BT=1: a crash's frames)
+MHM=$ROOT/hakios-metal; [ -f "$MHM/src/mali/compile_mali.c" ] || MHM=$HM
+if [ -f "$MHM/src/mali/compile_mali.c" ]; then
+	eval cc $FLAGS -DAIR_MESA_NEW_NIR -I"$MHM/src/mali" -c -o compile_mali_host.o "$MHM/src/mali/compile_mali.c"
+	eval cc $FLAGS -DAIR_MESA_NEW_NIR -I"$MHM/src/mali" -c -o mali_stage_host.o "$ROOT/tools/mesa/pan/mali_stage_host.c"
+	c++ -o mali_stage_host mali_stage_host.o compile_mali_host.o -Wl,--start-group src/compiler/air/libair.a $LIBS \
+		-Wl,--end-group -lm -lpthread -lz -ldl
+fi
 # hakios-metal's Mali blits (beside this repository): copy and fill shaders
 eval cc $FLAGS -c -o pan_blit_shaders.o "$ROOT/tools/mesa/pan/pan_blit_shaders.c"
 c++ -o pan_blit_shaders pan_blit_shaders.o -Wl,--start-group $LIBS -Wl,--end-group -lm -lpthread -lz -ldl

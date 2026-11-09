@@ -30,7 +30,7 @@
 #define AIR_MAX_PARTS 8
 struct air_name {
    unsigned num;
-   char part[AIR_MAX_PARTS][32];
+   char part[AIR_MAX_PARTS][48];   /* (normalize_function_constant_predicate: 37) */
 };
 
 static bool
@@ -230,6 +230,12 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
       r = nir_ldexp(&c->b, a[0], nir_i2i32(&c->b, a[1]));
    } else if (!strcmp(op, "fast_fma") || !strcmp(op, "fma") || !strcmp(op, "mad")) {
       r = nir_ffma(&c->b, a[0], a[1], a[2]);
+   } else if (!strcmp(op, "normalize_function_constant_predicate")) {
+      /* Metal's compiler keeps whether a dependent function constant applies
+       * in __metal_implicit_fc_pred_N bytes, each put through this: a byte is
+       * a predicate when it is not zero (tools/mesa/air's reading, ported)
+       */
+      r = nir_b2iN(&c->b, nir_ine_imm(&c->b, a[0], 0), air_nir_bit_size(c, in->base.type));
    } else if (!strcmp(op, "abs")) {
       r = is_float ? nir_fabs(&c->b, a[0]) : nir_iabs(&c->b, a[0]);
    } else if (!strcmp(op, "abs_diff")) {
@@ -756,9 +762,31 @@ all_zero(nir_def *def)
    return true;
 }
 
+/* air.get_null_texture_*: the handle of no texture, a binding no [[texture(n)]]
+ * has. Metal reads and samples of a null texture give zero, so every use of it
+ * folds to zeros here and no slot is bound (tools/mesa/air binds a 1x1 zero
+ * texture at a reserved index instead). CoreAnimation's generic uber shaders
+ * pick it, on a function constant, for the textures a pipeline does not use.
+ */
+#define AIR_NULL_TEXTURE 0xfffeu
+
 static bool
 texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n)
 {
+   if (!strncmp(n->part[0], "get_null_texture", 16)) {
+      struct air_ptr p = { .class = AIR_PTR_TEXTURE, .binding = AIR_NULL_TEXTURE };
+      air_set(c, &in->base, air_val_ptr(c, p));
+      return true;
+   }
+   if (!strncmp(n->part[0], "is_null_texture", 15)) {
+      struct air_val *tv = air_get(c, in->operands[1]);
+      if (!tv)
+         return false;
+      if (tv->kind != AIR_VAL_PTR || tv->ptr.class != AIR_PTR_TEXTURE)
+         return air_error(c, "intrinsic: air.%s of something that is not a texture", n->part[0]);
+      air_set(c, &in->base, air_val_ssa(c, nir_imm_bool(&c->b, tv->ptr.binding == AIR_NULL_TEXTURE)));
+      return true;
+   }
    struct air_tex_name t;
    if (!parse_tex_name(n->part[0], &t))
       return air_error(c, "intrinsic: air.%s (a texture name this cannot take apart)",
@@ -771,6 +799,14 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
    struct air_ptr tex;
    if (!tex_handle(c, in, 1, AIR_PTR_TEXTURE, &tex))
       return false;
+   if (tex.binding == AIR_NULL_TEXTURE) {
+      const struct air_type *ret = in->base.type;
+      if (!ret || ret->kind == AIR_TYPE_VOID)
+         return true;    /* a write to no texture */
+      const struct air_type *vt = ret->kind == AIR_TYPE_STRUCT ? ret->members[0] : ret;
+      set_tex_result(c, in, nir_imm_zero(&c->b, air_nir_components(vt), air_nir_bit_size(c, vt)));
+      return true;
+   }
 
    unsigned arg = 2;   /* operands[0] is the callee, [1] the texture */
    struct air_ptr samp = { 0 };
@@ -990,6 +1026,35 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
    return true;
 }
 
+/* -- function constants ------------------------------------------------- */
+
+/* air.is_function_constant_defined(ptr to the constant's global): whether the
+ * pipeline supplied a value for it -- known at translation time (it is in
+ * air_to_nir_options.constants or not), so it folds to a constant and the
+ * branch it guards with it. Handled before the math ops: its argument is a
+ * pointer. (Ported from tools/mesa/air; CoreAnimation's generic uber shaders
+ * ask it of every constant, 11-09.)
+ */
+static bool
+fc_defined_op(struct air_ctx *c, const struct air_inst *in)
+{
+   if (in->num_operands != 2)
+      return air_error(c, "intrinsic: air.is_function_constant_defined of %u arguments",
+                       in->num_operands - 1);
+   struct air_val *p = air_get(c, in->operands[1]);
+   if (!p)
+      return false;
+   if (p->kind != AIR_VAL_PTR || p->ptr.class != AIR_PTR_FUNCTION_CONSTANT)
+      return air_error(c, "intrinsic: air.is_function_constant_defined of something "
+                          "that is not a function constant");
+   bool defined = false;
+   for (unsigned i = 0; c->options && i < c->options->num_constants; i++)
+      if (c->options->constants[i].index == p->ptr.binding)
+         defined = true;
+   air_set(c, &in->base, air_val_ssa(c, nir_imm_bool(&c->b, defined)));
+   return true;
+}
+
 /* -- the dispatcher ----------------------------------------------------- */
 
 bool
@@ -1005,6 +1070,8 @@ air_translate_call(struct air_ctx *c, const struct air_inst *in, const char *nam
    if (!split_name(name, &n))
       return air_error(c, "intrinsic: %s (a name this cannot take apart)", name);
 
+   if (!strcmp(n.part[0], "is_function_constant_defined"))
+      return fc_defined_op(c, in);
    if (n.num >= 2 && !strcmp(n.part[0], "wg") && !strcmp(n.part[1], "barrier"))
       return barrier_op(c, in);
    if (!strcmp(n.part[0], "atomic"))

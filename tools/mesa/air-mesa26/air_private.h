@@ -13,6 +13,7 @@
 
 #include "nir.h"
 #include "nir_builder.h"
+#include "util/set.h"
 
 #ifdef AIR_MESA_NEW_NIR         /* (nir_air.h) */
 #define AIR_B_EXACT(b)                  (((b).fp_math_ctrl & nir_fp_exact) == nir_fp_exact)
@@ -84,6 +85,10 @@ struct air_ctx {
    struct hash_table *phi_cursors;
    /* phi -> nir register decl */
    struct hash_table *phi_regs;
+   /* the blocks the entry can reach, branches on known values followed only
+    * where they go (translate_body): what a phi between pointers chooses from
+    */
+   struct set *reachable;
 
    /* A call of another function in the module becomes a nir_call, and
     * nir_inline_functions folds it in afterwards. These two carry the state
@@ -113,6 +118,18 @@ struct air_ctx {
       unsigned offset;      /* bytes, when has_offset */
       bool has_offset;
       bool skip;            /* llvm.* lists, and anything that failed */
+      /* A program-scope variable that is a VALUE (plan_global_folding): a
+       * scalar integer loaded and stored only whole, stored once, in its
+       * air.static_init constructor. When that store's value is a constant
+       * (it is when it came from function constants) every load answers with
+       * it -- the generic uber shaders' derived flags (fc_has_texture_matrix)
+       * decide branches and pointer selects at translation, as Metal's
+       * specialisation does. (Ported from tools/mesa/air.)
+       */
+      bool fold;
+      bool known;
+      uint64_t bits;
+      unsigned bit_size;
    } *global_plan;
 
    /* what the entry point's parameters are */
@@ -128,6 +145,24 @@ struct air_ctx {
    } *outputs;
 
    unsigned scratch_size;
+   /* pointers stored into scratch at a known offset (a local `alloca ptr`:
+    * CoreAnimation's generic uber shaders keep a sampler argument so and read
+    * it back): kept as the values they are, since memory cannot hold them
+    */
+   /* what the static initializers stored, as constants, into program-scope
+    * variables (bytes at a scratch offset): a load of exactly those bytes is
+    * that constant -- the generic uber shaders' fc_fragment_shader_config,
+    * filled field by field from function constants. Not for a variable the
+    * body itself stores into (scratch_dirty: those offsets' ranges).
+    */
+   bool in_static_init;
+   unsigned num_known_mem;
+   struct { uint64_t offset; unsigned comps, bit_size; uint64_t bits[4]; } known_mem[256];
+   unsigned num_scratch_dirty;
+   struct { uint64_t lo, hi; } scratch_dirty[64];
+   bool scratch_dirty_all;
+   unsigned num_scratch_ptrs;
+   struct { uint64_t offset; struct air_val *val; } scratch_ptrs[64];
    unsigned shared_size;
    unsigned tg_arg_param_plus1;   /* the [[threadgroup(0)]] parameter's index + 1, 0 when there is none */
 
