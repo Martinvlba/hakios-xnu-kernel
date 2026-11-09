@@ -383,10 +383,10 @@ pass_bench(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 }
 
 /* 9. the tiler heap's growth: a full-screen draw of many instances (10000: 30 MB of polygon lists, the heap's first
- * 10 MB grown to 15 chunks) must complete and draw. `mali_draw_test heap N` runs it alone with N instances (past
- * 60000 the heap's 64 chunks are not enough: incremental rendering, TODO 12) */
+ * 10 MB grown to 15 chunks) must complete and draw. `mali_draw_test heap N [MOST]` runs it alone (past 60000
+ * instances, or MOST chunks, the heap is not enough: incremental rendering) */
 static int
-heap_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, unsigned instances)
+heap_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, unsigned instances, int loaded)
 {
 	int ok;
 	struct timespec t0, t1;
@@ -403,17 +403,35 @@ heap_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *f
 		pass.load_action = 2;
 		pass.store_action = 1;
 		cb = hakios_metal_cb_new(q);
-		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, instances, NULL, NULL, 0, NULL, NULL, 0);
+		if (loaded) {
+			/* the target grey first; then loaded, and the lower-left half drawn many times: where nothing is drawn the
+			 * grey must stay -- through every flush of incremental rendering (each later part loads what the one before
+			 * stored, by the pre-frame shader) */
+			pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+			pass.clear_color[3] = 1;
+			hakios_metal_cb_clear(cb, &pass);
+			pass.load_action = 1;
+		}
+		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, loaded ? 3 : 6, instances, NULL, NULL, 0, NULL, NULL, 0);
 		clock_gettime(CLOCK_MONOTONIC, &t0);
 		hakios_metal_cb_commit(cb, NULL, NULL);
 		hakios_metal_cb_wait(cb);
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		st = hakios_metal_cb_status(cb);
 		hakios_metal_texture_read(t, 0, h - 1, 64, 1, row, sizeof(row));
-		printf("mali_draw_test: %u full-screen instances at 1080x2340: status %d in %ld ms, the last row 0x%08x: %s\n",
-		    instances, st, (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000), row[0],
-		    st == HAKIOS_METAL_COMPLETED && row[0] == 0xff804020u ? "WORK" : "FAILED");
-		ok = st == HAKIOS_METAL_COMPLETED && row[0] == 0xff804020u;
+		if (loaded) {
+			uint32_t tr[64];
+			hakios_metal_texture_read(t, w - 64, 0, 64, 1, tr, sizeof(tr));
+			ok = st == HAKIOS_METAL_COMPLETED && row[0] == 0xff804020u && tr[63] == 0xff808080u;
+			printf("mali_draw_test: %u lower-left halves over a loaded grey target: status %d in %ld ms, bottom left 0x%08x, top "
+			    "right 0x%08x: %s\n", instances, st, (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000),
+			    row[0], tr[63], ok ? "WORK" : "FAILED");
+		} else {
+			ok = st == HAKIOS_METAL_COMPLETED && row[0] == 0xff804020u;
+			printf("mali_draw_test: %u full-screen instances at 1080x2340: status %d in %ld ms, the last row 0x%08x: %s\n",
+			    instances, st, (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000), row[0],
+			    ok ? "WORK" : "FAILED");
+		}
 		hakios_metal_cb_free(cb);
 		hakios_metal_texture_free(t);
 	}
@@ -451,13 +469,19 @@ recovery_tests(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_progr
 		    st == HAKIOS_METAL_COMPLETED && n == 4096 ? "WORK" : "FAILED");
 		ok = ok && st == HAKIOS_METAL_COMPLETED && n == 4096;
 	}
-	ok = heap_test(d, q, flat, 10000) && ok;
+	ok = heap_test(d, q, flat, 10000, 0) && ok;
 	return ok;
 }
 
 int
 main(int argc, char **argv)
 {
+	/* `mali_draw_test heap|irload N [MOST]`: the heap test alone, N instances, the heap's most chunks MOST (5-64: below
+	 * what N needs, the pass is drawn by incremental rendering); irload: over a loaded target */
+	const int alone = argc >= 3 && (!strcmp(argv[1], "heap") || !strcmp(argv[1], "irload"));
+	if (alone && argc >= 4) {
+		setenv("HAKIOS_MALI_HEAP_CHUNKS", argv[3], 1);
+	}
 	hakios_metal_device *d = hakios_metal_open();
 	uint32_t px[64 * 64];
 	long us;
@@ -481,8 +505,8 @@ main(int argc, char **argv)
 		printf("mali_draw_test: no program (%s)\n", hakios_metal_error());
 		return 1;
 	}
-	if (argc == 3 && !strcmp(argv[1], "heap")) {
-		return heap_test(d, q, flat, (unsigned)strtoul(argv[2], NULL, 0)) ? 0 : 1;
+	if (alone) {
+		return heap_test(d, q, flat, (unsigned)strtoul(argv[2], NULL, 0), !strcmp(argv[1], "irload")) ? 0 : 1;
 	}
 	/* one pass after another with other geometry: 6 vertices (the whole target) or 3 (its lower-left half), so that
 	 * what each pass shows says whose primitives it binned */
