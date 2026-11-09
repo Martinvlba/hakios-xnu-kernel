@@ -33,11 +33,12 @@ extern "C" {
 #define MALI_KERNEL_GRID_WORD       38
 #define MALI_KERNEL_RESERVED        42
 /* a draw's push constants (both stages): words 2n, 2n+1 [[buffer(n)]]'s address as a kernel's; then the viewport
- * transform's scale (3 words) and offset (3), the first vertex and the first instance */
+ * transform's scale (3 words) and offset (3), the first vertex and the first instance, the blend colour (2) */
 #define MALI_DRAW_VIEWPORT_SCALE    32
 #define MALI_DRAW_VIEWPORT_OFFSET   35
 #define MALI_DRAW_FIRST_VERTEX      38
 #define MALI_DRAW_BASE_INSTANCE     39
+#define MALI_DRAW_BLEND_COLOR       40      /* (two words: the blend colour's r g, b a as halves) */
 #define MALI_KERNEL_MAX_FAU         256
 #define MALI_KERNEL_MAX_RESOURCES   64
 
