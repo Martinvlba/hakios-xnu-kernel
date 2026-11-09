@@ -575,6 +575,101 @@ blend_test(hakios_metal_device *d, hakios_metal_queue *q)
 	return ok;
 }
 
+/* 6d. MSAA (4 samples): the lower-left half into a multisample target, resolved (hakios_metal_cb_blit) into one of a
+ * sample: the inside tri_flat, the outside black, and along the diagonal pixels a quarter, half or three quarters
+ * covered -- none without the samples; then the target loaded in a new command buffer (the per-sample preload), a draw
+ * that covers nothing, stored and resolved again: the same picture */
+static int
+msaa_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	hakios_metal_texture *ms = hakios_metal_texture_new_multisample(d, 70, 64, 64, 4, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *rs = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *f4 = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc,
+	    tri_flat_fs_bc_len, 70);
+	struct hakios_metal_render_pass pass;
+	struct hakios_metal_scissor corner = { 63, 0, 1, 1 };
+	static uint32_t a[64 * 64], b[64 * 64];
+	unsigned inside = 0, outside = 0, edge = 0, odd = 0, same = 0;
+	int ok = 1;
+
+	if (ms == NULL || rs == NULL || f4 == NULL) {
+		printf("mali_draw_test: msaa: no textures or program (%s)\n", hakios_metal_error());
+		return 0;
+	}
+	hakios_metal_program_set_samples(f4, 4);
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = ms;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[3] = 1;
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, f4, &pass, NULL, NULL, 3, 0, 3, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: msaa: the draw refused: %s\n", hakios_metal_error());
+	if (hakios_metal_cb_blit(cb, ms, 0, 0, 0, 64, 64, rs, 0, 0, 0, 64, 64, 0) != 0)
+		printf("mali_draw_test: msaa: the resolve refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "msaa") && ok;
+	hakios_metal_texture_read(rs, 0, 0, 64, 64, a, 256);
+	for (unsigned i = 0; i < 64 * 64; i++) {
+		unsigned r = a[i] & 0xff, g = (a[i] >> 8) & 0xff, bl = (a[i] >> 16) & 0xff;
+		if (a[i] == 0xff804020u) inside++;
+		else if (a[i] == 0xff000000u) outside++;
+		else if (((r >= 7 && r <= 9) || (r >= 15 && r <= 17) || (r >= 23 && r <= 25)) && g >= r * 2 - 2 && g <= r * 2 + 2 &&
+		         bl >= r * 4 - 3 && bl <= r * 4 + 3) edge++;
+		else odd++;
+	}
+	pass.load_action = 1;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, f4, &pass, NULL, &corner, 3, 0, 3, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: msaa: the loading draw refused: %s\n", hakios_metal_error());
+	hakios_metal_cb_blit(cb, ms, 0, 0, 0, 64, 64, rs, 0, 0, 0, 64, 64, 0);
+	ok = finish(cb, "msaa load") && ok;
+	hakios_metal_texture_read(rs, 0, 0, 64, 64, b, 256);
+	for (unsigned i = 0; i < 64 * 64; i++) same += a[i] == b[i];
+	ok = ok && inside > 1900 && outside > 1900 && edge >= 32 && odd == 0 && same == 4096;
+	printf("mali_draw_test: msaa: resolved: inside %u, outside %u, edge pixels partly covered %u, other %u (0 wanted); loaded "
+	    "and resolved again: %u of 4096 the same: %s\n", inside, outside, edge, odd, same, ok ? "WORK" : "FAILED");
+	{
+		/* a multisample depth attachment: tri_flat written at z 0 (Less), stored; in a new command buffer, the depth
+		 * loaded (a sample a run), tri_color at the same z, Less: fails everywhere -- resolved, all tri_flat */
+		hakios_metal_texture *z4 = hakios_metal_texture_new_multisample(d, 252, 64, 64, 4, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+		hakios_metal_program *c4 = hakios_metal_program_new_bitcode(tri_color_vs_bc, tri_color_vs_bc_len, tri_color_fs_bc,
+		    tri_color_fs_bc_len, 70);
+		unsigned kept = 0;
+		hakios_metal_program_set_samples(c4, 4);
+		memset(&pass, 0, sizeof(pass));
+		pass.color0 = ms;
+		pass.load_action = 2;
+		pass.store_action = 1;
+		pass.depth = z4;
+		pass.depth_load_action = 2;
+		pass.depth_store_action = 1;
+		pass.clear_depth = 1.0;
+		pass.depth_state_set = 1;
+		pass.depth_compare = 1;
+		pass.depth_write = 1;
+		cb = hakios_metal_cb_new(q);
+		if (hakios_metal_cb_draw(cb, f4, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+			printf("mali_draw_test: msaa depth: refused: %s\n", hakios_metal_error());
+		ok = finish(cb, "msaa depth") && ok;
+		pass.load_action = 1;
+		pass.depth_load_action = 1;
+		cb = hakios_metal_cb_new(q);
+		if (hakios_metal_cb_draw(cb, c4, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+			printf("mali_draw_test: msaa depth: the second draw refused: %s\n", hakios_metal_error());
+		hakios_metal_cb_blit(cb, ms, 0, 0, 0, 64, 64, rs, 0, 0, 0, 64, 64, 0);
+		ok = finish(cb, "msaa depth load") && ok;
+		hakios_metal_texture_read(rs, 0, 0, 64, 64, a, 256);
+		for (unsigned i = 0; i < 64 * 64; i++) kept += a[i] == 0xff804020u;
+		ok = ok && kept == 4096;
+		printf("mali_draw_test: msaa depth: loaded in a new command buffer, Less kept %u of 4096: %s\n", kept,
+		    kept == 4096 ? "WORK" : "FAILED");
+		hakios_metal_texture_free(z4);
+	}
+	hakios_metal_texture_free(ms);
+	hakios_metal_texture_free(rs);
+	return ok;
+}
+
 /* 7. what a full-screen (1080x2340) pass costs with one tiny draw: clear+store, clear alone, load+store, load+store of
  * two attachments; each the mean of 20 command buffers, wall time commit to done */
 static void
@@ -694,6 +789,55 @@ zs_ir_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 	return ok;
 }
 
+/* (irmsaa: a 4-sample 1080x2340 target grey, then loaded, INSTANCES lower-left halves -- through incremental
+ * rendering's flushes, each later part loading every sample -- resolved: the top right still grey) */
+static int
+ms_ir_test(hakios_metal_device *d, hakios_metal_queue *q, unsigned instances)
+{
+	const unsigned w = 1080, h = 2340;
+	hakios_metal_texture *ms = hakios_metal_texture_new_multisample(d, 70, w, h, 4, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *rs = hakios_metal_texture_new(d, 2, 70, w, h, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *f4 = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc,
+	    tri_flat_fs_bc_len, 70);
+	struct hakios_metal_render_pass pass;
+	struct timespec t0, t1;
+	uint32_t bl[64], tr[64];
+	int st, ok;
+
+	if (ms == NULL || rs == NULL || f4 == NULL) {
+		printf("mali_draw_test: irmsaa: no textures (%s)\n", hakios_metal_error());
+		return 0;
+	}
+	hakios_metal_program_set_samples(f4, 4);
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = ms;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+	pass.clear_color[3] = 1;
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	hakios_metal_cb_clear(cb, &pass);
+	pass.load_action = 1;
+	if (hakios_metal_cb_draw(cb, f4, &pass, NULL, NULL, 3, 0, 3, instances, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: irmsaa: refused: %s\n", hakios_metal_error());
+	hakios_metal_cb_blit(cb, ms, 0, 0, 0, w, h, rs, 0, 0, 0, w, h, 0);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	hakios_metal_cb_commit(cb, NULL, NULL);
+	hakios_metal_cb_wait(cb);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	st = hakios_metal_cb_status(cb);
+	hakios_metal_cb_free(cb);
+	hakios_metal_texture_read(rs, 0, h - 1, 64, 1, bl, sizeof(bl));
+	hakios_metal_texture_read(rs, w - 64, 0, 64, 1, tr, sizeof(tr));
+	ok = st == HAKIOS_METAL_COMPLETED && bl[0] == 0xff804020u && tr[63] == 0xff808080u;
+	printf("mali_draw_test: %u lower-left halves over a loaded grey 4-sample target: status %d in %ld ms, bottom left 0x%08x, "
+	    "top right 0x%08x: %s\n", instances, st, (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000),
+	    bl[0], tr[63], ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(ms);
+	hakios_metal_texture_free(rs);
+	return ok;
+}
+
 static int
 heap_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, unsigned instances, int loaded)
 {
@@ -788,7 +932,7 @@ main(int argc, char **argv)
 	/* `mali_draw_test heap|irload N [MOST]`: the heap test alone, N instances, the heap's most chunks MOST (5-64: below
 	 * what N needs, the pass is drawn by incremental rendering); irload: over a loaded target */
 	const int alone = argc >= 3 && (!strcmp(argv[1], "heap") || !strcmp(argv[1], "irload") || !strcmp(argv[1], "irdepth") ||
-	    !strcmp(argv[1], "irstencil"));
+	    !strcmp(argv[1], "irstencil") || !strcmp(argv[1], "irmsaa"));
 	if (alone && argc >= 4) {
 		setenv("HAKIOS_MALI_HEAP_CHUNKS", argv[3], 1);
 	}
@@ -820,6 +964,9 @@ main(int argc, char **argv)
 	}
 	if (alone && !strncmp(argv[1], "irdepth", 7)) {
 		return zs_ir_test(d, q, flat, col, (unsigned)strtoul(argv[2], NULL, 0), 0) ? 0 : 1;
+	}
+	if (alone && !strcmp(argv[1], "irmsaa")) {
+		return ms_ir_test(d, q, (unsigned)strtoul(argv[2], NULL, 0)) ? 0 : 1;
 	}
 	if (alone && !strcmp(argv[1], "irstencil")) {
 		return zs_ir_test(d, q, flat, col, (unsigned)strtoul(argv[2], NULL, 0), 1) ? 0 : 1;
@@ -915,6 +1062,7 @@ main(int argc, char **argv)
 	right = stencil_test(d, q, flat, col, 0) && right;
 	right = stencil_test(d, q, flat, col, 1) && right;
 	right = blend_test(d, q) && right;
+	right = msaa_test(d, q) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;
 	/* sustained load, for the GPU's clock governor: 300 draws back to back, the first and last 20 timed */

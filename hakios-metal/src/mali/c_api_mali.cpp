@@ -131,8 +131,10 @@ struct hakios_metal_device {
     std::atomic<bool> heap_set{false};          // the queue given its heap (HEAP_SET once a queue, as panvk and gallium)
     Bo heapdesc;
     bool heap_ok = false;                       // the heap made: draws can be served
-    struct hakios_metal_program *preload_for[5][4] = {};   // the Load action's draw for 0 to 4 targets, with depth (1)
-    bool preload_failed_for[5][4] = {};                    // and/or stencil (2) loaded too (preloadProgram)
+    struct hakios_metal_program *preload_for[5][8] = {};   // the Load action's draw for 0 to 4 targets, with depth (1)
+    bool preload_failed_for[5][8] = {};                    // and/or stencil (2) loaded too, multisample (4) (preloadProgram)
+    struct hakios_metal_program *resolve_prog = nullptr;   // the driver's resolve draw (resolveProgram), under preload_lock
+    bool resolve_failed = false;
     std::mutex preload_lock;
     struct hakios_metal_program *blit_prog = nullptr;  // the driver's blit draw (blitProgram), under preload_lock
     bool blit_failed = false;
@@ -506,7 +508,7 @@ struct hakios_metal_texture {
     // the bytes from gpu() that its pixels (every level, every slice) span
     uint64_t span() const {
         if (levels > 1) return level_off[levels - 1] + (uint64_t)level_stride[levels - 1] * levelRows(levels - 1);
-        return (uint64_t)stride * levelRows(0) * depth;
+        return (uint64_t)stride * levelRows(0) * depth * samples;    // (a multisample texture: a plane a sample)
     }
 };
 
@@ -638,6 +640,10 @@ describe(const hakios_metal_texture *t, uint32_t *tex, uint32_t *plane, uint64_t
         tex[3] = ((t->levels - 1) * 256) << 16;
         plane_va = t->bo.va + t->planes_off;
     }
+    if (t->samples > 1) {
+        // MULTISAMPLE: the sample count; each sample a plane (layered), the plane's slice stride apart (txf_ms)
+        tex[3] |= (t->samples == 4 ? 2u : t->samples == 2 ? 1u : 0u) << 13;
+    }
     tex[4] = (uint32_t)plane_va;
     tex[5] = (uint32_t)(plane_va >> 32);
     tex[7] = t->type == 7 ? t->depth - 1 : 0;
@@ -687,6 +693,7 @@ struct DrawJob {
     bool clear_only = false;                            // a pass with no geometry: the clear (hakios_metal_cb_clear)
     // DEPTH AND STENCIL (zs): the attachments' memory, formats, actions and clear values (the framebuffer descriptor's
     // word 12-13 and its ZS extension), and this draw's depth/stencil descriptor (zsd)
+    unsigned samples = 1;                               // the attachments' (and the pipeline's): 1 or 4
     bool zs = false, has_z = false, has_s = false;
     uint64_t z_va = 0, s_va = 0;
     unsigned z_row = 0, s_row = 0;
@@ -769,13 +776,14 @@ inline uint64_t wait_on(unsigned mask) { return 3ULL << 56 | (uint64_t)mask << 1
 // pre-frame shader reads them: R32F or R16 UNORM for depth, R8UI (131; 163 is R8 UNORM) for stencil)
 void
 describeRaw(uint32_t mali_format, unsigned bytes, uint64_t va, uint32_t stride, unsigned w, unsigned h, uint32_t *tex,
-    uint32_t *plane, uint64_t plane_va)
+    uint32_t *plane, uint64_t plane_va, unsigned samples = 1)
 {
     memset(tex, 0, 32);
     memset(plane, 0, 32);
     tex[0] = 2 | 2u << 4 | mali_format << 10;
     tex[1] = (w - 1) | (h - 1) << 16;
     tex[2] = kIdentitySwizzle;
+    tex[3] = (samples == 4 ? 2u : 0u) << 13;                                    // (the planes a sample apart)
     tex[4] = (uint32_t)plane_va;
     tex[5] = (uint32_t)(plane_va >> 32);
     plane[0] = 10 | 1 << 4 | 2 << 8 | (bytes == 1 ? 0u : bytes == 2 ? 1u : 2u) << 24;
@@ -795,12 +803,12 @@ describeZs(const DrawJob &dj, unsigned zs, uint8_t *tex, uint8_t *planes, uint64
     unsigned i = 0;
     if (zs & 1) {
         describeRaw(dj.z_format == 1 ? 164u << 12 | 16 : 167u << 12 | 16, dj.z_format == 1 ? 2 : 4, dj.z_va, dj.z_row,
-            dj.width, dj.height, (uint32_t *)(tex + 32 * i), (uint32_t *)(planes + 32 * i), planes_va + 32 * i);
+            dj.width, dj.height, (uint32_t *)(tex + 32 * i), (uint32_t *)(planes + 32 * i), planes_va + 32 * i, dj.samples);
         i++;
     }
     if (zs & 2) {
         describeRaw(131u << 12 | 16, 1, dj.s_va, dj.s_row, dj.width, dj.height, (uint32_t *)(tex + 32 * i),
-            (uint32_t *)(planes + 32 * i), planes_va + 32 * i);
+            (uint32_t *)(planes + 32 * i), planes_va + 32 * i, dj.samples);
     }
 }
 
@@ -846,6 +854,7 @@ emitZsLoad(hakios_metal_device *d, const DrawJob &dj, uint8_t *ir, uint64_t ir_v
     auto *w = (uint32_t *)(ir + IR_ZS_DCD);
     memset(w, 0, 0x180);
     w[0] = 1u << 1 | 3u << 2 | 3u << 4 | 1u << 9;                             // killed, Z/S late, clean tiles written
+    if (dj.samples > 1) w[0] |= 1u << 11 | 1u << 19;                           // (multisample: run a sample)
     w[1] = 0xffff;                                                              // no colour target
     w[5] = 1u << 24 | 1u << 25;
     w[7] = 0x3f800000;
@@ -907,6 +916,7 @@ emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t p
         w[0] = 1u << 1 | 3u << 2 | 3u << 4 | 1u << 9;
         zsdFromShader((uint32_t *)(ir + IR_IR_ZSD), zs);
     }
+    if (dj.samples > 1) w[0] |= 1u << 11 | 1u << 19;                           // (multisample: run a sample)
     w[1] = 0xffff | ((1u << nt) - 1) << 16;
     w[5] = dj.dcd2;
     w[7] = 0x3f800000;
@@ -1005,10 +1015,14 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     tc[3] = (dj.width - 1) | (dj.height - 1) << 16;
     *(uint64_t *)&tc[6] = d->heapdesc.va;
     *(uint64_t *)&tc[8] = (d->heapdesc.va + 0x1000) | (0x10000 >> 12);
-    *(uint64_t *)&fb[4] = d->descriptors.va + 0x1800;                          // sample positions: one, centred
+    // sample positions: one, centred; four: the rotated 4x grid (descriptors + 0x2000)
+    *(uint64_t *)&fb[4] = d->descriptors.va + (dj.samples > 1 ? 0x2000 : 0x1800);
     fb[8] = (dj.width - 1) | (dj.height - 1) << 16;
     fb[10] = (dj.width - 1) | (dj.height - 1) << 16;
-    fb[11] = 2 << 6 | 8 << 9 | 1u << 15 | (dj.rts - 1) << 19 | dj.rts << 24;   // 16x16 tiles, targets, 1 KiB a target a tile
+    // 16x16 tiles, targets, 1 KiB a target a tile; four samples: 4 (log2 2), the rotated 4x grid (2), 8x8 tiles -- the
+    // same kilobyte a target a tile (64 pixels of four samples)
+    fb[11] = (dj.samples > 1 ? 2u | 2u << 3 : 0u) | 2 << 6 | (dj.samples > 1 ? 6u : 8u) << 9 | 1u << 15 | (dj.rts - 1) << 19 |
+        dj.rts << 24;
     fb[12] = 1u << 29;                                                          // empty tiles written (the clear)
     *(uint64_t *)&fb[14] = area_va;
     if (dj.zs) {
@@ -1018,14 +1032,14 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         if (dj.has_z) {
             fb[12] |= dj.z_internal << 16 | (dj.z_write ? 1u << 18 : 0);
             memcpy(&fb[13], &dj.z_clear, 4);
-            ext[0] |= dj.z_format | 2u << 4;                                    // linear
+            ext[0] |= dj.z_format | 2u << 4 | (dj.samples > 1 ? 3u << 8 : 0u);  // linear (layered samples)
             *(uint64_t *)&ext[8] = dj.z_va;
             ext[10] = dj.z_row;
             ext[11] = dj.z_row * dj.height;
         }
         if (dj.has_s) {
             fb[12] |= (dj.s_clear & 0xff) | (dj.s_write ? 1u << 8 : 0);
-            ext[0] |= 1u << 16 | 2u << 20;                                      // S8, linear
+            ext[0] |= 1u << 16 | 2u << 20 | (dj.samples > 1 ? 3u << 24 : 0u);   // S8, linear (layered samples)
             *(uint64_t *)&ext[12] = dj.s_va;
             ext[14] = dj.s_row;
             ext[15] = dj.s_row * dj.height;
@@ -1040,7 +1054,8 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         }
     }
     rt[0] = 1u << 26;                                                           // internal format R8G8B8A8
-    rt[1] = dj.rt1 | (dj.write ? 1u : 0u) | 1u << 31;                          // clean tiles written too
+    rt[1] = dj.rt1 | (dj.write ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);   // clean tiles written too
+    // (multisample: written back layered, a plane a sample, rt[11] apart)
     *(uint64_t *)&rt[8] = dj.target_va;
     rt[10] = dj.row_bytes;
     rt[11] = dj.row_bytes * dj.height;
@@ -1051,7 +1066,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         const DrawJob::More &m = dj.more[i - 1];
         auto *r = rt + 16 * i;
         r[0] = 1u << 26 | (1024 * i / 16) << 4;
-        r[1] = m.rt1 | (m.write ? 1u : 0u) | 1u << 31;
+        r[1] = m.rt1 | (m.write ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);
         *(uint64_t *)&r[8] = m.va;
         r[10] = m.row_bytes;
         r[11] = m.row_bytes * dj.height;
@@ -1177,7 +1192,8 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         s[n++] = move48(52, d->descriptors.va + 0x1980);
         s[n++] = move48(54, 0);
         s[n++] = move32(56, 8 | 1u << 22);                                      // triangles, basic FIFO
-        s[n++] = move32(57, 1u << 23 | 1u << 26);                               // no face culled
+        s[n++] = move32(57, 1u << 23 | 1u << 26 | (dj.samples > 1 ? 1u << 11 | 1u << 19 : 0u));   // no face culled
+        // (multisample: run a sample, each its own texel)
         s[n++] = move32(58, dj.dcd1);
         s[n++] = move32(60, 0x3f800000);
         s[n++] = move32(61, 0);
@@ -1539,6 +1555,14 @@ openDraws(hakios_metal_device *d)
     auto *pos = (uint32_t *)(desc + 0x1800), *zs = (uint32_t *)(desc + 0x1980);
     memset(pos, 0, 256);
     pos[0] = pos[32] = 128 | 128 << 16;                 // one sample, at the pixel's centre (and the origin)
+    // four samples (descriptors + 0x2000): Mesa's rotated 4x grid (pan_samples.c), 1/256 pixel
+    auto *pos4 = (uint32_t *)(desc + 0x2000);
+    memset(pos4, 0, 256);
+    pos4[0] = 96 | 32u << 16;
+    pos4[1] = 224 | 96u << 16;
+    pos4[2] = 32 | 160u << 16;
+    pos4[3] = 160 | 224u << 16;
+    pos4[32] = 128 | 128u << 16;
     memset(zs, 0, 32);
     zs[0] = 7 | 7 << 4 | 7 << 16;                       // stencil faces: always
     zs[4] = 1u << 21 | 1u << 22 | 1u << 23 | 2u << 25 | 7u << 29;   // depth: always, nothing written (zsOf's word 4)
@@ -3283,6 +3307,10 @@ zsOf(const struct hakios_metal_render_pass *pass, DrawJob &dj, unsigned width, u
         why = "a stencil attachment not Stencil8 or Depth32Float_Stencil8 (not on the Mali yet)";
         return false;
     }
+    if ((z && z->samples != dj.samples) || (st && st->samples != dj.samples)) {
+        why = "depth or stencil attachments of another sample count than the colour attachments";
+        return false;
+    }
     if ((z && (z->width != width || z->height != height)) || (st && (st->width != width || st->height != height))) {
         why = "depth or stencil attachments of another size than the colour attachments";
         return false;
@@ -3391,7 +3419,7 @@ preloadProgram(hakios_metal_device *d, unsigned targets, unsigned zs)
 {
     std::lock_guard<std::mutex> g(d->preload_lock);
     unsigned k = targets > 4 ? 4 : targets;
-    zs &= 3;
+    zs &= 7;
     if (d->preload_for[k][zs] != nullptr || d->preload_failed_for[k][zs]) {
         return d->preload_for[k][zs];
     }
@@ -3444,7 +3472,8 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     else if (pass->visibility && pass->visibility_mode) refused = "visibility results (not on the Mali yet)";
     else if (!p->blend_refusal.empty()) refused = p->blend_refusal.c_str();
     else if (!compileFetch(p)) refused = p->fetch_refusal.c_str();
-    else if (p->samples != 1) refused = "multisampling (not on the Mali yet)";
+    else if (p->samples == 2) refused = "2 samples a pixel (the Mali-G715 has no 2x sample pattern -- Mesa serves it from v12; 4 is served)";
+    else if (t->samples != p->samples) refused = "a colour attachment of another sample count than the pipeline's rasterSampleCount";
     else if (primitive > 4) refused = "a primitive type past MTLPrimitiveTypeTriangleStrip";
     else if (instance_count == 0) refused = "no instances";
     else if (ix && (ix->buffer == nullptr || ix->type > 1 || ix->base_vertex < 0 ||
@@ -3463,6 +3492,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             refused = "a colour attachment past 0 not RGBA8/BGRA8/BGR5A1/B5G6R5 (not on the Mali yet)";
         else if (m.texture->width != t->width || m.texture->height != t->height)
             refused = "colour attachments of different sizes";
+        else if (m.texture->samples != t->samples) refused = "colour attachments of different sample counts";
         else if (!(m.texture->usage & HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET)) refused = "a colour attachment made without render-target usage";
         else if (m.store_action > 1) refused = "a store action other than DontCare and Store";
         else if (!p->more_blend_refusal[i - 1].empty()) refused = p->more_blend_refusal[i - 1].c_str();
@@ -3476,7 +3506,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         const hakios_metal_render_pass::hakios_metal_color_attachment &m = pass->more[i - 1];
         if (m.texture == nullptr) continue;
         if (!drawable(m.texture->format) || m.texture->width != t->width || m.texture->height != t->height ||
-            m.store_action > 1) {
+            m.store_action > 1 || m.texture->samples != t->samples) {
             break;                                      // (left out, as before: a later one too)
         }
         rts = i + 1;
@@ -3494,7 +3524,8 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         loads = loads || (pass->more[i - 1].texture != nullptr &&
                           (pass->more[i - 1].load_action == 1 || !(p->fs.rt_written & 1u << i)));
     }
-    hakios_metal_program *pre = loads ? preloadProgram(d, rts, 0) : nullptr;
+    const unsigned ms4 = t != nullptr && t->samples > 1 ? 4u : 0u;     // (preloads of multisample attachments: a sample a run)
+    hakios_metal_program *pre = loads ? preloadProgram(d, rts, ms4) : nullptr;
     if (loads && pre == nullptr) refused = d->preload_error.c_str();
     if (refused != nullptr) {
         fail("%s%s%s", p ? p->name : "", p ? ": " : "", refused);
@@ -3507,6 +3538,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         return -1;
     }
     DrawJob dj = {};
+    dj.samples = t->samples;
     std::vector<hakios_metal_buffer *> used;
     struct hakios_metal_viewport vp = viewport ? *viewport :
         hakios_metal_viewport{ 0, 0, (double)t->width, (double)t->height, 0, 1 };
@@ -3622,7 +3654,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     {
         static const bool no_ir = bootArg("metal_noir");
         const unsigned irzs = (dj.has_z ? 1u : 0u) | (dj.has_s ? 2u : 0u);
-        hakios_metal_program *irp = no_ir ? nullptr : loads && irzs == 0 ? pre : preloadProgram(d, rts, irzs);
+        hakios_metal_program *irp = no_ir ? nullptr : loads && irzs == 0 ? pre : preloadProgram(d, rts, irzs | ms4);
         float full_scale[3] = { (float)t->width / 2, -(float)t->height / 2, 1 }, full_offset[3] = { (float)t->width / 2, (float)t->height / 2, 0 };
         if (irp != nullptr &&
             stagePushConstants(irp->fs, nullptr, nullptr, 0, full_scale, full_offset, 0, 0, dj.ir_fs_fau, used)) {
@@ -3632,7 +3664,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         // DEPTH/STENCIL LOADED: by a pre-frame shader (the framebuffer descriptor's Z/S preload bits load nothing)
         const unsigned zsl = (dj.has_z && dj.z_load ? 1u : 0u) | (dj.has_s && dj.s_load ? 2u : 0u);
         if (zsl != 0) {
-            hakios_metal_program *zp = preloadProgram(d, 0, zsl);
+            hakios_metal_program *zp = preloadProgram(d, 0, zsl | ms4);
             if (zp == nullptr || !stagePushConstants(zp->fs, nullptr, nullptr, 0, full_scale, full_offset, 0, 0, dj.zs_fs_fau, used)) {
                 fail("%s: depth/stencil Load: %s", p->name, d->preload_error.c_str());
                 return -1;
@@ -3661,7 +3693,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             m.row_bytes = (t->width * 4 + 63) & ~63u;
             {
                 std::lock_guard<std::mutex> g(d->scratch_lock);
-                uint64_t need = (uint64_t)m.row_bytes * t->height;
+                uint64_t need = (uint64_t)m.row_bytes * t->height * t->samples;
                 if (d->scratch_rt_size < need) {
                     if (d->scratch_rt_size != 0) {
                         d->freeBo(d->scratch_rt);       // (a draw in flight may still write the old one: rare, and only
@@ -3720,7 +3752,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.vertex_start = ix ? (unsigned)ix->base_vertex : vertex_start;
     // DCD0: scissor to the bounding box, cull zero area (v11); the face culled and the front's winding
     dj.dcd0 = 1u << 23 | 1u << 26 | (pass->winding == 1 ? 1u << 16 : 0) | (pass->cull_mode == 1 ? 1u << 17 : 0) |
-        (pass->cull_mode == 2 ? 1u << 18 : 0);
+        (pass->cull_mode == 2 ? 1u << 18 : 0) | (dj.samples > 1 ? 1u << 19 : 0);  // (19: multisample)
     if (dj.zs && ((dj.zsd[4] >> 29) != 7 || (dj.zsd[4] & 1u << 27) || (dj.zsd[0] >> 31))) {
         // a depth or stencil test or write: pixels killed weakly early, Z/S updated late (a fragment the shader
         // discards must not write them; whether a shader discards is not tracked here)
@@ -4057,8 +4089,40 @@ hakios_metal_texture_new_multisample(hakios_metal_device *d, unsigned pixel_form
     if (samples <= 1) {
         return hakios_metal_texture_new(d, 2, pixel_format, width, height, usage);
     }
-    fail("a multisample texture of %u samples (not on the Mali yet)", samples);
-    return nullptr;
+    if (samples != 4) {
+        fail("a multisample texture of %u samples (the Mali-G715 has no 2x sample pattern -- Mesa serves it from v12; 4 is "
+            "served)", samples);
+        return nullptr;
+    }
+    // FOUR SAMPLES A PIXEL, LAYERED: each sample a plane of the texture's rows, one after the other (the render target's
+    // and depth/stencil's "Layered" write-back, the texture descriptor's sample count with the plane as its slice
+    // stride); Depth32Float_Stencil8's stencil planes after the depth planes
+    hakios_metal_texture *t = hakios_metal_texture_new(d, 2, pixel_format, width, height, usage);
+    if (t == nullptr) {
+        return nullptr;
+    }
+    uint64_t plane = ((uint64_t)t->stride * t->levelRows(0) + 63) & ~63ULL;
+    if (plane != (uint64_t)t->stride * t->levelRows(0)) {
+        // (the planes are stride * rows apart: a texture whose plane is not a multiple of 64 bytes is not served)
+        t->release();
+        fail("a multisample texture of %ux%u, MTLPixelFormat %u: its sample planes would not be 64-byte aligned", width,
+            height, pixel_format);
+        return nullptr;
+    }
+    uint64_t size = plane * samples;
+    if (pixel_format == 260) {
+        t->stencil_off = size;
+        size += (uint64_t)t->stencil_stride * height * samples;
+    }
+    Bo bigger;
+    if (!d->newBo(bigger, size, BIND_NOEXEC)) {
+        t->release();
+        return nullptr;
+    }
+    d->freeBo(t->bo);
+    t->bo = bigger;
+    t->samples = samples;
+    return t;
 }
 
 hakios_metal_texture *
@@ -4137,7 +4201,8 @@ hakios_metal_texture_plan_bytes(unsigned type, unsigned pixel_format, unsigned w
 {
     (void)usage;
     const MaliFormat *f = findFormat(pixel_format);
-    if (f == nullptr || type != 2 || depth > 1 || samples > 1 || width == 0 || height == 0) {
+    if (f == nullptr || (type != 2 && type != 4) || depth > 1 || (samples != 1 && samples != 4) || (samples > 1 && levels > 1) ||
+        width == 0 || height == 0) {
         fail("a texture of type %u, MTLPixelFormat %u, %u levels, %u samples (not on the Mali yet)", type, pixel_format,
             levels, samples);
         return -1;
@@ -4151,6 +4216,7 @@ hakios_metal_texture_plan_bytes(unsigned type, unsigned pixel_format, unsigned w
         at += ((uint64_t)(((w + f->bw - 1) / f->bw * f->bytes + 63) & ~63u) * ((h + f->bh - 1) / f->bh) + 63) & ~63ULL;
     }
     if (l > 1) at += 32 * l;
+    if (samples > 1) at = at * samples + (pixel_format == 260 ? (uint64_t)((width + 63) & ~63u) * height * samples : 0);
     *bytes = (at + 0x3fff) & ~0x3fffULL;
     return 0;
 }
@@ -4244,6 +4310,7 @@ hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass
         DrawJob dj = {};
         hakios_metal_texture *t = c[at].t;
         dj.clear_only = true;
+        dj.samples = t->samples;
         dj.target_va = t->gpu();
         dj.width = t->width;
         dj.height = t->height;
@@ -4259,6 +4326,10 @@ hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass
         for (unsigned i = 1; i < dj.rts; i++) {
             DrawJob::More &m = dj.more[i - 1];
             hakios_metal_texture *u = c[at + i].t;
+            if (u->samples != t->samples) {
+                fail("a clear of colour attachments of different sample counts");
+                return -1;
+            }
             m.va = u->gpu();
             m.row_bytes = u->stride;
             m.rt1 = rt1Of(u);
@@ -4358,6 +4429,58 @@ blitProgram(hakios_metal_device *d)
 
 unsigned linearOf(unsigned f) { return f == 71 ? 70 : f == 81 ? 80 : f; }
 
+hakios_metal_program *
+resolveProgram(hakios_metal_device *d)
+{
+    std::lock_guard<std::mutex> g(d->preload_lock);
+    if (d->resolve_prog != nullptr || d->resolve_failed) {
+        if (d->resolve_prog == nullptr) fail("the driver's resolve draw could not be built");
+        return d->resolve_prog;
+    }
+    auto *p = new hakios_metal_program;
+    char why[256] = "";
+    if (mali_resolve_compile(&p->vs, &p->fs, 4, why, sizeof(why)) != 0 || !p->upload(d)) {
+        fail("the driver's resolve draw: %s", why[0] ? why : gError.c_str());
+        d->resolve_failed = true;
+        p->release();
+        return nullptr;
+    }
+    snprintf(p->name, sizeof(p->name), "hakios_resolve4");
+    d->resolve_prog = p;
+    return p;
+}
+
+// A MULTISAMPLE RESOLVE (MTLStoreActionMultisampleResolve, which the Metal side turns into this at -endEncoding): the
+// SW x SH pixels at (SX, SY) of FROM (4 samples) averaged into the same size at (DX, DY) of TO's level TL, drawn
+int
+resolveDraw(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned sx, unsigned sy, hakios_metal_texture *to,
+    unsigned tl, unsigned dx, unsigned dy, unsigned w, unsigned h)
+{
+    hakios_metal_device *d = cb->queue->device;
+    hakios_metal_program *rp = resolveProgram(d);
+    if (rp == nullptr) return -1;
+    hakios_metal_texture *dst = levelsOf(to, findFormat(to->format), to->format, 2, tl, 1);
+    dst->depth = 1;
+    dst->usage |= HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET;
+    hakios_metal_sampler smp;
+    memset(smp.words, 0, sizeof(smp.words));
+    smp.words[0] = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 23 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
+    struct hakios_metal_render_pass pass;
+    memset(&pass, 0, sizeof(pass));
+    pass.color0 = dst;
+    pass.load_action = dx == 0 && dy == 0 && w == dst->width && h == dst->height ? 0 : 1;
+    pass.store_action = 1;
+    struct hakios_metal_viewport vp = { (double)dx, (double)dy, (double)w, (double)h, 0, 1 };
+    struct hakios_metal_scissor sc = { dx, dy, w, h };
+    uint32_t words[2] = { (uint32_t)((int)sx - (int)dx), (uint32_t)((int)sy - (int)dy) };
+    hakios_metal_texture *texs[1] = { from };
+    hakios_metal_sampler *smps[1] = { &smp };
+    int r = drawImpl(cb, rp, &pass, &vp, &sc, 3, 0, 3, 1, 0, nullptr, nullptr, 0, nullptr, nullptr, 0, texs, 1, smps, 1,
+        nullptr, words, 2);
+    dst->release();
+    return r;
+}
+
 // a draw of FROM's level FL into the DW x DH rectangle at (DX, DY) of TO's level TL, the destination pixel (x, y) (its
 // centre) sampled at normalized (x m0 + y m1 + m2, x m3 + y m4 + m5) of the source level
 int
@@ -4403,7 +4526,22 @@ hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned f
 {
     const char *why = nullptr;
     if (cb == nullptr || from == nullptr || to == nullptr) why = "a texture copy without its two textures";
-    else if (from->samples > 1 || to->samples > 1) why = "a multisample resolve (not on the Mali yet)";
+    else if (from->samples > 1 && to->samples == 1) {
+        // a resolve: pixel for pixel, a colour format into an RGBA8/BGRA8 one
+        if (from_level != 0 || sw != dw || sh != dh) why = "a multisample resolve other than pixel for pixel";
+        else if (from->format == 250 || from->format == 252 || from->format == 253 || from->format == 260)
+            why = "a depth/stencil multisample resolve (not on the Mali yet)";
+        else if (!drawable(to->format)) why = "a multisample resolve into a format other than RGBA8/BGRA8/BGR5A1/B5G6R5";
+        else if (to_level >= to->levels || sx + sw > from->width || sy + sh > from->height ||
+                 dx + dw > to->levelWidth(to_level) || dy + dh > to->levelHeight(to_level))
+            why = "a multisample resolve outside a texture";
+        else if (sw == 0 || sh == 0) return 0;
+        else if (resolveDraw(cb, from, sx, sy, to, to_level, dx, dy, dw, dh) != 0) {
+            hakios_metal_cb_fail(cb, gError.c_str());
+            return -1;
+        } else return 0;
+    }
+    else if (from->samples > 1 || to->samples > 1) why = "a copy into or between multisample textures (not on the Mali yet)";
     else if (from_level >= from->levels || to_level >= to->levels) why = "a texture copy of a level the texture has not got";
     else if (sw == 0 || sh == 0 || dw == 0 || dh == 0) return 0;
     else if (sx + sw > from->levelWidth(from_level) || sy + sh > from->levelHeight(from_level) ||

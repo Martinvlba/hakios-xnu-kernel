@@ -5382,8 +5382,8 @@ HM_REFUSES_OUT_LOUD
  * MTLTextureImplementation -- declared by HakiosMetalTexture at +load for exactly this. NO: *why says what, and the pass
  * is not begun.
  */
-/* A colour attachment's store action as the core takes it, and its resolve. MultisampleResolve (2) resolves and keeps
- * nothing of the samples (DontCare), StoreAndMultisampleResolve (3) keeps them too (Store); Unknown (4) is a Store until
+/* A colour attachment's store action as the core takes it, and its resolve. MultisampleResolve (2) and
+ * StoreAndMultisampleResolve (3) both store the samples (the resolve reads them); Unknown (4) is a Store until
  * -setColorStoreAction: decides. The resolve itself is a copy of the samples into RESOLVE at the end of the pass
  * (-endEncoding, hakios_metal_cb_blit reading SAMPLES a pixel): a texture of one sample, the attachment's size. */
 static BOOL
@@ -5402,8 +5402,9 @@ hm_store_of(MTLRenderPassColorAttachmentDescriptor *c, NSUInteger i, unsigned *s
 			return NO;
 		}
 	}
-	*store = a == MTLStoreActionMultisampleResolve ? (unsigned)MTLStoreActionDontCare
-	       : a == MTLStoreActionStoreAndMultisampleResolve || a == MTLStoreActionUnknown ? (unsigned)MTLStoreActionStore : (unsigned)a;
+	/* (a resolve reads the samples from memory at -endEncoding: they are stored for it, MultisampleResolve too -- with
+	 * DontCare the resolve read what the texture held before) */
+	*store = resolves || a == MTLStoreActionUnknown ? (unsigned)MTLStoreActionStore : (unsigned)a;
 	return YES;
 }
 
@@ -8135,8 +8136,7 @@ hm_spec_off(void)
 		return;
 	}
 	_resolving[index] = resolves;
-	store = action == MTLStoreActionMultisampleResolve ? (unsigned)MTLStoreActionDontCare
-	      : action == MTLStoreActionStoreAndMultisampleResolve || action == MTLStoreActionUnknown ? (unsigned)MTLStoreActionStore : (unsigned)action;
+	store = resolves || action == MTLStoreActionUnknown ? (unsigned)MTLStoreActionStore : (unsigned)action;   /* (stored for the resolve) */
 	if (index == 0) {
 		_pass.store_action = store;
 	} else {
