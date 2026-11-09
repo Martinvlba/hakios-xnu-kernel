@@ -117,12 +117,6 @@ putdate(struct buf *b, time_t t)
 	char s[32];
 	struct tm tm;
 
-	/* a file stamped before 2001 (0 as the image's packer leaves some) has no real date: PTP's empty string says
-	 * "unknown", not 1970 (Windows and gphoto2 showed the PNG of 11-09 as from 1970) */
-	if (t < 978307200) {
-		putstr(b, "");
-		return;
-	}
 	gmtime_r(&t, &tm);
 	strftime(s, sizeof(s), "%Y%m%dT%H%M%S", &tm);
 	putstr(b, s);
