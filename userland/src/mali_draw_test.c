@@ -287,10 +287,13 @@ levels_and_blits(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_pro
 /* 6. depth: tri_flat (z 0) into a Depth32Float cleared to 1, compare Less and written; then tri_color over it at the same
  * z, compare Less: it must fail everywhere (every pixel still tri_flat's); the same with no depth state (always): drawn */
 static int
-depth_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, hakios_metal_program *col)
+depth_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, hakios_metal_program *col, unsigned level)
 {
 	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
-	hakios_metal_texture *z = hakios_metal_texture_new(d, 2, 252, 64, 64, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	/* (LEVEL 1: level 1 of a 128x128 depth texture of two levels -- its level 0 must stay as it was) */
+	hakios_metal_texture *z = hakios_metal_texture_new_levels(d, 2, 252, 64 << level, 64 << level, level + 1,
+	    HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	static float z0[128 * 128], z0_after[128 * 128];
 	struct hakios_metal_render_pass pass;
 	uint32_t px[64 * 64];
 	unsigned kept = 0, over = 0;
@@ -300,6 +303,10 @@ depth_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 		printf("mali_draw_test: depth: no textures (%s)\n", hakios_metal_error());
 		return 0;
 	}
+	if (level) {
+		for (unsigned i = 0; i < 128 * 128; i++) z0[i] = 0.25f;
+		hakios_metal_texture_replace(z, 0, 0, 128, 128, z0, 128 * 4);
+	}
 	for (int round = 0; round < 2; round++) {
 		hakios_metal_cb *cb = hakios_metal_cb_new(q);
 		memset(&pass, 0, sizeof(pass));
@@ -307,6 +314,7 @@ depth_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 		pass.load_action = 2;
 		pass.store_action = 1;
 		pass.depth = z;
+		pass.depth_level = level;
 		pass.depth_load_action = 2;
 		pass.depth_store_action = 1;
 		pass.clear_depth = 1.0;
@@ -327,11 +335,174 @@ depth_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 		if (round == 0) kept = n; else over = 4096 - n;
 	}
 	ok = ok && kept == 4096 && over == 4096;
+	if (level) {
+		unsigned same = 0;
+		hakios_metal_texture_read(z, 0, 0, 128, 128, z0_after, 128 * 4);
+		for (unsigned i = 0; i < 128 * 128; i++) same += z0_after[i] == 0.25f;
+		ok = ok && same == 128 * 128;
+		printf("mali_draw_test: depth at level 1: compare Less kept %u of 4096, no test drew over %u of 4096, level 0 kept "
+		    "%u of 16384: %s\n", kept, over, same, ok ? "WORK" : "FAILED");
+	} else
 	printf("mali_draw_test: depth: compare Less kept %u of 4096, no test drew over %u of 4096: %s\n", kept, over,
 	    ok ? "WORK" : "FAILED");
 	hakios_metal_texture_free(t);
 	hakios_metal_texture_free(z);
 	return ok;
+}
+
+/* 6b. stencil (Depth32Float_Stencil8; LEVEL 1: level 1 of a 128x128 one of two levels): the lower-left half writes
+ * stencil 1 (compare Always, Replace) and draws flat; tri_color over the whole target where stencil Equal 1 -- the
+ * lower-left half all tri_color, the rest the grey clear; then, a new command buffer with the stencil loaded, flat where
+ * NotEqual 1 -- the upper-right half flat, tri_color kept */
+static int
+stencil_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, hakios_metal_program *col,
+    unsigned level)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *z = hakios_metal_texture_new_levels(d, 2, 260, 64 << level, 64 << level, level + 1,
+	    HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	struct hakios_metal_render_pass pass;
+	static uint32_t px[64 * 64];
+	unsigned grey_a = 0, flat_a = 0, grey_b = 0, flat_b = 0;
+	int ok = 1;
+
+	if (t == NULL || z == NULL) {
+		printf("mali_draw_test: stencil: no textures (%s)\n", hakios_metal_error());
+		return 0;
+	}
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+	pass.clear_color[3] = 1;
+	pass.depth = z;
+	pass.depth_level = level;
+	pass.depth_load_action = 2;
+	pass.clear_depth = 1.0;
+	pass.stencil = z;
+	pass.stencil_load_action = 2;
+	pass.stencil_store_action = 1;
+	pass.clear_stencil = 0;
+	pass.stencil_state_set = 1;
+	pass.stencil_front.compare = pass.stencil_back.compare = 7;                     /* Always */
+	pass.stencil_front.pass = pass.stencil_back.pass = 2;                           /* Replace */
+	pass.stencil_front.read_mask = pass.stencil_back.read_mask = 0xff;
+	pass.stencil_front.write_mask = pass.stencil_back.write_mask = 0xff;
+	pass.stencil_front_reference = pass.stencil_back_reference = 1;
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 3, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: stencil: the first draw refused: %s\n", hakios_metal_error());
+	pass.load_action = 1;
+	pass.depth_load_action = 1;
+	pass.stencil_load_action = 1;
+	pass.stencil_front.compare = pass.stencil_back.compare = 2;                     /* Equal */
+	pass.stencil_front.pass = pass.stencil_back.pass = 0;                           /* Keep */
+	if (hakios_metal_cb_draw(cb, col, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: stencil: the Equal draw refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "stencil") && ok;
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 64 * 64; i++) {
+		grey_a += px[i] == 0xff808080u;
+		flat_a += px[i] == 0xff804020u;
+	}
+	cb = hakios_metal_cb_new(q);
+	pass.stencil_front.compare = pass.stencil_back.compare = 5;                     /* NotEqual */
+	if (hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: stencil: the NotEqual draw refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "stencil") && ok;
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 64 * 64; i++) {
+		grey_b += px[i] == 0xff808080u;
+		flat_b += px[i] == 0xff804020u;
+	}
+	/* (the half: 2016 of 4096 drawn by the 3-vertex triangle, as the geometry passes count it) */
+	ok = ok && grey_a > 1900 && grey_a < 2200 && flat_a == 0 && grey_b == 0 && flat_b == grey_a;
+	printf("mali_draw_test: stencil%s: Equal left grey %u, flat %u (0 wanted); NotEqual, the stencil loaded: grey %u, flat "
+	    "%u (the grey before wanted): %s\n", level ? " at level 1" : "", grey_a, flat_a, grey_b, flat_b, ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(t);
+	hakios_metal_texture_free(z);
+	return ok;
+}
+
+/* `mali_draw_test zsdiag`: what a pass stores of stencil (Stencil8) and depth (Depth32Float), read back by the CPU; then
+ * what a pass that loads them sees (NotEqual 1 / Less 0.5 drawing flat over a grey target) */
+static int
+zs_diag(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *s8 = hakios_metal_texture_new(d, 2, 253, 64, 64, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *z = hakios_metal_texture_new(d, 2, 252, 64, 64, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	static uint8_t sb[64 * 64];
+	static float zb[64 * 64];
+	static uint32_t px[64 * 64];
+	struct hakios_metal_render_pass pass;
+	unsigned ones = 0, zero_z = 0, one_z = 0, flat_n = 0;
+
+	for (int what = 0; what < 2; what++) {
+		memset(&pass, 0, sizeof(pass));
+		pass.color0 = t;
+		pass.load_action = 2;
+		pass.store_action = 1;
+		pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+		pass.clear_color[3] = 1;
+		if (what == 0) {
+			pass.stencil = s8;
+			pass.stencil_load_action = 2;
+			pass.stencil_store_action = 1;
+			pass.stencil_state_set = 1;
+			pass.stencil_front.compare = pass.stencil_back.compare = 7;
+			pass.stencil_front.pass = pass.stencil_back.pass = 2;
+			pass.stencil_front.read_mask = pass.stencil_back.read_mask = 0xff;
+			pass.stencil_front.write_mask = pass.stencil_back.write_mask = 0xff;
+			pass.stencil_front_reference = pass.stencil_back_reference = 1;
+		} else {
+			pass.depth = z;
+			pass.depth_load_action = 2;
+			pass.depth_store_action = 1;
+			pass.clear_depth = 1.0;
+			pass.depth_state_set = 1;
+			pass.depth_compare = 7;
+			pass.depth_write = 1;
+		}
+		hakios_metal_cb *cb = hakios_metal_cb_new(q);
+		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 3, 1, NULL, NULL, 0, NULL, NULL, 0);
+		finish(cb, "zsdiag");
+		if (what == 0) {
+			hakios_metal_texture_read(s8, 0, 0, 64, 64, sb, 64);
+			for (unsigned i = 0; i < 64 * 64; i++) ones += sb[i] == 1;
+		} else {
+			hakios_metal_texture_read(z, 0, 0, 64, 64, zb, 256);
+			for (unsigned i = 0; i < 64 * 64; i++) { zero_z += zb[i] == 0.0f; one_z += zb[i] == 1.0f; }
+		}
+		/* then loaded: flat over the whole target where stencil NotEqual 1 / depth Less (flat's z is 0: Less than the
+		 * stored 0 fails, than 1 passes) -- the upper-right half wanted */
+		pass.load_action = 1;
+		pass.stencil_load_action = 1;
+		pass.depth_load_action = 1;
+		pass.stencil_front.compare = pass.stencil_back.compare = 5;
+		pass.stencil_front.pass = pass.stencil_back.pass = 0;
+		pass.depth_compare = 1;
+		pass.depth_write = 0;
+		pass.clear_color[0] = 0;
+		hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+		for (unsigned i = 0; i < 64 * 64; i++) px[i] = 0;
+		cb = hakios_metal_cb_new(q);
+		hakios_metal_cb_clear(cb, &(struct hakios_metal_render_pass){ .color0 = t, .load_action = 2, .store_action = 1 });
+		hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0);
+		finish(cb, "zsdiag load");
+		hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+		flat_n = 0;
+		for (unsigned i = 0; i < 64 * 64; i++) flat_n += px[i] == 0xff804020u;
+		if (what == 0) {
+			printf("mali_draw_test: zsdiag: stencil stored: %u of 4096 are 1 (about 2016 wanted); a loading pass drew %u "
+			    "(about 2080 wanted)\n", ones, flat_n);
+		} else {
+			printf("mali_draw_test: zsdiag: depth stored: %u of 4096 are 0, %u are 1 (about 2016 and 2080 wanted); a loading "
+			    "pass drew %u (about 2080 wanted)\n", zero_z, one_z, flat_n);
+		}
+	}
+	return 1;
 }
 
 /* 7. what a full-screen (1080x2340) pass costs with one tiny draw: clear+store, clear alone, load+store, load+store of
@@ -385,6 +556,74 @@ pass_bench(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 /* 9. the tiler heap's growth: a full-screen draw of many instances (10000: 30 MB of polygon lists, the heap's first
  * 10 MB grown to 15 chunks) must complete and draw. `mali_draw_test heap N [MOST]` runs it alone (past 60000
  * instances, or MOST chunks, the heap is not enough: incremental rendering) */
+/* (irdepth / irstencil: the lower-left half writes depth 0 / stencil 1 and draws flat; then INSTANCES full-screen
+ * tri_color where depth Less / stencil NotEqual 1 -- through every flush the lower-left must stay flat: each later part
+ * loads depth/stencil again) */
+static int
+zs_ir_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, hakios_metal_program *col,
+    unsigned instances, int stencil)
+{
+	const unsigned w = 1080, h = 2340;
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, w, h, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *z = hakios_metal_texture_new(d, 2, 260, w, h, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	struct hakios_metal_render_pass pass;
+	struct timespec t0, t1;
+	uint32_t bl[64], tr[64];
+	int st, ok;
+
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+	pass.clear_color[3] = 1;
+	pass.depth = z;
+	pass.depth_load_action = 2;
+	pass.depth_store_action = 1;
+	pass.clear_depth = 1.0;
+	pass.stencil = z;
+	pass.stencil_load_action = 2;
+	pass.stencil_store_action = 1;
+	if (stencil) {
+		pass.stencil_state_set = 1;
+		pass.stencil_front.compare = pass.stencil_back.compare = 7;
+		pass.stencil_front.pass = pass.stencil_back.pass = 2;
+		pass.stencil_front.read_mask = pass.stencil_back.read_mask = 0xff;
+		pass.stencil_front.write_mask = pass.stencil_back.write_mask = 0xff;
+		pass.stencil_front_reference = pass.stencil_back_reference = 1;
+	} else {
+		pass.depth_state_set = 1;
+		pass.depth_compare = 7;
+		pass.depth_write = 1;
+	}
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 3, 1, NULL, NULL, 0, NULL, NULL, 0);
+	pass.load_action = 1;
+	pass.depth_load_action = 1;
+	pass.stencil_load_action = 1;
+	pass.stencil_front.compare = pass.stencil_back.compare = 5;
+	pass.stencil_front.pass = pass.stencil_back.pass = 0;
+	pass.depth_compare = 1;
+	pass.depth_write = 0;
+	if (hakios_metal_cb_draw(cb, col, &pass, NULL, NULL, 3, 0, 6, instances, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: ir%s: refused: %s\n", stencil ? "stencil" : "depth", hakios_metal_error());
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	hakios_metal_cb_commit(cb, NULL, NULL);
+	hakios_metal_cb_wait(cb);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	st = hakios_metal_cb_status(cb);
+	hakios_metal_cb_free(cb);
+	hakios_metal_texture_read(t, 0, h - 1, 64, 1, bl, sizeof(bl));
+	hakios_metal_texture_read(t, w - 64, 0, 64, 1, tr, sizeof(tr));
+	ok = st == HAKIOS_METAL_COMPLETED && bl[0] == 0xff804020u && tr[63] != 0xff808080u && tr[63] != 0xff804020u;
+	printf("mali_draw_test: %u instances behind a lower-left half's %s: status %d in %ld ms, bottom left 0x%08x (flat "
+	    "wanted), top right 0x%08x (tri_color wanted): %s\n", instances, stencil ? "stencil" : "depth", st,
+	    (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000), bl[0], tr[63], ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(t);
+	hakios_metal_texture_free(z);
+	return ok;
+}
+
 static int
 heap_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat, unsigned instances, int loaded)
 {
@@ -478,7 +717,8 @@ main(int argc, char **argv)
 {
 	/* `mali_draw_test heap|irload N [MOST]`: the heap test alone, N instances, the heap's most chunks MOST (5-64: below
 	 * what N needs, the pass is drawn by incremental rendering); irload: over a loaded target */
-	const int alone = argc >= 3 && (!strcmp(argv[1], "heap") || !strcmp(argv[1], "irload"));
+	const int alone = argc >= 3 && (!strcmp(argv[1], "heap") || !strcmp(argv[1], "irload") || !strcmp(argv[1], "irdepth") ||
+	    !strcmp(argv[1], "irstencil"));
 	if (alone && argc >= 4) {
 		setenv("HAKIOS_MALI_HEAP_CHUNKS", argv[3], 1);
 	}
@@ -504,6 +744,15 @@ main(int argc, char **argv)
 	if (flat == NULL || col == NULL) {
 		printf("mali_draw_test: no program (%s)\n", hakios_metal_error());
 		return 1;
+	}
+	if (argc == 2 && !strcmp(argv[1], "zsdiag")) {
+		return zs_diag(d, q, flat) ? 0 : 1;
+	}
+	if (alone && !strncmp(argv[1], "irdepth", 7)) {
+		return zs_ir_test(d, q, flat, col, (unsigned)strtoul(argv[2], NULL, 0), 0) ? 0 : 1;
+	}
+	if (alone && !strcmp(argv[1], "irstencil")) {
+		return zs_ir_test(d, q, flat, col, (unsigned)strtoul(argv[2], NULL, 0), 1) ? 0 : 1;
 	}
 	if (alone) {
 		return heap_test(d, q, flat, (unsigned)strtoul(argv[2], NULL, 0), !strcmp(argv[1], "irload")) ? 0 : 1;
@@ -591,7 +840,10 @@ main(int argc, char **argv)
 	}
 	/* mip levels, blits, clears past attachment 0, ASTC (hakios-metal 11-09) */
 	right = levels_and_blits(d, q, flat) && right;
-	right = depth_test(d, q, flat, col) && right;
+	right = depth_test(d, q, flat, col, 0) && right;
+	right = depth_test(d, q, flat, col, 1) && right;
+	right = stencil_test(d, q, flat, col, 0) && right;
+	right = stencil_test(d, q, flat, col, 1) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;
 	/* sustained load, for the GPU's clock governor: 300 draws back to back, the first and last 20 timed */

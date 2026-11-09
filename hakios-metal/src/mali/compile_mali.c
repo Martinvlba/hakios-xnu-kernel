@@ -815,6 +815,19 @@ int
 mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, char *error,
     size_t error_size)
 {
+	return mali_preload_zs_compile(vs, fs, targets, 0, error, error_size);
+}
+
+/*
+ * ... and the pre-frame shader that loads depth and stencil (ZS: 1 depth, 2 stencil) too -- the framebuffer
+ * descriptor's Z/S preload bits load nothing on the Mali (Mesa never sets them: its frame shaders load Z/S): the depth
+ * attachment as texture TARGETS (R32F, channel 0 to the depth output), the stencil plane as the next (R8UI, its low
+ * byte to the stencil output), as panfrost's pan_fb_nir.c does it
+ */
+int
+mali_preload_zs_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, unsigned zs,
+    char *error, size_t error_size)
+{
 	void *mem = ralloc_context(NULL);
 	nir_builder b;
 	nir_variable *var;
@@ -849,7 +862,7 @@ mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *f
 	b.shader->info.fs.origin_upper_left = true;     /* as the front end's fragment functions (Metal's origin) */
 	/* colour attachment n from texture n, for each of TARGETS (1 to 4) */
 	fs->stage = 2;
-	snprintf(fs->name, sizeof(fs->name), "hakios_preload_fs%u", targets);
+	snprintf(fs->name, sizeof(fs->name), zs ? "hakios_preload_fs%u_zs%u" : "hakios_preload_fs%u", targets, zs);
 	for (unsigned t = 0; t < targets && t < 4; t++) {
 		nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, nir_load_frag_coord(&b), 2));
 		nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
@@ -869,6 +882,32 @@ mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *f
 		var->data.location = FRAG_RESULT_DATA0 + t;
 		nir_store_var(&b, var, &tex->def, 0xf);
 		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, t, 0, 1, 0 };
+	}
+	for (unsigned k = 0, index = targets; k < 2; k++) {
+		if (!(zs & (1u << k))) {
+			continue;
+		}
+		nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, nir_load_frag_coord(&b), 2));
+		nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+
+		tex->op = nir_texop_txf;
+		tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+		tex->dest_type = k == 0 ? nir_type_float32 : nir_type_uint32;
+		tex->coord_components = 2;
+		tex->texture_index = index;
+		tex->sampler_index = 0;
+		tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, xy);
+		tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
+		nir_def_init(&tex->instr, &tex->def, 4, 32);
+		nir_builder_instr_insert(&b, &tex->instr);
+
+		nir_def *v = nir_channel(&b, &tex->def, 0);
+		var = nir_variable_create(b.shader, nir_var_shader_out, k == 0 ? glsl_float_type() : glsl_uint_type(),
+		    k == 0 ? "depth" : "stencil");
+		var->data.location = k == 0 ? FRAG_RESULT_DEPTH : FRAG_RESULT_STENCIL;
+		nir_store_var(&b, var, k == 0 ? v : nir_iand_imm(&b, v, 0xff), 0x1);
+		fs->resources[fs->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_TEXTURE, index, 0, 1, 0 };
+		index++;
 	}
 	if (compile_nir(b.shader, MESA_SHADER_FRAGMENT, vs->varyings, fs, error, error_size) != 0) {
 		goto done;

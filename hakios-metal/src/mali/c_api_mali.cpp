@@ -131,8 +131,8 @@ struct hakios_metal_device {
     std::atomic<bool> heap_set{false};          // the queue given its heap (HEAP_SET once a queue, as panvk and gallium)
     Bo heapdesc;
     bool heap_ok = false;                       // the heap made: draws can be served
-    struct hakios_metal_program *preload_for[4] = {};  // the Load action's draw for 1 to 4 targets (preloadProgram)
-    bool preload_failed_for[4] = {};
+    struct hakios_metal_program *preload_for[5][4] = {};   // the Load action's draw for 0 to 4 targets, with depth (1)
+    bool preload_failed_for[5][4] = {};                    // and/or stencil (2) loaded too (preloadProgram)
     std::mutex preload_lock;
     struct hakios_metal_program *blit_prog = nullptr;  // the driver's blit draw (blitProgram), under preload_lock
     bool blit_failed = false;
@@ -477,6 +477,8 @@ struct hakios_metal_texture {
     unsigned bw = 1, bh = 1;                    // a compressed format's block (ASTC), in texels
     uint64_t stencil_off = 0;                   // Depth32Float_Stencil8: the stencil plane (a byte a texel) at offset +
     uint32_t stencil_stride = 0;                //  stencil_off, rows stencil_stride apart (0: none)
+    uint64_t stencil_level_off[16] = {};        // ... mipmapped: each level's stencil plane (from gpu()), after all the
+    uint32_t stencil_level_stride[16] = {};     //  depth levels (0: level 0's is stencil_off alone)
     uint64_t offset = 0;                        // where its pixels start in BO
     unsigned origin = 0;                        // 0 its own memory, 1 an IOSurface's, 2 a buffer's, 4 a view's
     unsigned surface = 0;                       // the IOSurface's ID (origin 1)
@@ -708,6 +710,8 @@ struct DrawJob {
     uint64_t ir_frag_spd = 0;
     std::vector<uint32_t> ir_fs_fau;
     hakios_metal_texture *ir_target = nullptr;          // colour attachment 0 (held as the draw's target)
+    uint64_t zs_frag_spd = 0;                           // depth/stencil Load: the pre-frame shader that loads them
+    std::vector<uint32_t> zs_fs_fau;
     // colour attachments 1 to 3 (rts > 1): each one's address, rows, RT word 1, clear, write, load, blend, texture
     unsigned rts = 1;
     struct More {
@@ -753,9 +757,105 @@ uint64_t drawBytes(const DrawJob &dj);
 // target loaded by a pre-frame shader -- the preload's fragment shader -- and stored), and the pass's own last fragment
 // job after a flush (loaded, then stored as the pass says). Word 0: the descriptor the next flush uses; word 8: the one
 // the pass ends with (the stream loads r40 from it); 0x10: set when the handler is installed; 0x40: r40-r47 kept.
-constexpr uint64_t IR_BYTES = 0xc00, IR_HANDLER = 0x80, IR_HANDLER_BYTES = 0x180, IR_DCD = 0x200, IR_SRT = 0x280,
-    IR_FBD = 0x600, IR_FBD_STRIDE = 0x200;
+// (0xc00: the pre-frame DCDs of the later parts -- pre-frame 0, 1, post-frame, 128 bytes each; 0xd80: the pass's own,
+// loading depth/stencil when it asks to, with their resource table at 0xf00, depth/stencil descriptors at 0x1040
+// (the pass's) and 0x1060 (the later parts'), push constants at 0x1080)
+constexpr uint64_t IR_BYTES = 0x1100, IR_HANDLER = 0x80, IR_HANDLER_BYTES = 0x180, IR_SRT = 0x200, IR_FBD = 0x600,
+    IR_FBD_STRIDE = 0x200, IR_DCD = 0xc00, IR_ZS_DCD = 0xd80, IR_ZS_SRT = 0xf00, IR_ZSD = 0x1040, IR_IR_ZSD = 0x1060,
+    IR_ZS_FAU = 0x1080;
 inline uint64_t wait_on(unsigned mask) { return 3ULL << 56 | (uint64_t)mask << 16; }
+
+// a texture descriptor and its plane for raw memory: 2D, one level, linear (the depth and stencil planes as the
+// pre-frame shader reads them: R32F or R16 UNORM for depth, R8UI (131; 163 is R8 UNORM) for stencil)
+void
+describeRaw(uint32_t mali_format, unsigned bytes, uint64_t va, uint32_t stride, unsigned w, unsigned h, uint32_t *tex,
+    uint32_t *plane, uint64_t plane_va)
+{
+    memset(tex, 0, 32);
+    memset(plane, 0, 32);
+    tex[0] = 2 | 2u << 4 | mali_format << 10;
+    tex[1] = (w - 1) | (h - 1) << 16;
+    tex[2] = kIdentitySwizzle;
+    tex[4] = (uint32_t)plane_va;
+    tex[5] = (uint32_t)(plane_va >> 32);
+    plane[0] = 10 | 1 << 4 | 2 << 8 | (bytes == 1 ? 0u : bytes == 2 ? 1u : 2u) << 24;
+    plane[1] = stride * h;
+    plane[2] = (uint32_t)va;
+    plane[3] = (uint32_t)(va >> 32);
+    plane[4] = stride;
+    plane[6] = stride * h;
+    plane[7] = (w - 1) | (h - 1) << 16;
+}
+
+// the depth and/or stencil (ZS bits 1, 2) of DJ's pass as textures FIRST.. of a resource table's texture table at
+// TEX/TEX_VA (32 bytes each), their planes at PLANES/PLANES_VA
+void
+describeZs(const DrawJob &dj, unsigned zs, uint8_t *tex, uint8_t *planes, uint64_t planes_va)
+{
+    unsigned i = 0;
+    if (zs & 1) {
+        describeRaw(dj.z_format == 1 ? 164u << 12 | 16 : 167u << 12 | 16, dj.z_format == 1 ? 2 : 4, dj.z_va, dj.z_row,
+            dj.width, dj.height, (uint32_t *)(tex + 32 * i), (uint32_t *)(planes + 32 * i), planes_va + 32 * i);
+        i++;
+    }
+    if (zs & 2) {
+        describeRaw(131u << 12 | 16, 1, dj.s_va, dj.s_row, dj.width, dj.height, (uint32_t *)(tex + 32 * i),
+            (uint32_t *)(planes + 32 * i), planes_va + 32 * i);
+    }
+}
+
+// a depth/stencil descriptor that writes what the pre-frame shader outputs (panvk's for its Z/S preload): depth
+// always, written, from the shader; stencil always, replaced by the shader's
+void
+zsdFromShader(uint32_t *w, unsigned zs)
+{
+    memset(w, 0, 32);
+    const uint32_t w4 = 1u << 21 | 1u << 22 | 1u << 23;
+    w[0] = 7 | 7u << 4 | 7u << 16;
+    w[4] = w4 | 2u << 25 | 7u << 29;
+    if (zs & 1) {
+        w[4] = w4 | 3u << 25 | 1u << 27 | 7u << 29;
+    }
+    if (zs & 2) {
+        w[0] = 7 | 7u << 4 | 1u << 7 | 1u << 10 | 1u << 13 | 7u << 16 | 1u << 19 | 1u << 22 | 1u << 25 | 1u << 30 | 1u << 31;
+        w[1] = 0xffffffffu;
+    }
+}
+
+// the pass's own pre-frame DCD that loads its depth/stencil (dj.zs_frag_spd), at IR + IR_ZS_DCD
+void
+emitZsLoad(hakios_metal_device *d, const DrawJob &dj, uint8_t *ir, uint64_t ir_va)
+{
+    const unsigned zs = (dj.has_z && dj.z_load ? 1u : 0u) | (dj.has_s && dj.s_load ? 2u : 0u);
+    const unsigned n = (zs & 1) + (zs >> 1);
+    uint8_t *t = ir + IR_ZS_SRT;
+    uint64_t t_va = ir_va + IR_ZS_SRT, tex_va = t_va + 0x80, samp_va = tex_va + 32 * n, plane_va = samp_va + 32;
+    memset(t, 0, IR_ZSD - IR_ZS_SRT);
+    auto entry = [&](unsigned table, uint64_t va, unsigned count) {
+        auto *e = (uint32_t *)(t + 16 * table);
+        e[0] = (uint32_t)va;
+        e[1] = (uint32_t)(va >> 32) | 1u << 24;
+        e[2] = count * 32;
+    };
+    entry(MALI_TABLE_TEXTURE, tex_va, n);
+    entry(MALI_TABLE_SAMPLER, samp_va, 1);
+    describeZs(dj, zs, ir + (tex_va - ir_va), ir + (plane_va - ir_va), plane_va);
+    ((uint32_t *)(ir + (samp_va - ir_va)))[0] = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
+    zsdFromShader((uint32_t *)(ir + IR_ZSD), zs);
+    memcpy(ir + IR_ZS_FAU, dj.zs_fs_fau.data(), dj.zs_fs_fau.size() * 4);
+    auto *w = (uint32_t *)(ir + IR_ZS_DCD);
+    memset(w, 0, 0x180);
+    w[0] = 1u << 1 | 3u << 2 | 3u << 4 | 1u << 9;                             // killed, Z/S late, clean tiles written
+    w[1] = 0xffff;                                                              // no colour target
+    w[5] = 1u << 24 | 1u << 25;
+    w[7] = 0x3f800000;
+    *(uint64_t *)&w[10] = ir_va + IR_ZSD;
+    w[17] = (uint32_t)((dj.zs_fs_fau.size() + 1) / 2);
+    *(uint64_t *)&w[24] = t_va | MALI_TABLES;
+    *(uint64_t *)&w[26] = dj.zs_frag_spd;
+    *(uint64_t *)&w[28] = d->descriptors.va + 0x1200;
+    *(uint64_t *)&w[30] = ir_va + IR_ZS_FAU;
+}
 
 void
 emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t pass_va, uint8_t *ir, uint64_t ir_va,
@@ -766,9 +866,11 @@ emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t p
     auto missing = [&](unsigned i) { return i > 0 && dj.more[i - 1].missing; };
     // the pre-frame shader's resources: each target as a texture (the preload's table), a sampler, a blend descriptor
     // a target: a replace, nothing written to an output with no attachment
+    // (with depth/stencil: the depth attachment the next texture, the stencil plane the one after)
+    const unsigned zs = (dj.has_z ? 1u : 0u) | (dj.has_s ? 2u : 0u), nzs = (zs & 1) + (zs >> 1), ntex = nt + nzs;
     uint8_t *t = ir + IR_SRT;
-    uint64_t t_va = ir_va + IR_SRT, tex_va = t_va + 0x80, samp_va = tex_va + 32 * nt, plane_va = samp_va + 32;
-    uint64_t bl_at = (IR_SRT + 0x80 + (2 * nt + 1) * 32 + 0x3f) & ~0x3fULL, fau_at = bl_at + 0x40;
+    uint64_t t_va = ir_va + IR_SRT, tex_va = t_va + 0x80, samp_va = tex_va + 32 * ntex, plane_va = samp_va + 32;
+    uint64_t bl_at = (IR_SRT + 0x80 + (2 * ntex + 1) * 32 + 0x3f) & ~0x3fULL, fau_at = bl_at + 0x40;
     memset(t, 0, IR_FBD - IR_SRT);
     auto entry = [&](unsigned table, uint64_t va, unsigned count) {
         auto *e = (uint32_t *)(t + 16 * table);
@@ -776,8 +878,9 @@ emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t p
         e[1] = (uint32_t)(va >> 32) | 1u << 24;
         e[2] = count * 32;
     };
-    entry(MALI_TABLE_TEXTURE, tex_va, nt);
+    entry(MALI_TABLE_TEXTURE, tex_va, ntex);
     entry(MALI_TABLE_SAMPLER, samp_va, 1);
+    describeZs(dj, zs, ir + (tex_va - ir_va) + 32 * nt, ir + (plane_va - ir_va) + 32 * nt, plane_va + 32 * nt);
     unsigned loaded = 0;
     for (unsigned i = 0; i < nt; i++) {
         uint32_t plane[8];
@@ -797,12 +900,17 @@ emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t p
     // the pre-frame draw descriptor (panvk's cmd_emit_dcd for a colour preload): Z/S forced early, may kill and be
     // killed, clean tiles written; every target; no depth/stencil test (the descriptor that lets all through)
     auto *w = (uint32_t *)(ir + IR_DCD);
-    memset(w, 0, 128);
+    memset(w, 0, 0x180);
     w[0] = 1u << 0 | 1u << 1 | 1u << 9;
+    if (zs != 0) {
+        // (depth/stencil written by the shader: Z/S late, and it may not kill -- panvk's frame shaders)
+        w[0] = 1u << 1 | 3u << 2 | 3u << 4 | 1u << 9;
+        zsdFromShader((uint32_t *)(ir + IR_IR_ZSD), zs);
+    }
     w[1] = 0xffff | ((1u << nt) - 1) << 16;
     w[5] = dj.dcd2;
     w[7] = 0x3f800000;
-    *(uint64_t *)&w[10] = d->descriptors.va + 0x1980;
+    *(uint64_t *)&w[10] = zs != 0 ? ir_va + IR_IR_ZSD : d->descriptors.va + 0x1980;
     *(uint64_t *)&w[12] = (ir_va + bl_at) | nt;
     w[17] = (uint32_t)((dj.ir_fs_fau.size() + 1) / 2);
     *(uint64_t *)&w[24] = t_va | MALI_TABLES;
@@ -824,9 +932,8 @@ emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t p
             f[12] |= (dj.has_z ? 1u << 18 : 0) | (dj.has_s ? 1u << 8 : 0);
         }
         if (k != 0) {
-            f[0] = (f[0] & ~7u) | 1;                                            // pre-frame 0: always
-            *(uint64_t *)&f[6] = ir_va + IR_DCD;
-            f[12] |= (dj.has_z ? 1u << 19 : 0) | (dj.has_s ? 1u << 9 : 0);     // depth/stencil loaded
+            f[0] = (f[0] & ~7u) | 1;                                            // pre-frame 0: always (targets and
+            *(uint64_t *)&f[6] = ir_va + IR_DCD;                                // depth/stencil loaded)
         }
     }
     *(uint64_t *)(ir + 0) = fbd_va[0] | tags;
@@ -909,7 +1016,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         fb[12] |= 1u << 21;                                                     // the ZS extension
         ext[0] = 1u << 31;                                                      // clean tiles written
         if (dj.has_z) {
-            fb[12] |= dj.z_internal << 16 | (dj.z_write ? 1u << 18 : 0) | (dj.z_load ? 1u << 19 : 0);
+            fb[12] |= dj.z_internal << 16 | (dj.z_write ? 1u << 18 : 0);
             memcpy(&fb[13], &dj.z_clear, 4);
             ext[0] |= dj.z_format | 2u << 4;                                    // linear
             *(uint64_t *)&ext[8] = dj.z_va;
@@ -917,13 +1024,20 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
             ext[11] = dj.z_row * dj.height;
         }
         if (dj.has_s) {
-            fb[12] |= (dj.s_clear & 0xff) | (dj.s_write ? 1u << 8 : 0) | (dj.s_load ? 1u << 9 : 0);
+            fb[12] |= (dj.s_clear & 0xff) | (dj.s_write ? 1u << 8 : 0);
             ext[0] |= 1u << 16 | 2u << 20;                                      // S8, linear
             *(uint64_t *)&ext[12] = dj.s_va;
             ext[14] = dj.s_row;
             ext[15] = dj.s_row * dj.height;
         }
         memcpy(area + zsd_at, dj.zsd, 32);
+        if (first && dj.zs_frag_spd != 0 && ir != nullptr) {
+            // DEPTH/STENCIL LOADED by the pre-frame shader (the descriptor's Z/S preload bits, 19 and 9, load nothing on
+            // the Mali: what a pass after another found was its clear values)
+            emitZsLoad(d, dj, ir, ir_va);
+            fb[0] = (fb[0] & ~7u) | 1;                                          // pre-frame 0: always
+            *(uint64_t *)&fb[6] = ir_va + IR_ZS_DCD;
+        }
     }
     rt[0] = 1u << 26;                                                           // internal format R8G8B8A8
     rt[1] = dj.rt1 | (dj.write ? 1u : 0u) | 1u << 31;                          // clean tiles written too
@@ -3161,7 +3275,6 @@ zsOf(const struct hakios_metal_render_pass *pass, DrawJob &dj, unsigned width, u
         }
         return true;
     }
-    if (pass->depth_level || pass->depth_slice) { why = "a mip level or slice of the depth attachment (not on the Mali yet)"; return false; }
     if (z != nullptr && z->format != 252 && z->format != 250 && z->format != 260) {
         why = "a depth attachment not Depth16Unorm, Depth32Float or Depth32Float_Stencil8 (not on the Mali yet)";
         return false;
@@ -3232,11 +3345,11 @@ zsOf(const struct hakios_metal_render_pass *pass, DrawJob &dj, unsigned width, u
 // A PASS INTO A MIP LEVEL OR SLICE: the pass as one whose attachments are those levels as textures of their own
 // (attachmentOf), held in VIEWS until the caller releases them; false (and nothing held) with the reason
 bool
-passAtLevels(const struct hakios_metal_render_pass *pass, struct hakios_metal_render_pass &q, hakios_metal_texture *views[8])
+passAtLevels(const struct hakios_metal_render_pass *pass, struct hakios_metal_render_pass &q, hakios_metal_texture *views[10])
 {
     q = *pass;
-    for (unsigned i = 0; i < 8; i++) views[i] = nullptr;
-    auto release = [&] { for (unsigned i = 0; i < 8; i++) if (views[i]) { views[i]->release(); views[i] = nullptr; } };
+    for (unsigned i = 0; i < 10; i++) views[i] = nullptr;
+    auto release = [&] { for (unsigned i = 0; i < 10; i++) if (views[i]) { views[i]->release(); views[i] = nullptr; } };
     if (q.color0 != nullptr && (q.color0_level || q.color0_slice)) {
         if ((views[0] = attachmentOf(q.color0, q.color0_level, q.color0_slice)) == nullptr) return false;
         q.color0 = views[0];
@@ -3250,6 +3363,14 @@ passAtLevels(const struct hakios_metal_render_pass *pass, struct hakios_metal_re
             m.level = m.slice = 0;
         }
     }
+    if (q.depth != nullptr && (q.depth_level || q.depth_slice)) {
+        // the depth attachment's level (with its own stencil plane when it is Depth32Float_Stencil8 and the stencil
+        // attachment too: Metal's stencil descriptor names the same level)
+        if ((views[8] = attachmentOf(q.depth, q.depth_level, q.depth_slice)) == nullptr) { release(); return false; }
+        if (q.stencil == q.depth) q.stencil = views[8];
+        q.depth = views[8];
+        q.depth_level = q.depth_slice = 0;
+    }
     return true;
 }
 
@@ -3258,6 +3379,7 @@ atLevels(const struct hakios_metal_render_pass *pass)
 {
     if (pass == nullptr) return false;
     if (pass->color0 != nullptr && (pass->color0_level || pass->color0_slice)) return true;
+    if (pass->depth != nullptr && (pass->depth_level || pass->depth_slice)) return true;
     for (unsigned i = 0; i < 7; i++) {
         if (pass->more[i].texture != nullptr && (pass->more[i].level || pass->more[i].slice)) return true;
     }
@@ -3265,23 +3387,24 @@ atLevels(const struct hakios_metal_render_pass *pass)
 }
 
 hakios_metal_program *
-preloadProgram(hakios_metal_device *d, unsigned targets)
+preloadProgram(hakios_metal_device *d, unsigned targets, unsigned zs)
 {
     std::lock_guard<std::mutex> g(d->preload_lock);
-    unsigned k = targets - 1;
-    if (d->preload_for[k] != nullptr || d->preload_failed_for[k]) {
-        return d->preload_for[k];
+    unsigned k = targets > 4 ? 4 : targets;
+    zs &= 3;
+    if (d->preload_for[k][zs] != nullptr || d->preload_failed_for[k][zs]) {
+        return d->preload_for[k][zs];
     }
     auto *p = new hakios_metal_program;
     char why[256] = "";
-    if (mali_preload_compile(&p->vs, &p->fs, targets, why, sizeof(why)) != 0 || !p->upload(d)) {
-        d->preload_error = std::string("load action Load: the preload draw: ") + (why[0] ? why : gError.c_str());
-        d->preload_failed_for[k] = true;
+    if (mali_preload_zs_compile(&p->vs, &p->fs, targets, zs, why, sizeof(why)) != 0 || !p->upload(d)) {
+        d->preload_error = std::string("load action Load: the preload: ") + (why[0] ? why : gError.c_str());
+        d->preload_failed_for[k][zs] = true;
         p->release();
         return nullptr;
     }
-    snprintf(p->name, sizeof(p->name), "hakios_preload%u", targets);
-    d->preload_for[k] = p;
+    snprintf(p->name, sizeof(p->name), "hakios_preload%u_%u", targets, zs);
+    d->preload_for[k][zs] = p;
     return p;
 }
 
@@ -3296,7 +3419,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
 {
     if (atLevels(pass)) {
         struct hakios_metal_render_pass q;
-        hakios_metal_texture *views[8];
+        hakios_metal_texture *views[10];
         if (!passAtLevels(pass, q, views)) {
             std::string why = gError;
             fail("%s%s%s", p ? p->name : "", p ? ": " : "", why.c_str());
@@ -3371,7 +3494,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         loads = loads || (pass->more[i - 1].texture != nullptr &&
                           (pass->more[i - 1].load_action == 1 || !(p->fs.rt_written & 1u << i)));
     }
-    hakios_metal_program *pre = loads ? preloadProgram(d, rts) : nullptr;
+    hakios_metal_program *pre = loads ? preloadProgram(d, rts, 0) : nullptr;
     if (loads && pre == nullptr) refused = d->preload_error.c_str();
     if (refused != nullptr) {
         fail("%s%s%s", p ? p->name : "", p ? ": " : "", refused);
@@ -3488,12 +3611,23 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     {
         static const bool no_ir = bootArg("metal_noir");
-        hakios_metal_program *irp = no_ir ? nullptr : loads ? pre : preloadProgram(d, rts);
+        const unsigned irzs = (dj.has_z ? 1u : 0u) | (dj.has_s ? 2u : 0u);
+        hakios_metal_program *irp = no_ir ? nullptr : loads && irzs == 0 ? pre : preloadProgram(d, rts, irzs);
         float full_scale[3] = { (float)t->width / 2, -(float)t->height / 2, 1 }, full_offset[3] = { (float)t->width / 2, (float)t->height / 2, 0 };
         if (irp != nullptr &&
             stagePushConstants(irp->fs, nullptr, nullptr, 0, full_scale, full_offset, 0, 0, dj.ir_fs_fau, used)) {
             dj.ir_frag_spd = irp->frag_spd;
             dj.ir_target = t;
+        }
+        // DEPTH/STENCIL LOADED: by a pre-frame shader (the framebuffer descriptor's Z/S preload bits load nothing)
+        const unsigned zsl = (dj.has_z && dj.z_load ? 1u : 0u) | (dj.has_s && dj.s_load ? 2u : 0u);
+        if (zsl != 0) {
+            hakios_metal_program *zp = preloadProgram(d, 0, zsl);
+            if (zp == nullptr || !stagePushConstants(zp->fs, nullptr, nullptr, 0, full_scale, full_offset, 0, 0, dj.zs_fs_fau, used)) {
+                fail("%s: depth/stencil Load: %s", p->name, d->preload_error.c_str());
+                return -1;
+            }
+            dj.zs_frag_spd = zp->frag_spd;
         }
     }
     // the blend descriptor: enabled; the tile buffer loaded when the equation or the mask reads it; opaque (mode 1)
@@ -3775,7 +3909,15 @@ levelsOf(hakios_metal_texture *p, const MaliFormat *f, unsigned pixel_format, un
         t->level_stride[l] = p->levelStride(base + l);
     }
     t->planes_off = count > 1 && p->planes_off != 0 ? p->planes_off + 32 * base : 0;
-    if (base == 0) {
+    if (p->stencil_level_stride[base] != 0) {
+        const uint64_t lo = p->levelOffset(base);
+        t->stencil_off = p->stencil_level_off[base] - lo;
+        t->stencil_stride = p->stencil_level_stride[base];
+        for (unsigned l = 0; l < count; l++) {
+            t->stencil_level_off[l] = p->stencil_level_off[base + l] - lo;
+            t->stencil_level_stride[l] = p->stencil_level_stride[base + l];
+        }
+    } else if (base == 0) {
         t->stencil_off = p->stencil_off;
         t->stencil_stride = p->stencil_stride;
     }
@@ -3862,6 +4004,17 @@ hakios_metal_texture_new_levels(hakios_metal_device *d, unsigned type, unsigned 
         t->level_off[l] = at;
         t->level_stride[l] = ((t->levelWidth(l) + t->bw - 1) / t->bw * t->bytes + 63) & ~63u;
         at += ((uint64_t)t->level_stride[l] * t->levelRows(l) + 63) & ~63ULL;
+    }
+    if (pixel_format == 260) {
+        // Depth32Float_Stencil8: a stencil plane a level, after the depth levels (the one level's plane hakios_metal_
+        // texture_new made had no room in the bigger BO: stencil written to a level past 0 landed on the planes)
+        for (unsigned l = 0; l < levels; l++) {
+            t->stencil_level_off[l] = at;
+            t->stencil_level_stride[l] = (t->levelWidth(l) + 63) & ~63u;
+            at += ((uint64_t)t->stencil_level_stride[l] * t->levelHeight(l) + 63) & ~63ULL;
+        }
+        t->stencil_off = t->stencil_level_off[0];
+        t->stencil_stride = t->stencil_level_stride[0];
     }
     Bo bigger;
     if (!d->newBo(bigger, at + 32 * levels, BIND_NOEXEC)) {
@@ -4036,7 +4189,7 @@ hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass
 {
     if (cb != nullptr && atLevels(pass)) {
         struct hakios_metal_render_pass q;
-        hakios_metal_texture *views[8];
+        hakios_metal_texture *views[10];
         if (!passAtLevels(pass, q, views)) return -1;
         int r = hakios_metal_cb_clear(cb, &q);
         for (auto *v : views) if (v) v->release();
