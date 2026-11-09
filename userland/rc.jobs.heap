@@ -1,0 +1,5 @@
+# the tiler heap growth alone (mali_draw_test heap N): 30000 instances grow the heap to 42 chunks; past 60000 its
+# 64 chunks are not enough (incremental rendering, TODO 12). Run without METAL_PLUGIN=ca
+/redwood/bin/rwtouch wait 20
+/redwood/bin/mali_draw_test heap 30000
+/redwood/bin/mali_draw_test heap 400
