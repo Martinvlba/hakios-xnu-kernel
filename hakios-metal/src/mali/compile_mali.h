@@ -106,6 +106,9 @@ int mali_fragment_compile(const void *bitcode, size_t size, const struct mali_co
  * TARGETS (1 to 4) attachments */
 int mali_preload_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, char *error,
     size_t error_size);
+/* ... with depth (ZS 1) and/or stencil (ZS 2) loaded too, from textures TARGETS and on (TARGETS may be 0) */
+int mali_preload_zs_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned targets, unsigned zs,
+    char *error, size_t error_size);
 /* the driver's blit draw: texture 0 through sampler 0 at (x w0 + y w1 + w2, x w3 + y w4 + w5), normalized, of the
  * fragment's position (x, y) */
 int mali_blit_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size);

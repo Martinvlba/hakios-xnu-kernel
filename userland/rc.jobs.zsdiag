@@ -1,0 +1,3 @@
+/redwood/bin/rwtouch wait 20
+/redwood/bin/mali_draw_test zsdiag
+/redwood/bin/mali_draw_test
