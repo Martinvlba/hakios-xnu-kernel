@@ -243,6 +243,19 @@ lower_draw_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
 	case nir_intrinsic_load_base_instance:
 		value = push_words(b, MALI_DRAW_BASE_INSTANCE, 1, 32);
 		break;
+	case nir_intrinsic_load_blend_const_color_r_float:
+	case nir_intrinsic_load_blend_const_color_g_float:
+	case nir_intrinsic_load_blend_const_color_b_float:
+	case nir_intrinsic_load_blend_const_color_a_float: {
+		/* the blend colour (blending in the shader, Metal's BlendColor/BlendAlpha factors): four halves in words
+		 * MALI_DRAW_BLEND_COLOR (r g) and + 1 (b a), from the draw's -setBlendColorRed:green:blue:alpha: */
+		unsigned c = in->intrinsic == nir_intrinsic_load_blend_const_color_r_float ? 0 :
+		    in->intrinsic == nir_intrinsic_load_blend_const_color_g_float ? 1 :
+		    in->intrinsic == nir_intrinsic_load_blend_const_color_b_float ? 2 : 3;
+		nir_def *w = push_words(b, MALI_DRAW_BLEND_COLOR + c / 2, 1, 32);
+		value = nir_channel(b, nir_unpack_half_2x16(b, w), c & 1);
+		break;
+	}
 	case nir_intrinsic_load_rt_conversion_pan:
 		/* a framebuffer fetch's (LD_TILE) conversion: the tile buffer's format, as the blend descriptor's word 3 that
 		 * c_api_mali.cpp writes for every colour target it serves (R8G8B8A8 in the tile buffer) */

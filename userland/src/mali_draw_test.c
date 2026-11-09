@@ -505,6 +505,76 @@ zs_diag(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *fla
 	return 1;
 }
 
+/* 6c. blending in the shader: the blend colour (flat over grey, BlendColor / OneMinusBlendColor, BlendAlpha /
+ * OneMinusBlendAlpha, colour (0.25, 0.5, 0.75, 1): (104, 96, 128, 255) wanted) and dual source (tri_color through dual_fs,
+ * Source1Color / Source1Alpha times the source, plus zero: each channel times (0.5, 0.25, 1, 0.75) -- green top right a
+ * quarter, alpha 191) */
+static int
+near8(uint32_t px, unsigned r, unsigned g, unsigned b, unsigned a)
+{
+	int d[4] = { (int)(px & 0xff) - (int)r, (int)((px >> 8) & 0xff) - (int)g, (int)((px >> 16) & 0xff) - (int)b,
+	    (int)(px >> 24) - (int)a };
+	for (int i = 0; i < 4; i++) if (d[i] < -3 || d[i] > 3) return 0;
+	return 1;
+}
+
+static int
+blend_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *bl = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc,
+	    tri_flat_fs_bc_len, 70);
+	hakios_metal_program *du = hakios_metal_program_new_bitcode(tri_color_vs_bc, tri_color_vs_bc_len, dual_fs_bc,
+	    dual_fs_bc_len, 70);
+	struct hakios_metal_render_pass pass;
+	static uint32_t px[64 * 64];
+	unsigned right = 0;
+	int ok = 1;
+
+	if (t == NULL || bl == NULL || du == NULL) {
+		printf("mali_draw_test: blend: no texture or program (%s)\n", hakios_metal_error());
+		return 0;
+	}
+	hakios_metal_program_set_blend(bl, 1, 0, 0, 11, 12, 13, 14, 0xf);
+	hakios_metal_program_set_blend(du, 1, 0, 0, 15, 0, 17, 0, 0xf);
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+	pass.clear_color[3] = 1;
+	pass.blend_color[0] = 0.25f;
+	pass.blend_color[1] = 0.5f;
+	pass.blend_color[2] = 0.75f;
+	pass.blend_color[3] = 1;
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, bl, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: blend colour: refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "blend colour") && ok;
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 64 * 64; i++) right += near8(px[i], 104, 96, 128, 255);
+	ok = ok && right == 4096;
+	printf("mali_draw_test: blend colour: %u of 4096 near (104, 96, 128, 255), the first 0x%08x: %s\n", right, px[0],
+	    right == 4096 ? "WORK" : "FAILED");
+
+	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, du, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: dual source: refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "dual source") && ok;
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	{
+		/* tri_color alone: top left 0xfffd0002 (blue), top right 0xff02fb02 (green) */
+		uint32_t tl = px[0], tr = px[63];
+		int good = near8(tl, 1, 0, 253, 191) && near8(tr, 1, 63, 2, 191);
+		ok = ok && good;
+		printf("mali_draw_test: dual source: top left 0x%08x (0xbffd0001 wanted), top right 0x%08x (0xbf023f01 wanted): %s\n",
+		    tl, tr, good ? "WORK" : "FAILED");
+	}
+	hakios_metal_texture_free(t);
+	return ok;
+}
+
 /* 7. what a full-screen (1080x2340) pass costs with one tiny draw: clear+store, clear alone, load+store, load+store of
  * two attachments; each the mean of 20 command buffers, wall time commit to done */
 static void
@@ -844,6 +914,7 @@ main(int argc, char **argv)
 	right = depth_test(d, q, flat, col, 1) && right;
 	right = stencil_test(d, q, flat, col, 0) && right;
 	right = stencil_test(d, q, flat, col, 1) && right;
+	right = blend_test(d, q) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;
 	/* sustained load, for the GPU's clock governor: 300 draws back to back, the first and last 20 timed */

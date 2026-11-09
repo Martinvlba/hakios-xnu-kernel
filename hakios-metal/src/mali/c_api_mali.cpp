@@ -3110,9 +3110,9 @@ encodeBlend(int enabled, unsigned rgb_op, unsigned alpha_op, unsigned src_rgb, u
     const char *why = nullptr;
     uint32_t rgb = maliBlendFunction(rgb_op, src_rgb, dst_rgb, false, why);
     uint32_t alpha = why == nullptr ? maliBlendFunction(alpha_op, src_alpha, dst_alpha, true, why) : 0;
-    // in the shader instead: any operation and factor but the blend colour and the second source (not passed to the
-    // shader yet)
-    auto shaderable = [](unsigned f) { return f <= 10; };
+    // in the shader instead: any operation and factor -- the blend colour from the draw's push constants
+    // (MALI_DRAW_BLEND_COLOR), the second source the fragment function's [[color(n), index(1)]] (nir_lower_blend)
+    auto shaderable = [](unsigned f) { return f <= 18; };
     if (why != nullptr && shader != nullptr && rgb_op <= 4 && alpha_op <= 4 && shaderable(src_rgb) && shaderable(dst_rgb) &&
         shaderable(src_alpha) && shaderable(dst_alpha)) {
         *shader = { rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask };
@@ -3519,6 +3519,16 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     for (unsigned i = 0; i < fs_word_count && i < dj.fs_fau.size(); i++) {
         dj.fs_fau[i] = fs_words[i];                     // (the driver's own programs: their words from 0, no buffers)
+    }
+    if (pass != nullptr && dj.fs_fau.size() > MALI_DRAW_BLEND_COLOR + 1) {
+        // the blend colour, for blending in the shader (BlendColor/BlendAlpha factors): four halves
+        uint16_t half[4];
+        for (int c = 0; c < 4; c++) {
+            __fp16 h = (__fp16)pass->blend_color[c];
+            memcpy(&half[c], &h, 2);
+        }
+        dj.fs_fau[MALI_DRAW_BLEND_COLOR] = half[0] | (uint32_t)half[1] << 16;
+        dj.fs_fau[MALI_DRAW_BLEND_COLOR + 1] = half[2] | (uint32_t)half[3] << 16;
     }
     // the fragment stage's textures and samplers, as a dispatch's
     for (unsigned r = 0; r < p->fs.num_resources; r++) {

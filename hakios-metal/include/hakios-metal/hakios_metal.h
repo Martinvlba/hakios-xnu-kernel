@@ -306,8 +306,8 @@ int hakios_metal_program_set_vertex_attribute(hakios_metal_program *program, uns
 int hakios_metal_program_set_vertex_layout(hakios_metal_program *program, unsigned buffer_index, unsigned stride,
     unsigned step_function, unsigned step_rate);
 /* colour attachment 0's blend (MTLRenderPipelineColorAttachmentDescriptor), Metal's numbers: ENABLED (blendingEnabled),
- * RGB_OP / ALPHA_OP (MTLBlendOperation), the four factors (MTLBlendFactor; the Source1 ones refused at the draw: no
- * dual-source blending), WRITE_MASK (MTLColorWriteMask: Red 8, Green 4, Blue 2, Alpha 1). Off with the mask 0xf until
+ * RGB_OP / ALPHA_OP (MTLBlendOperation), the four factors (MTLBlendFactor, all of them: what fixed function has no operand
+ * for -- the blend colour, the second source [[color(0), index(1)]], alpha saturated -- is blended in the shader), WRITE_MASK (MTLColorWriteMask: Red 8, Green 4, Blue 2, Alpha 1). Off with the mask 0xf until
  * this is called. What a draw cannot serve (blending into an integer format, say) it refuses by name. */
 void hakios_metal_program_set_blend(hakios_metal_program *program, int enabled, unsigned rgb_op, unsigned alpha_op,
     unsigned src_rgb, unsigned dst_rgb, unsigned src_alpha, unsigned dst_alpha, unsigned write_mask);
