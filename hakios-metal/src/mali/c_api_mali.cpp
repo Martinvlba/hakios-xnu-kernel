@@ -28,6 +28,7 @@
 #include <sys/sysctl.h>
 #include <chrono>
 #include <sys/stat.h>
+#include <libkern/OSCacheControl.h>
 #include <sys/time.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -2471,7 +2472,9 @@ glitchScan(hakios_metal_cb *cb, bool before)
         bool bgra = t->format == 80 || t->format == 81;
         unsigned rows_bad = 0, first = 0;
         row.resize(t->width);
+        static const bool flush = bootArg("metal_glitchflush");    // (a test: the CPU's cached lines of it dropped first)
         for (unsigned y = 0; y < t->height; y += 16) {
+            if (flush) sys_dcache_flush(t->pixels() + (uint64_t)y * t->stride, t->width * 4);
             if (hakios_metal_texture_read(t, 0, y, t->width, 1, row.data(), t->width * 4) != 0) break;
             unsigned n = 0;
             for (unsigned x = 0; x < t->width; x++) {
