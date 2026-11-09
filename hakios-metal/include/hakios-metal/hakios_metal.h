@@ -103,6 +103,10 @@ typedef struct hakios_metal_constant {
 } hakios_metal_constant;
 hakios_metal_kernel *hakios_metal_kernel_compile_bitcode_constants(const void *bitcode, size_t size,
     const hakios_metal_constant *constants, unsigned count);
+/* How many function constants the module BITCODE declares: a generic shader (CoreAnimation's uber shaders as an
+ * iPhone's own library has them) declares its constants and is specialised per pipeline; one already specialised
+ * declares none. (The Mali build's; 0 where the front end is not linked.) */
+unsigned hakios_metal_bitcode_constant_count(const void *bitcode, size_t size);
 void hakios_metal_kernel_free(hakios_metal_kernel *kernel);
 const char *hakios_metal_kernel_name(hakios_metal_kernel *kernel);
 /* the argument buffer at [[buffer(SET)]] of the function in BITCODE, as MTLFunction's -newArgumentEncoderWithBufferIndex:

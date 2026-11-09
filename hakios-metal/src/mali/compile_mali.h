@@ -118,6 +118,9 @@ int mali_blit_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *
 int mali_resolve_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned samples, char *error,
     size_t error_size);
 void mali_kernel_binary_free(struct mali_kernel_binary *binary);
+/* the function constants a module declares (!air.function_constants): a generic shader that is specialised per
+ * pipeline has some, an already specialised one none */
+unsigned mali_bitcode_constant_count(const void *bitcode, size_t size);
 
 #ifdef __cplusplus
 }

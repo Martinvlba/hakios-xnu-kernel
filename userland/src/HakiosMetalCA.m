@@ -1542,6 +1542,34 @@ hm_ca_load(void)
  * and the varyings must be the same, or it is another program. Then the fewest inputs changed, and a flag left out (a feature the
  * program did not ask for is not fed) before a flag added. What the letters mean is read from the labels, not from a document.
  */
+/* Levenshtein's distance between two short strings (a label's inputs) */
+static NSInteger
+hm_edit_distance(NSString *a, NSString *b)
+{
+	const NSUInteger n = [a length], m = [b length];
+	NSInteger row[64];
+
+	if (m + 1 > 64) {
+		return labs((long)n - (long)m) + 64;
+	}
+	for (NSUInteger j = 0; j <= m; j++) {
+		row[j] = (NSInteger)j;
+	}
+	for (NSUInteger i = 1; i <= n; i++) {
+		NSInteger diag = row[0];
+
+		row[0] = (NSInteger)i;
+		for (NSUInteger j = 1; j <= m; j++) {
+			const NSInteger up = row[j];
+			const NSInteger sub = diag + ([a characterAtIndex:i - 1] == [b characterAtIndex:j - 1] ? 0 : 1);
+
+			row[j] = MIN(MIN(up + 1, row[j - 1] + 1), sub);
+			diag = up;
+		}
+	}
+	return row[m];
+}
+
 static NSString *
 hm_ca_nearest(NSString *frag)
 {
@@ -1594,8 +1622,12 @@ hm_ca_nearest(NSString *frag)
 			continue;
 		}
 		for (NSUInteger i = 0; i < [wantIn count]; i++) {
-			/* (an input that does more than was asked for last: IsrcN3Oc3mtc4 is a colour matrix, not a plain sample) */
-			cost += [wantIn[i] isEqualToString:haveIn[i]] ? 0 : 100 + labs((long)[haveIn[i] length] - (long)[wantIn[i] length]);
+			/* (an input that does more than was asked for last: IsrcN3Oc3mtc4 is a colour matrix, not a plain sample;
+			 * among other inputs the nearest by edit distance -- by length alone TcimA2S1Xhfn_IsrcN3Oc3mtc4 (the
+			 * launch snapshot through a colour matrix) got IalpCcl, alpha times a constant colour, over Isrc: an
+			 * opaque snapshot came out as the matrix's numbers taken for a colour, whole frames blue or cyan during an
+			 * app launch, the tester's video of 11-09) */
+			cost += [wantIn[i] isEqualToString:haveIn[i]] ? 0 : 100 + hm_edit_distance(wantIn[i], haveIn[i]);
 		}
 		for (NSUInteger i = 0; i < [wantFlags length]; i++) {
 			cost += [haveFlags rangeOfString:[wantFlags substringWithRange:NSMakeRange(i, 1)]].location == NSNotFound ? 3 : 0;
@@ -1617,6 +1649,10 @@ hm_ca_nearest(NSString *frag)
 	}
 	return best;
 }
+
+static bool hm_boot_arg_set(const char *what);
+/* (weak: the Adreno build of hakios-metal has no such call) */
+extern unsigned hakios_metal_bitcode_constant_count(const void *bitcode, size_t size) __attribute__((weak_import));
 
 /* The module to compile for FUNCTION (of the pipeline labelled PIPELINE, vertex stage or not): its variant when
  * CoreAnimation's labels name one, else what the function itself has. */
@@ -1664,6 +1700,46 @@ hm_bitcode_for(id function, NSString *pipeline, BOOL vertex)
 		return own;
 	}
 	if (name == nil || ![name hasPrefix:@"fixed_"]) {
+		return own;
+	}
+	/* THE GENERIC UBER SHADERS (the iPhone 11's 20F66 library, the same CoreAnimation: tools/ca-metallib.py keeps them
+	 * as they are): Metal specialises the function with the pipeline's constants itself (fc_color_opcodes0 58,
+	 * fc_color_inputs0 56, ...) and hands over a module of a few KB that IS that pipeline's shader -- for the pipelines
+	 * the pipeline library names and for the ones CoreAnimation makes at run time alike. So it is compiled as it is:
+	 * no variant, no nearest one (a nearest one drew whole frames blue or cyan at app launches, 11-09). Decided once,
+	 * by whether the library's own fixed_frag_lph_cph declares function constants. Boot-arg ca_variants: the
+	 * pipeline library's variants instead, as before. */
+	static int generic = -1;
+	static dispatch_once_t genericOnce;
+	dispatch_once(&genericOnce, ^{
+		char args[1024] = "", path[512] = "/redwood/share/ca-share/QuartzCore-default.metallib";
+		size_t size = sizeof(args) - 1;
+		const char *at;
+
+		generic = 0;
+		if (hm_boot_arg_set("ca_variants") || hakios_metal_bitcode_constant_count == NULL) {
+			return;
+		}
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "ca_metallib=")) != NULL) {
+			snprintf(path, sizeof(path), "%.*s", (int)strcspn(at + 12, " "), at + 12);
+		}
+		id<MTLDevice> device = [function respondsToSelector:@selector(device)] ? [function device] : nil;
+		NSError *e = nil;
+		id lib = device ? [device newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&e] : nil;
+		id f = [lib newFunctionWithName:@"fixed_frag_lph_cph"];
+		NSData *air = f != nil && [f respondsToSelector:sel_getUid("bitcodeData")] ?
+			((NSData *(*)(id, SEL))objc_msgSend)(f, sel_getUid("bitcodeData")) : nil;
+		unsigned declared = air != nil ? hakios_metal_bitcode_constant_count([air bytes], [air length]) : 0;
+
+		generic = declared > 0;
+		hm_print("CoreAnimation's uber shaders in %s: %s (fixed_frag_lph_cph, %lu bytes of AIR, %u function constants)\n",
+			 path, generic ? "GENERIC -- what Metal specialises per pipeline is compiled as it is, no variants" :
+			 "already specialised -- the pipeline library's variants, the nearest for a pipeline it does not name",
+			 (unsigned long)[air length], declared);
+		[f release];
+		[lib release];
+	});
+	if (generic > 0) {
 		return own;
 	}
 	hm_ca_load();
@@ -3395,9 +3471,9 @@ hm_compile_queue(void)
 				}
 			}
 		}
-		hm_print("linked %s (%p) for pixel format %u: the vertex stage binds %u resources, the fragment stage %u; fragment constants not 0:%s\n",
-			 hakios_metal_program_name(program), (void *)program, format, hakios_metal_program_resource_count(program, 0),
-			 hakios_metal_program_resource_count(program, 1), [set UTF8String]);
+		hm_print("linked %s (%p, pipeline %s) for pixel format %u: the vertex stage binds %u resources, the fragment stage %u; fragment constants not 0:%s\n",
+			 hakios_metal_program_name(program), (void *)program, [descriptor label] ? [[descriptor label] UTF8String] : "none",
+			 format, hakios_metal_program_resource_count(program, 0), hakios_metal_program_resource_count(program, 1), [set UTF8String]);
 	}
 	{
 		HakiosMetalRenderPipelineState *state = [[HakiosMetalRenderPipelineState alloc] initWithHakiosDevice:self program:program descriptor:descriptor];

@@ -1,0 +1,7 @@
+# Settings opened and closed twelve times, 8 s apart (the tester's video, 11-09: the launch zoom drew a blue frame, a cyan
+# tint, a white widget, a black box): for a burst of usbmux-shot.py on the host. METAL_PLUGIN=ca.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8
+/redwood/bin/rwtouch tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4
+/redwood/bin/rwtouch tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4
+/redwood/bin/rwtouch tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4
+/redwood/bin/rwtouch tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4 tap 0.376 0.758 wait 4 button home wait 4

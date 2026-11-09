@@ -708,6 +708,7 @@ struct DrawJob {
     uint32_t s_clear = 0;
     uint32_t zsd[8] = {};
     const char *name = "";                              // the program's (boot-arg metal_stats; held by the cb)
+    const void *program = nullptr;                      // ... the program itself (boot-arg metal_glitchwatch)
     uint32_t tls_size = 0;                              // bytes a thread spills (the larger stage's): a local storage
                                                         // descriptor of its own at the area's end (drawBytes)
     // the Load action: the preload draw first, in the same Mali pass (compile_mali.c's mali_preload_compile)
@@ -2196,6 +2197,12 @@ hakios_metal_cb_gpu_nanoseconds(hakios_metal_cb *cb)
 
 // ---- kernels (src/mali/compile_mali.c) and their dispatch ----
 
+unsigned
+hakios_metal_bitcode_constant_count(const void *bitcode, size_t size)
+{
+    return bitcode != nullptr && size != 0 ? mali_bitcode_constant_count(bitcode, size) : 0;
+}
+
 hakios_metal_kernel *
 hakios_metal_kernel_compile_bitcode_constants(const void *bitcode, size_t size, const hakios_metal_constant *constants,
     unsigned count)
@@ -2536,8 +2543,8 @@ glitchScan(hakios_metal_cb *cb, bool before)
     }
 }
 
-// BOOT-ARG metal_glitchwatch: every 1080x2340-class screen target (4 bytes a texel, the screen's width, drawn into)
-// kept watched, scanned (a row in 32) at every commit and every completion of any command buffer, and at CPU uploads:
+// BOOT-ARG metal_glitchwatch: every 1080x2340-class screen target (4 bytes a texel, drawn into by 20 command buffers)
+// kept watched, scanned (a row in 64) at every commit and every completion of any command buffer, and at CPU uploads:
 // the moment one turns blue/cyan is said with the event, the command buffer and its jobs (copies/fills with whether
 // they land in it, draws with their attachments). metal_glitchsync too: a commit first waits (up to 200 ms) for every
 // command buffer in flight, so "turned at the commit of N" means between N-1's completion and N's commit: no GPU work
@@ -2565,42 +2572,102 @@ gwBlueRows(hakios_metal_texture *t, unsigned step, unsigned *first)
     return bad;
 }
 
+// a coarse colour map of T, 27x30 cells: k black, w white, b blue, c cyan, r red, g green, y yellow, m magenta, . other
 void
+gwMap(hakios_metal_texture *t, const char *what)
+{
+    bool bgra = t->format == 80 || t->format == 81;
+    std::vector<uint32_t> row(t->width);
+    for (unsigned gy = 0; gy < 30; gy++) {
+        char cells[64];
+        unsigned y = gy * t->height / 30, n = 0;
+        if (hakios_metal_texture_read(t, 0, y, t->width, 1, row.data(), t->width * 4) != 0) break;
+        for (unsigned gx = 0; gx < 27; gx++) {
+            uint32_t v = row[gx * t->width / 27];
+            unsigned r = bgra ? (v >> 16) & 0xff : v & 0xff, g = (v >> 8) & 0xff, b = bgra ? v & 0xff : (v >> 16) & 0xff;
+            auto hi = [](unsigned c) { return c > 200; };
+            auto lo = [](unsigned c) { return c < 60; };
+            cells[n++] = lo(r) && lo(g) && lo(b) ? 'k' : hi(r) && hi(g) && hi(b) ? 'w' : lo(r) && lo(g) && hi(b) ? 'b' :
+                lo(r) && hi(g) && hi(b) ? 'c' : hi(r) && lo(g) && lo(b) ? 'r' : lo(r) && hi(g) && lo(b) ? 'g' :
+                hi(r) && hi(g) && lo(b) ? 'y' : hi(r) && lo(g) && hi(b) ? 'm' : '.';
+        }
+        cells[n] = 0;
+        uint32_t mid = row[t->width / 2];
+        fprintf(stderr, "hakios-metal: glitchwatch: map %s %p %2u %s  (middle %08x)\n", what, (void *)t, gy, cells, mid);
+    }
+}
+
+// a command buffer's jobs as lines (consecutive draws alike said once, with how many), marking what lands in T
+std::vector<std::string>
 gwDescribe(hakios_metal_cb *cb, hakios_metal_texture *t)
 {
-    if (cb == nullptr) return;
+    std::vector<std::string> out;
+    if (cb == nullptr) return out;
     uint64_t lo = t->gpu(), hi = lo + t->span();
     static const char *kinds[] = { "copy_u32", "fill_u32", "copy_u8", "fill_u8", "dispatch", "draw" };
+    std::string last;
+    size_t last_at = 0, alike = 0;
+    char text[700];
+    auto flush = [&] {
+        if (!last.empty()) {
+            snprintf(text, sizeof(text), "job %zu%s draw %s", last_at,
+                alike > 1 ? (" (x" + std::to_string(alike) + ")").c_str() : "", last.c_str());
+            out.push_back(text);
+        }
+        last.clear();
+        alike = 0;
+    };
     for (size_t i = 0; i < cb->blits.size(); i++) {
         const Job &b = cb->blits[i];
         if (b.shader == DRAW) {
             if (b.dst >= cb->draws.size()) continue;
             const DrawJob &dj = cb->draws[b.dst];
-            std::string more;
+            std::string more, tex;
             for (unsigned k = 1; k < dj.rts; k++) {
-                char one[96];
-                snprintf(one, sizeof(one), " rt%u %p%s%s%s", k, (void *)dj.more[k - 1].texture,
-                    dj.more[k - 1].missing ? " missing" : "", dj.more[k - 1].write ? " w" : "",
-                    dj.more[k - 1].va >= lo && dj.more[k - 1].va < hi ? " IN-IT" : "");
+                const auto &m = dj.more[k - 1];
+                char one[128];
+                snprintf(one, sizeof(one), " rt%u %ux%u/%u%s%s%s blend %08x", k, m.texture ? m.texture->width : 0,
+                    m.texture ? m.texture->height : 0, m.texture ? m.texture->format : 0, m.missing ? " missing" : "",
+                    m.write ? " w" : "", m.va >= lo && m.va < hi ? " IN-IT" : "", m.blend[0]);
                 more += one;
             }
-            fprintf(stderr, "hakios-metal: glitchwatch:  job %zu draw %s into %p %ux%u%s load %d clear_only %d write %d%s\n", i,
-                dj.name, (void *)dj.target_tex, dj.width, dj.height, dj.target_va >= lo && dj.target_va < hi ? " (IT)" : "",
-                dj.load, dj.clear_only, dj.write, more.c_str());
-        } else if (b.shader == DISPATCH) {
+            for (unsigned k = 0; k < dj.texture_count; k++) {
+                char one[48];
+                hakios_metal_texture *x = dj.textures[k];
+                if (x == nullptr) continue;
+                snprintf(one, sizeof(one), " %u:%ux%u/%u%s", k, x->width, x->height, x->format, x == t ? "(IT)" : "");
+                tex += one;
+            }
+            char dtext[700];
+            snprintf(dtext, sizeof(dtext), "%s (%p) into %ux%u%s load %d write %d blend %08x %08x count %u inst %u scissor %08x-%08x%s "
+                "textures%s", dj.name, dj.program, dj.width, dj.height, dj.target_va >= lo && dj.target_va < hi ? " (IT)" : "", dj.load,
+                dj.write, dj.blend[0], dj.blend[1], dj.count, dj.instances, dj.scissor_min, dj.scissor_max, more.c_str(),
+                tex.c_str());
+            if (last == dtext) { alike++; continue; }
+            flush();
+            last = dtext;
+            last_at = i;
+            alike = 1;
+            continue;
+        }
+        flush();
+        if (b.shader == DISPATCH) {
             bool in = false;
             for (unsigned k = 0; k < MALI_KERNEL_BUFFERS; k++) in |= b.buffers[k] >= lo && b.buffers[k] < hi;
             for (unsigned k = 0; k < b.texture_count; k++) in |= b.textures[k] == t;
-            fprintf(stderr, "hakios-metal: glitchwatch:  job %zu dispatch %ux%ux%u%s\n", i, b.groups[0], b.groups[1],
-                b.groups[2], in ? " (USES IT)" : "");
+            snprintf(text, sizeof(text), "job %zu dispatch %ux%ux%u%s", i, b.groups[0], b.groups[1], b.groups[2],
+                in ? " (USES IT)" : "");
         } else {
             unsigned unit = b.shader <= 1 ? 4 : 1;
             bool in = b.dst < hi && b.dst + (uint64_t)b.count * unit > lo;
-            fprintf(stderr, "hakios-metal: glitchwatch:  job %zu %s dst 0x%llx count %u value %08x src 0x%llx%s\n", i,
+            snprintf(text, sizeof(text), "job %zu %s dst 0x%llx count %u value %08x src 0x%llx%s", i,
                 kinds[b.shader < 6 ? b.shader : 5], (unsigned long long)b.dst, b.count, b.value,
                 (unsigned long long)b.src, in ? " (INTO IT)" : "");
         }
+        out.push_back(text);
     }
+    flush();
+    return out;
 }
 
 void
@@ -2611,37 +2678,118 @@ glitchWatch(const char *event, hakios_metal_cb *cb)
     if (!on) return;
     std::lock_guard<std::mutex> g(gwLock);
     if (cb != nullptr) {
-        // new screen targets this command buffer draws into (the four most recent kept)
+        // screen targets: drawn into by 20 command buffers or more (the screen's drawables, not the launch snapshots);
+        // the six most recently drawn kept
+        static std::map<hakios_metal_texture *, unsigned> seen;
+        std::vector<hakios_metal_texture *> mine;
         for (const DrawJob &dj : cb->draws) {
             hakios_metal_texture *t = dj.target_tex;
             if (t == nullptr || t->bytes != 4 || t->samples != 1 || t->width < 1000 || t->height < 2000) continue;
-            bool known = false;
-            for (auto &w : gwTargets) known |= w.first == t;
-            if (known) continue;
+            if (std::find(mine.begin(), mine.end(), t) == mine.end()) mine.push_back(t);
+        }
+        for (hakios_metal_texture *t : mine) {
+            auto at = std::find_if(gwTargets.begin(), gwTargets.end(), [&](auto &w) { return w.first == t; });
+            if (at != gwTargets.end()) {
+                auto keep = *at;                    // most recently drawn last
+                gwTargets.erase(at);
+                gwTargets.push_back(keep);
+                continue;
+            }
+            if (++seen[t] < 20) continue;
+            if (seen.size() > 256) seen.clear();
             t->retain();
             gwTargets.push_back({ t, false });
-            if (gwTargets.size() > 4) {
+            fprintf(stderr, "hakios-metal: glitchwatch: watching target %p %ux%u format %u (command buffer #%u)\n", (void *)t,
+                t->width, t->height, t->format, cb->seq);
+            if (gwTargets.size() > 6) {
                 gwTargets.front().first->release();
                 gwTargets.erase(gwTargets.begin());
             }
         }
     }
-    for (auto &w : gwTargets) {
-        unsigned first = 0, bad = gwBlueRows(w.first, 32, &first);
-        bool blue = bad * 32 >= 512;     // ~16 sampled rows (about a fifth of the screen) or more
-        if (blue == w.second) continue;
-        w.second = blue;
-        if (said >= 40) continue;
-        said++;
-        fprintf(stderr, "hakios-metal: glitchwatch: target %p %ux%u %s at the %s of command buffer #%u (%zu jobs, %zu draws; "
-            "%u in flight)\n", (void *)w.first, w.first->width, w.first->height, blue ? "TURNED BLUE/CYAN" : "is clean again",
-            event, cb ? cb->seq : 0, cb ? cb->blits.size() : 0, cb ? cb->draws.size() : 0, gwInFlight.load());
-        if (blue) {
-            char line[64];
-            snprintf(line, sizeof(line), " (%u sampled rows from y %u)", bad, first);
-            fprintf(stderr, "hakios-metal: glitchwatch: %s\n", line);
-            gwDescribe(cb, w.first);
+    // this event in a line: the command buffer, the targets it draws into (with its draw count into each), and each
+    // watched target's sampled blue rows now; the last 16 lines said when a target changes, and the 8 after it
+    static std::deque<std::string> history;
+    static unsigned after = 0;
+    std::string line;
+    char one[160];
+    snprintf(one, sizeof(one), "%s #%u (in flight %u, %ld us):", event, cb ? cb->seq : 0, gwInFlight.load(),
+        (long)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() % 100000000);
+    line = one;
+    if (cb != nullptr) {
+        std::vector<std::pair<hakios_metal_texture *, unsigned>> into;
+        for (const DrawJob &dj : cb->draws) {
+            auto at = std::find_if(into.begin(), into.end(), [&](auto &x) { return x.first == dj.target_tex; });
+            if (at == into.end()) into.push_back({ dj.target_tex, 1 }); else at->second++;
         }
+        for (auto &x : into) {
+            snprintf(one, sizeof(one), " %p%s*%u", (void *)x.first,
+                x.first && x.first->width >= 1000 ? "(screen)" : "", x.second);
+            line += one;
+        }
+        if (cb->blits.size() != cb->draws.size()) {
+            snprintf(one, sizeof(one), " +%zu copies/dispatches", cb->blits.size() - cb->draws.size());
+            line += one;
+        }
+    }
+    line += " | watched:";
+    bool changed = false;
+    std::vector<std::pair<hakios_metal_texture *, unsigned>> turned;
+    static std::map<hakios_metal_texture *, std::vector<std::string>> before;  // the last clean frame's jobs
+    for (auto &w : gwTargets) {
+        unsigned first = 0, bad = gwBlueRows(w.first, 64, &first);
+        bool blue = bad * 64 >= 512;     // 8 sampled rows (about a fifth of the screen) or more
+        snprintf(one, sizeof(one), " %p=%u", (void *)w.first, bad);
+        line += one;
+        bool draws_it = false;
+        if (cb != nullptr && !strcmp(event, "completion")) {
+            for (const DrawJob &dj : cb->draws) draws_it |= dj.target_tex == w.first;
+        }
+        if (blue == w.second) {
+            if (draws_it && !blue && said < 40) before[w.first] = gwDescribe(cb, w.first);
+            continue;
+        }
+        w.second = blue;
+        changed = true;
+        if (blue) turned.push_back({ w.first, first });
+    }
+    history.push_back(line);
+    if (history.size() > 16) history.pop_front();
+    if (said >= 40) return;
+    if (changed) {
+        said++;
+        fprintf(stderr, "hakios-metal: glitchwatch: a watched target changed (sampled blue/cyan rows of 37 per target); "
+            "the events up to it:\n");
+        for (auto &h : history) fprintf(stderr, "hakios-metal: glitchwatch:   %s\n", h.c_str());
+        for (auto &x : turned) {
+            fprintf(stderr, "hakios-metal: glitchwatch: target %p TURNED BLUE/CYAN (from y %u) at the %s of command buffer #%u; "
+                "its jobs:\n", (void *)x.first, x.second, event, cb ? cb->seq : 0);
+            for (auto &l : gwDescribe(cb, x.first)) fprintf(stderr, "hakios-metal: glitchwatch:  now %s\n", l.c_str());
+            for (auto &l : before[x.first]) fprintf(stderr, "hakios-metal: glitchwatch:  last clean frame %s\n", l.c_str());
+            // the large textures its draws sample, as the CPU reads them now: blue there too (the data), or not (the
+            // GPU's reading of it)
+            std::vector<hakios_metal_texture *> sampled;
+            if (cb != nullptr) {
+                for (const DrawJob &dj : cb->draws) {
+                    for (unsigned k = 0; k < dj.texture_count; k++) {
+                        hakios_metal_texture *s2 = dj.textures[k];
+                        if (s2 && s2->bytes == 4 && s2->width >= 500 && s2->height >= 500 && s2->levels == 1 &&
+                            std::find(sampled.begin(), sampled.end(), s2) == sampled.end()) sampled.push_back(s2);
+                    }
+                }
+            }
+            for (hakios_metal_texture *s2 : sampled) {
+                unsigned f2 = 0, b2 = gwBlueRows(s2, 64, &f2);
+                fprintf(stderr, "hakios-metal: glitchwatch: sampled texture %p %ux%u format %u origin %u surface %u: %u sampled rows "
+                    "blue/cyan\n", (void *)s2, s2->width, s2->height, s2->format, s2->origin, s2->surface, b2);
+                if (said <= 3) gwMap(s2, "sampled");
+            }
+            if (said <= 3) gwMap(x.first, "target");
+        }
+        after = 8;
+    } else if (after != 0) {
+        after--;
+        fprintf(stderr, "hakios-metal: glitchwatch:   then %s\n", line.c_str());
     }
 }
 
@@ -3938,6 +4086,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         }
     }
     dj.name = p->name;
+    dj.program = p;
     dj.pos_spd = p->pos_spd;
     dj.vary_spd = p->vary_spd;
     dj.frag_spd = p->frag_spd;
