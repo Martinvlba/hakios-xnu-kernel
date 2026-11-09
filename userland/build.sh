@@ -514,12 +514,22 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	for f in bd_m20gl.elf regdb_xiaomi.bin; do
 		[ -f ../fw-wifi/qca6750/$f ] && install -m 0644 ../fw-wifi/qca6750/$f root/fw/
 	done
-	# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
-	# so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
-	rm -f root/fw/network
-	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
-	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
 fi
+# ... or the Pixel 8a's Broadcom BCM4383 (rev a3), from /vendor/firmware of its Android into ../fw-wifi
+# (devices/akita/drivers/wifi): the radio's firmware, the board's calibration ("NVRAM"), the regulatory
+# database (CLM) and the transmit power caps; 1.3 MB. fw_bcmdhd.map_4383_a3, the firmware's symbols, is
+# for reading its traps on the PC and stays out.
+if [ -f ../fw-wifi/fw_bcmdhd.bin_4383_a3 ]; then
+	mkdir -p root/fw
+	for f in fw_bcmdhd.bin_4383_a3 bcmdhd.cal_4383_a3 bcmdhd_clm.blob_4383_a3 bcmdhd_txcap.blob_4383_a3; do
+		[ -f ../fw-wifi/$f ] && install -m 0644 ../fw-wifi/$f root/fw/
+	done
+fi
+# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
+# so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
+rm -f root/fw/network
+# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
+if [ -z "$SHARE" ] && [ -d root/fw ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
 # (drivers/haptic/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
 if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
