@@ -1,0 +1,8 @@
+# Several Metal clients at once (TODO 16): rc.jobs.scroll's swipes and Settings while two mali_draw_tests (the suite,
+# and a heap test of 30000 instances) draw beside backboardd -- three clients. METAL_PLUGIN=ca; tools/frames.py for the frame rate.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 2
+/redwood/bin/mali_draw_test &
+/redwood/bin/mali_draw_test heap 30000 &
+/redwood/bin/rwtouch wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 2
+/redwood/bin/rwtouch tap 0.376 0.758 wait 5 zigzag 0.5 0.75 0.35 500 6 wait 2 swipe 0.5 0.8 0.5 0.3 150 wait 2 swipe 0.5 0.3 0.5 0.8 150 wait 2 button home wait 3
+/redwood/bin/fps_info

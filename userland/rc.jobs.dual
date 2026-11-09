@@ -1,0 +1,3 @@
+# mali_draw_test beside backboardd (METAL_PLUGIN=ca): two Metal clients at once (TODO 16)
+/redwood/bin/rwtouch wait 40
+/redwood/bin/mali_draw_test
