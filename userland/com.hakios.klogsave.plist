@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.klogsave</string>
+	<!-- the kernel's log kept in /private/var/log/hakios-klog (src/klogsave.c): for crashes that take pstore with them; at its start the end of the boot before's file goes to the console. As root (kern.msgbuf). -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/klogsave</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>

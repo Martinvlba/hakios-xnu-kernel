@@ -433,10 +433,20 @@ write_logs(const char *klog, uint64_t klog_len)
 	static const char *echoed;      /* (once per returned log: flush_log writes it again before a reset) */
 
 	if (log_part_is_klog && klog != NULL && klog_len != 0 && klog != echoed) {
-		uint64_t from = klog_len > 16384 ? klog_len - 16384 : 0;
+		uint64_t from = klog_len > 16384 ? klog_len - 16384 : 0, to = klog_len;
 
-		print("\n== KERNEL LOG (its last %d bytes) ==\n", klog_len - from);
-		for (uint64_t i = from; i < klog_len; i++) {
+		/* a panic's: from 4 KB before XNU's panic header on, 24 KB (its compressed stackshot, printed after the
+		 * reason, filled the last 16 KB and the reason was lost: the USB replug panic of 11-09) */
+		for (uint64_t i = klog_len > 9 ? klog_len - 9 : 0; i > 0; i--) {
+			if (klog[i] == 'p' && klog[i + 1] == 'a' && klog[i + 2] == 'n' && klog[i + 3] == 'i' && klog[i + 4] == 'c' &&
+			    klog[i + 5] == '(' && klog[i + 6] == 'c' && klog[i + 7] == 'p' && klog[i + 8] == 'u') {
+				from = i > 4096 ? i - 4096 : 0;
+				to = from + 24576 < klog_len ? from + 24576 : klog_len;
+				break;
+			}
+		}
+		print("\n== KERNEL LOG (%d bytes from %d of %d) ==\n", to - from, from, klog_len);
+		for (uint64_t i = from; i < to; i++) {
 			put_char(klog[i]);
 		}
 		print("\n== END OF LOG ==\n");
