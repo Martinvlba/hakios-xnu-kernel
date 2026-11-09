@@ -2703,7 +2703,35 @@ int
 hakios_metal_texture_replace(hakios_metal_texture *t, unsigned x, unsigned y, unsigned w, unsigned h, const void *bytes,
     uint64_t bytes_per_row)
 {
-    return copyRows(t, x, y, w, h, (uint8_t *)bytes, bytes_per_row, true);
+    int r = copyRows(t, x, y, w, h, (uint8_t *)bytes, bytes_per_row, true);
+    // (boot-arg metal_glitchsay: what a CPU upload of 64 rows or more brings that is mostly pure blue or cyan, with the
+    // caller -- the screen surface was found blue BEFORE any command buffer drew it, 11-09)
+    static const bool say = bootArg("metal_glitchsay");
+    static std::atomic<unsigned> said{0};
+    if (say && r == 0 && t != nullptr && t->bytes == 4 && h >= 64 && w >= 64 && said < 20) {
+        bool bgra = t->format == 80 || t->format == 81;
+        unsigned bad = 0, rows = 0;
+        for (unsigned j = 0; j < h; j += 16, rows++) {
+            const uint32_t *row = (const uint32_t *)((const uint8_t *)bytes + (uint64_t)j * bytes_per_row);
+            unsigned n = 0;
+            for (unsigned i = 0; i < w; i++) {
+                uint32_t v = row[i];
+                unsigned rr = bgra ? (v >> 16) & 0xff : v & 0xff, g = (v >> 8) & 0xff, b = bgra ? v & 0xff : (v >> 16) & 0xff;
+                n += (b == 255 && g < 8 && rr < 8) || (b == 255 && g == 255 && rr < 100);
+            }
+            bad += n * 10 > w * 6;
+        }
+        if (bad * 2 > rows) {
+            said++;
+            Dl_info info = {};
+            void *caller = __builtin_return_address(0);
+            dladdr(caller, &info);
+            fprintf(stderr, "hakios-metal: glitch: a CPU upload of %ux%u at (%u,%u) into texture %p %ux%u format %u is blue/cyan "
+                "(%u of %u rows), from %s+%#lx\n", w, h, x, y, (void *)t, t->width, t->height, t->format, bad, rows,
+                info.dli_sname ? info.dli_sname : "?", (unsigned long)((uintptr_t)caller - (uintptr_t)info.dli_saddr));
+        }
+    }
+    return r;
 }
 
 int
