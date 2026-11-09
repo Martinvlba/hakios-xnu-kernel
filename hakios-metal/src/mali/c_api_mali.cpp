@@ -703,6 +703,11 @@ struct DrawJob {
     uint64_t pre_pos_spd = 0, pre_frag_spd = 0;
     std::vector<uint32_t> pre_vs_fau, pre_fs_fau;
     hakios_metal_texture *pre_target = nullptr;
+    // INCREMENTAL RENDERING (emitIr): the preload's fragment shader for every target as a pre-frame shader, its push
+    // constants; 0: the pass has no tiler OOM handler (boot-arg metal_noir, or no preload program)
+    uint64_t ir_frag_spd = 0;
+    std::vector<uint32_t> ir_fs_fau;
+    hakios_metal_texture *ir_target = nullptr;          // colour attachment 0 (held as the draw's target)
     // colour attachments 1 to 3 (rts > 1): each one's address, rows, RT word 1, clear, write, load, blend, texture
     unsigned rts = 1;
     struct More {
@@ -740,9 +745,133 @@ hierarchyMask(unsigned w, unsigned h, unsigned levels)
 // what each value is, hakios-kernel's the port's log ("render pipelines") and userland/src/mali_test.c.
 uint64_t drawBytes(const DrawJob &dj);
 
+// INCREMENTAL RENDERING (panvk's tiler OOM exception handler, csf/panvk_vX_exception_handler.c): a pass whose polygon
+// lists outgrow the tiler heap's most chunks would wait for good. Each Mali pass has IR_BYTES of its own (ir): a
+// handler the firmware runs on the queue when the kernel has no chunk left to give -- the lists so far drawn by a
+// fragment job and stored, their chunks given back, the tiler context's lists emptied -- and three copies of the
+// pass's framebuffer descriptor: the first flush (as the pass begins, every target stored), the later flushes (every
+// target loaded by a pre-frame shader -- the preload's fragment shader -- and stored), and the pass's own last fragment
+// job after a flush (loaded, then stored as the pass says). Word 0: the descriptor the next flush uses; word 8: the one
+// the pass ends with (the stream loads r40 from it); 0x10: set when the handler is installed; 0x40: r40-r47 kept.
+constexpr uint64_t IR_BYTES = 0xc00, IR_HANDLER = 0x80, IR_HANDLER_BYTES = 0x180, IR_DCD = 0x200, IR_SRT = 0x280,
+    IR_FBD = 0x600, IR_FBD_STRIDE = 0x200;
+inline uint64_t wait_on(unsigned mask) { return 3ULL << 56 | (uint64_t)mask << 16; }
+
+void
+emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t pass_va, uint8_t *ir, uint64_t ir_va,
+    uint64_t rt_at)
+{
+    const unsigned nt = dj.rts;
+    const uint64_t fbd_bytes = rt_at + 0x40 * nt - 0x80, tags = 1 | (dj.zs ? 2u : 0u) | (nt - 1) << 2;
+    auto missing = [&](unsigned i) { return i > 0 && dj.more[i - 1].missing; };
+    // the pre-frame shader's resources: each target as a texture (the preload's table), a sampler, a blend descriptor
+    // a target: a replace, nothing written to an output with no attachment
+    uint8_t *t = ir + IR_SRT;
+    uint64_t t_va = ir_va + IR_SRT, tex_va = t_va + 0x80, samp_va = tex_va + 32 * nt, plane_va = samp_va + 32;
+    uint64_t bl_at = (IR_SRT + 0x80 + (2 * nt + 1) * 32 + 0x3f) & ~0x3fULL, fau_at = bl_at + 0x40;
+    memset(t, 0, IR_FBD - IR_SRT);
+    auto entry = [&](unsigned table, uint64_t va, unsigned count) {
+        auto *e = (uint32_t *)(t + 16 * table);
+        e[0] = (uint32_t)va;
+        e[1] = (uint32_t)(va >> 32) | 1u << 24;
+        e[2] = count * 32;
+    };
+    entry(MALI_TABLE_TEXTURE, tex_va, nt);
+    entry(MALI_TABLE_SAMPLER, samp_va, 1);
+    unsigned loaded = 0;
+    for (unsigned i = 0; i < nt; i++) {
+        uint32_t plane[8];
+        describe(i == 0 ? dj.ir_target : dj.more[i - 1].texture, (uint32_t *)(ir + (tex_va - ir_va) + 32 * i), plane,
+                 plane_va + 32 * i);
+        memcpy(ir + (plane_va - ir_va) + 32 * i, plane, 32);
+        bool loads = !missing(i);
+        auto *b = (uint32_t *)(ir + bl_at) + 4 * i;
+        b[0] = 1u << 9 | (loads ? 0u : 1u);
+        b[1] = 0x132 | 0x132 << 12 | (loads ? 0xfu : 0u) << 28;
+        b[2] = (loads ? 1u : 2u) | 3 << 3 | i << 16;
+        b[3] = dj.blend[3];
+        loaded |= loads ? 1u << i : 0;
+    }
+    ((uint32_t *)(ir + (samp_va - ir_va)))[0] = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
+    memcpy(ir + fau_at, dj.ir_fs_fau.data(), dj.ir_fs_fau.size() * 4);
+    // the pre-frame draw descriptor (panvk's cmd_emit_dcd for a colour preload): Z/S forced early, may kill and be
+    // killed, clean tiles written; every target; no depth/stencil test (the descriptor that lets all through)
+    auto *w = (uint32_t *)(ir + IR_DCD);
+    memset(w, 0, 128);
+    w[0] = 1u << 0 | 1u << 1 | 1u << 9;
+    w[1] = 0xffff | ((1u << nt) - 1) << 16;
+    w[5] = dj.dcd2;
+    w[7] = 0x3f800000;
+    *(uint64_t *)&w[10] = d->descriptors.va + 0x1980;
+    *(uint64_t *)&w[12] = (ir_va + bl_at) | nt;
+    w[17] = (uint32_t)((dj.ir_fs_fau.size() + 1) / 2);
+    *(uint64_t *)&w[24] = t_va | MALI_TABLES;
+    *(uint64_t *)&w[26] = dj.ir_frag_spd;
+    *(uint64_t *)&w[28] = d->descriptors.va + 0x1200;
+    *(uint64_t *)&w[30] = ir_va + fau_at;
+    // the three framebuffer descriptors, copies of the pass's as it now stands (its targets' write-back is the last
+    // draw's): 0 the first flush, 1 the later ones, 2 the pass's end after a flush
+    uint64_t fbd_va[3];
+    for (unsigned k = 0; k < 3; k++) {
+        uint8_t *v = ir + IR_FBD + k * IR_FBD_STRIDE;
+        auto *f = (uint32_t *)v;
+        fbd_va[k] = ir_va + IR_FBD + k * IR_FBD_STRIDE;
+        memcpy(v, pass_area + 0x80, fbd_bytes);
+        if (k != 2) {
+            for (unsigned i = 0; i < nt; i++) {
+                if (!missing(i)) ((uint32_t *)(v + rt_at - 0x80))[16 * i + 1] |= 1;
+            }
+            f[12] |= (dj.has_z ? 1u << 18 : 0) | (dj.has_s ? 1u << 8 : 0);
+        }
+        if (k != 0) {
+            f[0] = (f[0] & ~7u) | 1;                                            // pre-frame 0: always
+            *(uint64_t *)&f[6] = ir_va + IR_DCD;
+            f[12] |= (dj.has_z ? 1u << 19 : 0) | (dj.has_s ? 1u << 9 : 0);     // depth/stencil loaded
+        }
+    }
+    *(uint64_t *)(ir + 0) = fbd_va[0] | tags;
+    *(uint64_t *)(ir + 8) = (pass_va + 0x80) | tags;
+    // the handler: registers r62-r79 are free between draws; r40-r47 (the fragment job's, also the next draw's) kept
+    // and given back. Its own waits name their scoreboards (0: loads/stores and flushes; its fragment job on 4): the
+    // IDVS job that ran out (slot 3) is still in flight
+    auto *h = (uint64_t *)(ir + IR_HANDLER);
+    unsigned k = 0;
+    memset(h, 0, IR_HANDLER_BYTES);                                             // (NOPs after it)
+    h[k++] = move48(76, ir_va);
+    h[k++] = 21ULL << 56 | 40ULL << 48 | 76ULL << 40 | 0xffULL << 16 | 0x40;   // STORE_MULTIPLE r40-r47 -> [r76 + 0x40]
+    h[k++] = 20ULL << 56 | 40ULL << 48 | 76ULL << 40 | 0x3ULL << 16 | 0;       // LOAD_MULTIPLE r40-r41 <- [r76]: this flush's
+    h[k++] = move32(42, 0);
+    h[k++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
+    h[k++] = move48(44, 0);
+    h[k++] = move32(46, 0);
+    h[k++] = wait_on(1);
+    h[k++] = set_state(0, 4);                                                   // endpoint work on scoreboard 4
+    h[k++] = 7ULL << 56;                                                        // RUN_FRAGMENT
+    h[k++] = wait_on(1 << 4);
+    h[k++] = set_state(0, 3);
+    h[k++] = move48(78, pass_va);
+    h[k++] = 20ULL << 56 | 62ULL << 48 | 78ULL << 40 | 0xfULL << 16 | 40;      // LOAD_MULTIPLE r62-r65 <- the completed chunks
+    h[k++] = wait_on(1);
+    h[k++] = 11ULL << 56 | 62ULL << 40 | 64ULL << 32;                          // FINISH_FRAGMENT, the pass not counted done
+    h[k++] = wait_on(1);
+    h[k++] = move48(66, 0);
+    h[k++] = 21ULL << 56 | 66ULL << 48 | 78ULL << 40 | 0x3ULL << 16 | 0;       // the polygon list,
+    h[k++] = 21ULL << 56 | 66ULL << 48 | 78ULL << 40 | 0x3ULL << 16 | 40;      // completed top and bottom: 0
+    h[k++] = 21ULL << 56 | 66ULL << 48 | 78ULL << 40 | 0x3ULL << 16 | 48;
+    h[k++] = move48(62, fbd_va[1] | tags);
+    h[k++] = move48(64, fbd_va[2] | tags);
+    h[k++] = 21ULL << 56 | 62ULL << 48 | 76ULL << 40 | 0xfULL << 16 | 0;       // the next flush's, the pass's end
+    h[k++] = move32(68, 0);
+    h[k++] = 36ULL << 56 | 68ULL << 40 | 2 << 8 | 1 << 4 | 1;                  // FLUSH_CACHE2: what was stored, seen by
+    h[k++] = wait_on(1);                                                        // the pre-frame shader's texture reads
+    h[k++] = 20ULL << 56 | 40ULL << 48 | 76ULL << 40 | 0xffULL << 16 | 0x40;   // r40-r47 back
+    h[k++] = wait_on(1);
+}
+
 void
 emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area_va, uint64_t *s, unsigned &n,
-    bool first = true, bool last = true, uint8_t *pass_area = nullptr, uint64_t pass_va = 0)
+    bool first = true, bool last = true, uint8_t *pass_area = nullptr, uint64_t pass_va = 0, uint8_t *ir = nullptr,
+    uint64_t ir_va = 0)
 {
     // ONE MALI PASS FOR A RUN OF DRAWS (the stream loop: the draws of one Metal pass, one after the other into the same
     // attachments): the first opens it -- the tiler context, the framebuffer and its targets, the preload -- each draw
@@ -851,6 +980,15 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         srt = t_va | MALI_TABLES;
     }
     uint64_t vs_fau_va = area_va + vs_at, fs_fau_va = area_va + fs_at;
+    if (first && ir != nullptr) {
+        *(uint64_t *)(ir + 0x10) = 0;
+        if (!dj.clear_only && dj.ir_frag_spd != 0) {
+            *(uint64_t *)(ir + 0x10) = 1;                                       // (emitIr when the pass ends)
+            s[n++] = move48(76, ir_va + IR_HANDLER);
+            s[n++] = move32(78, IR_HANDLER_BYTES);
+            s[n++] = 25ULL << 56 | 76ULL << 40 | 78ULL << 32 | 2;              // SET_EXCEPTION_HANDLER: tiler OOM
+        }
+    }
     if (dj.load && first) {
         // THE LOAD ACTION: the target's own pixels drawn first, one triangle over it whose fragment is the target's
         // texel (texture 0, txf), into the same tiler context as the draw -- the tile buffer preloaded through the
@@ -994,6 +1132,12 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         s[n++] = 49ULL << 56 | 1ULL << 32;                                      // HEAP_OPERATION: vertex/tiler completed
         s[n++] = WAIT_ALL;
     }
+    const bool ir_on = ir != nullptr && *(uint64_t *)(ir + 0x10) != 0;
+    if (ir_on) {
+        s[n++] = move48(76, 0);                                                 // the handler off: tiling is done
+        s[n++] = move32(78, 0);
+        s[n++] = 25ULL << 56 | 76ULL << 40 | 78ULL << 32 | 2;
+    }
     if (!first) {
         // the targets written back as the last draw stores them (the pass's descriptors are the first draw's)
         auto *prt = (uint32_t *)(pass_area + rt_at);
@@ -1007,7 +1151,15 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
                 (dj.has_s && dj.s_write ? 1u << 8 : 0);
         }
     }
-    s[n++] = move48(40, (pass_va + 0x80) | 1 | (dj.zs ? 2u : 0u) | (dj.rts - 1) << 2);   // the framebuffer descriptor, its targets
+    if (ir_on) {
+        // the framebuffer descriptor: the pass's own, or after a flush its copy that loads what the flushes stored
+        emitIr(d, dj, pass_area, pass_va, ir, ir_va, rt_at);
+        s[n++] = move48(76, ir_va);
+        s[n++] = 20ULL << 56 | 40ULL << 48 | 76ULL << 40 | 0x3ULL << 16 | 8;   // LOAD_MULTIPLE r40-r41 <- [r76 + 8]
+        s[n++] = wait_on(1);
+    } else {
+        s[n++] = move48(40, (pass_va + 0x80) | 1 | (dj.zs ? 2u : 0u) | (dj.rts - 1) << 2);   // the framebuffer descriptor, its targets
+    }
     s[n++] = move32(42, 0);
     s[n++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
     s[n++] = move48(44, 0);                                                     // no tile enable map (r44 held the
@@ -1017,13 +1169,20 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     // the pass finished, as panvk ends one: the tiler context's completed top and bottom (byte 40, four words) into
     // r70-r73, and FINISH_FRAGMENT gives that heap memory back and counts the pass done. Without it a queue drew one
     // pass and then binned nothing (the heap's in-flight passes never went down).
+    // (A CLEAR -- no tiling, no heap pass started -- does not: counted done, the firmware's count of the heap's passes
+    // in flight went one below the truth, and a later pass that ran out of heap had "none in flight": its tiler OOM
+    // handler never ran and the queue waited for good)
+    if (dj.clear_only) {
+        return;
+    }
     s[n++] = move48(74, pass_va);
     s[n++] = 20ULL << 56 | 70ULL << 48 | 74ULL << 40 | 0xfULL << 16 | 40;      // LOAD_MULTIPLE r70-73 <- [r74 + 40]
     s[n++] = WAIT_ALL;
     s[n++] = 11ULL << 56 | 70ULL << 40 | 72ULL << 32 | 1;                       // FINISH_FRAGMENT: chunks r70..r72, count it
     s[n++] = WAIT_ALL;
 }
-constexpr unsigned DRAW_WORDS = 62 + 45; // (instructions emitDraw writes, at most: the preload's 45 included)
+constexpr unsigned DRAW_WORDS = 62 + 45 + 10; // (instructions emitDraw writes, at most: the preload's 45 and the
+                                              // tiler OOM handler's on/off included)
 
 // whether draw B goes on in the Mali pass draw A is in: the same attachments, and B keeps what is in them (Load)
 bool
@@ -1240,8 +1399,11 @@ namespace {
 bool
 openDraws(hakios_metal_device *d)
 {
+    // (HAKIOS_MALI_HEAP_CHUNKS=N: the heap's most chunks, 5 to 64 -- a test of incremental rendering, mali_draw_test)
+    const char *most = getenv("HAKIOS_MALI_HEAP_CHUNKS");
+    uint32_t max_chunks = most != nullptr && atoi(most) >= 5 && atoi(most) <= 64 ? (uint32_t)atoi(most) : 64;
     struct { uint32_t vm_id, initial, chunk_size, max_chunks, in_flight, handle; uint64_t ctx, first; } th =
-        { d->vm, 5, 2u << 20, 64, 65535, 0, 0, 0 };
+        { d->vm, 5, 2u << 20, max_chunks, 65535, 0, 0, 0 };
     if (d->call(0x4b /* TILER_HEAP_CREATE */, &th, sizeof(th)) != 0) {
         fail("HakiosGPU: no tiler heap (hakios-kernel with heaps, 11-05 or later)");
         return false;
@@ -1612,11 +1774,17 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
         }
         cb->timestamp_count = 0;
         uint64_t fau_area = (words * 8 + 0xff) & ~0xffULL, fau_size = 0;
-        std::vector<uint64_t> fau_at(cb->blits.size());
+        std::vector<uint64_t> fau_at(cb->blits.size()), ir_at(cb->blits.size(), 0);
         for (size_t i = 0; i < cb->blits.size(); i++) {
             fau_at[i] = fau_area + fau_size;
             if (cb->blits[i].shader == DRAW) {
                 fau_size += (drawBytes(cb->draws[cb->blits[i].dst]) + 0x3f) & ~0x3fULL;
+                // a Mali pass's first draw: the pass's incremental rendering (emitIr) after its area
+                if (i == 0 || cb->blits[i - 1].shader != DRAW ||
+                    !samePass(cb->draws[cb->blits[i - 1].dst], cb->draws[cb->blits[i].dst])) {
+                    ir_at[i] = fau_area + fau_size;
+                    fau_size += IR_BYTES;
+                }
                 continue;
             }
             // (a dispatch: its push constants, then its local storage descriptor, 64-byte aligned)
@@ -1656,6 +1824,8 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
             }
             uint8_t *pass_area = nullptr;           // the open Mali pass's first draw (emitDraw), or none
             uint64_t pass_va = 0;
+            uint8_t *pass_ir = nullptr;             // ... and its incremental rendering (emitIr)
+            uint64_t pass_ir_va = 0;
             for (size_t i = 0; i < cb->blits.size(); i++) {
                 const Job &b = cb->blits[i];
                 auto *pc = (uint8_t *)cb->stream.cpu + fau_at[i];
@@ -1667,6 +1837,8 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                     if (first) {
                         pass_area = pc;
                         pass_va = cb->stream.va + fau_at[i];
+                        pass_ir = ir_at[i] != 0 ? (uint8_t *)cb->stream.cpu + ir_at[i] : nullptr;
+                        pass_ir_va = ir_at[i] != 0 ? cb->stream.va + ir_at[i] : 0;
                     }
                     // (metal_stats: STORE_STATE timestamp, opcode 40, into the command buffer's timestamps, r80:r81
                     // the address; after everything before it is done)
@@ -1678,7 +1850,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                         }
                     };
                     if (first) stamp();
-                    emitDraw(d, dj, pc, cb->stream.va + fau_at[i], s, n, first, last, pass_area, pass_va);
+                    emitDraw(d, dj, pc, cb->stream.va + fau_at[i], s, n, first, last, pass_area, pass_va, pass_ir, pass_ir_va);
                     if (last) stamp();
                     cb->draw_areas.push_back(fau_at[i]);
                     if (last) {
@@ -3313,6 +3485,16 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         dj.pre_pos_spd = pre->pos_spd;
         dj.pre_frag_spd = pre->frag_spd;
         dj.pre_target = t;                              // (held with the draw's target below)
+    }
+    {
+        static const bool no_ir = bootArg("metal_noir");
+        hakios_metal_program *irp = no_ir ? nullptr : loads ? pre : preloadProgram(d, rts);
+        float full_scale[3] = { (float)t->width / 2, -(float)t->height / 2, 1 }, full_offset[3] = { (float)t->width / 2, (float)t->height / 2, 0 };
+        if (irp != nullptr &&
+            stagePushConstants(irp->fs, nullptr, nullptr, 0, full_scale, full_offset, 0, 0, dj.ir_fs_fau, used)) {
+            dj.ir_frag_spd = irp->frag_spd;
+            dj.ir_target = t;
+        }
     }
     // the blend descriptor: enabled; the tile buffer loaded when the equation or the mask reads it; opaque (mode 1)
     // for a plain replace of every channel, fixed function (2) otherwise
