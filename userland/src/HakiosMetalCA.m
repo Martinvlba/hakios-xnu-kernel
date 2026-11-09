@@ -4539,6 +4539,26 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 	}
 	(void)hakios_metal_texture_replace(_texture, 0, 0, (unsigned)w, (unsigned)h, rows, (uint64_t)w * 4);
 	free(rows);
+	if (hm_boot_arg_set("metal_ycbcrsay")) {
+		/* (each conversion: its surface, seed and the planes' means -- a picture converted before its decoder had written
+		 * it shows as chroma far from 128) */
+		unsigned long ys = 0, cbs = 0, crs = 0, n = 0, cn = 0;
+		for (size_t j = 0; j < h; j += 8) {
+			for (size_t i = 0; i < w; i += 8) {
+				ys += luma[j * lumaRow + i];
+				n++;
+			}
+		}
+		for (size_t j = 0; j < ch; j += 4) {
+			for (size_t i = 0; i + 1 < cw * 2; i += 8) {
+				cbs += chroma[j * chromaRow + i];
+				crs += chroma[j * chromaRow + i + 1];
+				cn++;
+			}
+		}
+		hm_print("ycbcr: surface %u seed %u %zux%zu converted at %.3f: mean Y %lu Cb %lu Cr %lu\n", IOSurfaceGetID(_iosurface),
+			 IOSurfaceGetSeed(_iosurface), w, h, hm_now(), n ? ys / n : 0, cn ? cbs / cn : 0, cn ? crs / cn : 0);
+	}
 }
 
 - (void)hakiosRefreshShadow

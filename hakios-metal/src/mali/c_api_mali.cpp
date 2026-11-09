@@ -24,6 +24,7 @@
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <sys/sysctl.h>
 #include <chrono>
 #include <sys/stat.h>
@@ -31,6 +32,7 @@
 #include <dlfcn.h>
 #include <mach-o/loader.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdarg>
@@ -717,6 +719,7 @@ struct DrawJob {
     uint64_t ir_frag_spd = 0;
     std::vector<uint32_t> ir_fs_fau;
     hakios_metal_texture *ir_target = nullptr;          // colour attachment 0 (held as the draw's target)
+    hakios_metal_texture *target_tex = nullptr;         // ... always (boot-arg metal_glitchsay's scan)
     uint64_t zs_frag_spd = 0;                           // depth/stencil Load: the pre-frame shader that loads them
     std::vector<uint32_t> zs_fs_fau;
     // colour attachments 1 to 3 (rts > 1): each one's address, rows, RT word 1, clear, write, load, blend, texture
@@ -1365,6 +1368,7 @@ drawBytes(const DrawJob &dj)
 
 namespace {
 void passStats(hakios_metal_cb *cb);
+void glitchScan(hakios_metal_cb *cb, bool before);
 bool bootArg(const char *word);
 }  // namespace
 
@@ -1504,6 +1508,7 @@ struct hakios_metal_queue {
                         us(cb->submitted_at, cb->waited_at), us(cb->waited_at, now), cb->blits.size());
                 }
             }
+            glitchScan(cb, false);
             device->giveStream(cb->stream);
             if (cb->timestamps.size != 0) {
                 device->freeBo(cb->timestamps);
@@ -1898,6 +1903,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
     cb->callback = callback;
     cb->context = context;
     cb->committed_at = std::chrono::steady_clock::now();
+    glitchScan(cb, true);
     cb->status = HAKIOS_METAL_COMMITTED;
     if (!cb->error.empty()) {
         cb->status = HAKIOS_METAL_ERROR;
@@ -2440,6 +2446,84 @@ hakios_metal_cb_dispatch_threads(hakios_metal_cb *cb, hakios_metal_kernel *k, co
 namespace {
 // BOOT-ARG metal_stats: a command buffer that took 40 ms or more from its commit to its completion, said pass by pass
 // (each Mali pass: target size, draws, whether it preloads, its first program; the copies and dispatches between)
+// (boot-arg metal_glitchsay: every target a finished command buffer drew into, sampled a row in 16: rows mostly pure
+// blue or cyan -- the tester's video of a launch, 11-09 -- said with the command buffer's draws, once each up to 30)
+void
+glitchScan(hakios_metal_cb *cb, bool before)
+{
+    static const bool on = bootArg("metal_glitchsay");
+    static std::atomic<unsigned> said{0}, mapped{0};
+    if (!on || said >= 30) return;
+    std::vector<hakios_metal_texture *> targets;
+    for (const DrawJob &dj : cb->draws) {
+        auto add = [&](hakios_metal_texture *t) {
+            if (t != nullptr && t->bytes == 4 && t->samples == 1 && std::find(targets.begin(), targets.end(), t) == targets.end())
+                targets.push_back(t);
+        };
+        add(dj.target_tex);
+        for (unsigned i = 1; i < dj.rts; i++) if (!dj.more[i - 1].missing) add(dj.more[i - 1].texture);
+    }
+    std::string bad;
+    std::vector<uint32_t> row;
+    for (hakios_metal_texture *t : targets) {
+        bool bgra = t->format == 80 || t->format == 81;
+        unsigned rows_bad = 0, first = 0;
+        row.resize(t->width);
+        for (unsigned y = 0; y < t->height; y += 16) {
+            if (hakios_metal_texture_read(t, 0, y, t->width, 1, row.data(), t->width * 4) != 0) break;
+            unsigned n = 0;
+            for (unsigned x = 0; x < t->width; x++) {
+                uint32_t v = row[x];
+                unsigned r = bgra ? (v >> 16) & 0xff : v & 0xff, g = (v >> 8) & 0xff, b = bgra ? v & 0xff : (v >> 16) & 0xff;
+                n += (b == 255 && g < 8 && r < 8) || (b == 255 && g == 255 && r < 100);
+            }
+            if (n * 10 > t->width * 6) { if (rows_bad++ == 0) first = y; }
+        }
+        if (rows_bad != 0) {
+            char line[160];
+            snprintf(line, sizeof(line), " [target %p %ux%u format %u: %u rows blue/cyan from y %u]", (void *)t, t->width,
+                t->height, t->format, rows_bad, first);
+            bad += line;
+            if (mapped++ < 2) {
+                // a coarse map of it: k black, w white, b blue, c cyan, r red, g green, y yellow, m magenta, . other
+                for (unsigned gy = 0; gy < 30; gy++) {
+                    char cells[64];
+                    unsigned y = gy * t->height / 30, n = 0;
+                    if (hakios_metal_texture_read(t, 0, y, t->width, 1, row.data(), t->width * 4) != 0) break;
+                    for (unsigned gx = 0; gx < 27; gx++) {
+                        uint32_t v = row[gx * t->width / 27];
+                        unsigned r = bgra ? (v >> 16) & 0xff : v & 0xff, g = (v >> 8) & 0xff, b = bgra ? v & 0xff : (v >> 16) & 0xff;
+                        auto hi = [](unsigned c) { return c > 200; };
+                        auto lo = [](unsigned c) { return c < 60; };
+                        char ch = lo(r) && lo(g) && lo(b) ? 'k' : hi(r) && hi(g) && hi(b) ? 'w' : lo(r) && lo(g) && hi(b) ? 'b' :
+                            lo(r) && hi(g) && hi(b) ? 'c' : hi(r) && lo(g) && lo(b) ? 'r' : lo(r) && hi(g) && lo(b) ? 'g' :
+                            hi(r) && hi(g) && lo(b) ? 'y' : hi(r) && lo(g) && hi(b) ? 'm' : '.';
+                        cells[n++] = ch;
+                    }
+                    cells[n] = 0;
+                    fprintf(stderr, "hakios-metal: glitch map %p %s %2u %s\n", (void *)t, before ? "before" : "after", gy, cells);
+                }
+            }
+        }
+    }
+    if (bad.empty()) return;
+    said++;
+    fprintf(stderr, "hakios-metal: glitch: a command buffer %s blue/cyan rows in%s; its draws:\n",
+        before ? "FOUND, before it ran," : "left", bad.c_str());
+    for (size_t i = 0; i < cb->draws.size(); i++) {
+        const DrawJob &dj = cb->draws[i];
+        std::string tex;
+        for (unsigned k = 0; k < dj.texture_count; k++) {
+            char one[64];
+            hakios_metal_texture *x = dj.textures[k];
+            snprintf(one, sizeof(one), " %ux%u/%u", x ? x->width : 0, x ? x->height : 0, x ? x->format : 0);
+            tex += one;
+        }
+        fprintf(stderr, "hakios-metal: glitch:  %zu %s into %p %ux%u (rts %u, load %d, clear_only %d, zs %d), textures%s\n", i,
+            dj.name, (void *)dj.target_tex, dj.width, dj.height, dj.rts, dj.load, dj.clear_only, dj.zs, tex.c_str());
+    }
+}
+
 void
 passStats(hakios_metal_cb *cb)
 {
@@ -3537,8 +3621,38 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     if (!p->upload(d)) {
         return -1;
     }
+    {
+        // (boot-arg metal_progsay: each program's first draw, with the time since boot as the kernel log's)
+        static const bool say = bootArg("metal_progsay");
+        if (say) {
+            static std::mutex m;
+            static std::vector<const void *> seen;
+            std::lock_guard<std::mutex> g(m);
+            if (std::find(seen.begin(), seen.end(), (const void *)p) == seen.end()) {
+                seen.push_back(p);
+                mach_timebase_info_data_t tb;
+                mach_timebase_info(&tb);
+                double t = (double)mach_absolute_time() * tb.numer / tb.denom / 1e9;
+                fprintf(stderr, "hakios-metal: first draw of %s at %.3f s: fs push words %u, textures %u, samplers %u, blend "
+                    "in shader 0x%x, written 0x%x, read 0x%x, target %ux%u format %u, samples %u, %u vertices x %u\n",
+                    p->name, t, p->fs.fau_words, fs_texture_count, fs_sampler_count, p->shader_blend.mask, p->fs.rt_written,
+                    p->fs.rt_read, pass && pass->color0 ? pass->color0->width : 0, pass && pass->color0 ? pass->color0->height : 0, pass && pass->color0 ? pass->color0->format : 0, p->samples,
+                    vertex_count, instance_count);
+                for (unsigned i = 0; i < 4; i++) {
+                    if (p->shader_blend.mask & 1u << i) {
+                        const mali_blend_rt &b = p->shader_blend.rt[i];
+                        fprintf(stderr, "hakios-metal:   %s: target %u blended in the shader: ops %u/%u, factors %u %u / %u %u, "
+                            "write mask 0x%x; blend colour %g %g %g %g\n", p->name, i, b.rgb_op, b.alpha_op, b.src_rgb, b.dst_rgb,
+                            b.src_alpha, b.dst_alpha, b.write_mask, pass->blend_color[0], pass->blend_color[1],
+                            pass->blend_color[2], pass->blend_color[3]);
+                    }
+                }
+            }
+        }
+    }
     DrawJob dj = {};
     dj.samples = t->samples;
+    dj.target_tex = t;
     std::vector<hakios_metal_buffer *> used;
     struct hakios_metal_viewport vp = viewport ? *viewport :
         hakios_metal_viewport{ 0, 0, (double)t->width, (double)t->height, 0, 1 };
