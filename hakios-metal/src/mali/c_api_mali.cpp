@@ -28,6 +28,8 @@
 #include <sys/sysctl.h>
 #include <chrono>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <mach-o/loader.h>
@@ -2827,6 +2829,44 @@ cacheOn()
     return on != 0;
 }
 
+// THE CACHE'S SIZE (TODO 17): a key holds this library's build (fnvImage), so every new build leaves the old entries
+// behind for good -- on a test phone each build. Over CACHE_MOST bytes, the least recently used files (their mtime:
+// cacheLoad touches what it reads) go until CACHE_LEAST remain. Once a process, in the background.
+constexpr uint64_t CACHE_MOST = 64ull << 20, CACHE_LEAST = 48ull << 20;
+
+void
+cacheTrim(const std::string &dir)
+{
+    DIR *d = opendir(dir.c_str());
+    if (d == nullptr) return;
+    struct Entry { std::string path; time_t mtime; uint64_t size; };
+    std::vector<Entry> files;
+    uint64_t total = 0;
+    while (struct dirent *e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        std::string p = dir + "/" + e->d_name;
+        struct stat st;
+        if (stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            files.push_back({ p, st.st_mtime, (uint64_t)st.st_size });
+            total += (uint64_t)st.st_size;
+        }
+    }
+    closedir(d);
+    if (total <= CACHE_MOST) return;
+    std::sort(files.begin(), files.end(), [](const Entry &a, const Entry &b) { return a.mtime < b.mtime; });
+    unsigned removed = 0;
+    uint64_t was = total;
+    for (const Entry &f : files) {
+        if (total <= CACHE_LEAST) break;
+        if (unlink(f.path.c_str()) == 0) {
+            total -= f.size;
+            removed++;
+        }
+    }
+    fprintf(stderr, "hakios-metal: the shader cache was %llu KB: %u of its oldest files removed, %llu KB left\n",
+        (unsigned long long)(was >> 10), removed, (unsigned long long)(total >> 10));
+}
+
 const std::string &
 cacheDir()
 {
@@ -2841,6 +2881,10 @@ cacheDir()
                 dir = t;
                 break;
             }
+        }
+        if (!dir.empty()) {
+            std::string d = dir;
+            std::thread([d] { cacheTrim(d); }).detach();
         }
     });
     return dir;
@@ -2945,8 +2989,10 @@ bool
 cacheLoad(uint64_t key, mali_kernel_binary *vs, mali_kernel_binary *fs)
 {
     if (!cacheOn() || cacheDir().empty()) return false;
-    int fd = open(cachePath(key).c_str(), O_RDONLY);
+    std::string path = cachePath(key);
+    int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) return false;
+    utimes(path.c_str(), nullptr);              // (used now: the trim keeps it)
     char magic[8];
     uint64_t k = 0;
     uint32_t struct_size = 0;
