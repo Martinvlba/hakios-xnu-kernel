@@ -227,6 +227,19 @@ static uint32_t gShownSurface;
 /* (the same for the GPU service, 11-10: a surface drawn into while it is on the panel is counted there) */
 extern "C" { uint32_t hakios_fb_shown_surface(void); }
 uint32_t hakios_fb_shown_surface(void) { return gShownSurface; }
+/* (11-10, a diagnostic: the GPU driver says these when the surface on the panel is drawn into) */
+static volatile uint32_t gFBPresented, gFBPresentedSurface, gFBShown;
+extern "C" { void hakios_fb_swap_state(uint32_t *presented, uint32_t *presented_surface, uint32_t *shown); }
+/* (11-10) what the GPU service's submission gate (HakiosGPU kHakiosSurfaceGate) sleeps on: woken at each change */
+extern "C" { void *hakios_fb_shown_event(void); }
+void *hakios_fb_shown_event(void) { return (void *) &gShownSurface; }
+void
+hakios_fb_swap_state(uint32_t *presented, uint32_t *presented_surface, uint32_t *shown)
+{
+	*presented = gFBPresented;
+	*presented_surface = gFBPresentedSurface;
+	*shown = gFBShown;
+}
 SYSCTL_UINT(_kern_hakios, OID_AUTO, fb_surface, CTLFLAG_RD | CTLFLAG_LOCKED, &gShownSurface, 0, "the IOSurface last put on the panel");
 
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
@@ -1595,9 +1608,12 @@ IOMobileFramebuffer::swapShown(uint32_t id)
 {
 	IOLockLock(fSwapLock);
 	fSwapShownID = id;
+	gFBShown = id;
 	IOLockWakeup(fSwapLock, &fSwapShownID, false);
 	IOLockUnlock(fSwapLock);
 }
+
+static uint32_t gSwapWaitCalls, gSwapWaitBlocked, gSwapWaitAhead, gSwapWaitTimeouts;
 
 void
 IOMobileFramebuffer::swapWait(uint32_t id)
@@ -1609,8 +1625,27 @@ IOMobileFramebuffer::swapWait(uint32_t id)
 	}
 	clock_interval_to_deadline(50, kMillisecondScale, &deadline);
 	IOLockLock(fSwapLock);
+	{
+		/* (11-10: SwapWait's calls counted, and the first ones said -- the surface on the panel was drawn into anyway) */
+		static uint32_t calls, said;
+
+		calls++;
+		gSwapWaitCalls = calls;
+		if (said < 12) {
+			said++;
+			IOLog("MiniIOMobileFramebuffer: SwapWait(%u): presented %u, shown %u -- %s\n", id, fSwapPresentedID, fSwapShownID,
+			    (int32_t) (fSwapShownID - id) >= 0 ? "shown already" : (int32_t) (fSwapPresentedID - id) < 0 ?
+			    "not presented yet: not waited for" : "waited for");
+		}
+	}
+	if ((int32_t) (fSwapShownID - id) < 0 && (int32_t) (fSwapPresentedID - id) >= 0) {
+		gSwapWaitBlocked++;
+	} else if ((int32_t) (fSwapPresentedID - id) < 0) {
+		gSwapWaitAhead++;
+	}
 	while ((int32_t) (fSwapShownID - id) < 0 && (int32_t) (fSwapPresentedID - id) >= 0) {
 		if (IOLockSleepDeadline(fSwapLock, &fSwapShownID, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) {
+			gSwapWaitTimeouts++;
 			break;
 		}
 	}
@@ -1669,6 +1704,8 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 	unsigned slot = (fSwapFirst + fSwapsWaiting) % SWAP_QUEUE;
 
 	fSwapPresentedID = swapWord(swap, SWAP_ID);
+	gFBPresented = fSwapPresentedID;
+	gFBPresentedSurface = swapWord(swap, SWAP_SURFACE(0));
 	memcpy(fSwap[slot], swap, SWAP_SIZE);
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
@@ -1971,6 +2008,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 			fZCHeld = held;
 			gShownSurface = swapWord(swap, SWAP_SURFACE(0));
+			thread_wakeup((event_t) &gShownSurface);  /* (the GPU's submissions held for the surface before: let go) */
 			if (++gZCFrames % 600 == 1) {
 				uint64_t waited = 0;
 
@@ -1978,6 +2016,8 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				IOLog("MiniIOMobileFramebuffer: zero copy: %u frames scanned out where they were drawn, %u copied; "
 				    "the panel took them %llu us after on average (%llu not within 25 ms)\n", gZCFrames, gZCCopied,
 				    gZCWaits ? waited / 1000 / gZCWaits : 0, gZCWaitLate);
+				IOLog("MiniIOMobileFramebuffer: SwapWait: %u calls, %u waited, %u for a swap not presented yet, %u timed out\n",
+				    gSwapWaitCalls, gSwapWaitBlocked, gSwapWaitAhead, gSwapWaitTimeouts);
 			}
 			drawn = mach_absolute_time();
 			fSwapsShown++;
@@ -2032,6 +2072,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			if (layer == 0) {
 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
 				gShownSurface = sid;
+				thread_wakeup((event_t) &gShownSurface);
 			}
 		}
 	}
