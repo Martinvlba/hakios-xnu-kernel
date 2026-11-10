@@ -1263,6 +1263,25 @@ commandBufferDone(__unused hakios_metal_cb *cb, void *context)
 	[self release];
 }
 
+/*
+ * Metal's scheduled handlers, once the command buffer's work is with the GPU (hakios_metal_cb_commit calls this right
+ * after its submission, before the completed handlers can run). CoreAnimation presents a frame from one, and the
+ * framebuffer waits for the GPU work submitted before a presentation: run before the submission, as they were until
+ * 11-10, they let the panel show surfaces the GPU had not drawn yet.
+ */
+static void
+commandBufferScheduled(__unused hakios_metal_cb *cb, void *context)
+{
+	id self = (id)context;
+	struct commandbuffer *c = slotState(self);
+
+	@autoreleasepool {
+		for (void (^handler)(id) in c->scheduled) {
+			handler(self);
+		}
+	}
+}
+
 static void
 commandBufferCommit(id self, __unused SEL _cmd)
 {
@@ -1272,8 +1291,8 @@ commandBufferCommit(id self, __unused SEL _cmd)
 		return;
 	}
 	c->committed = YES;
-	for (void (^handler)(id) in c->scheduled) {
-		handler(self);
+	if (c->scheduled.count > 0) {
+		hakios_metal_cb_on_scheduled(c->cb, commandBufferScheduled, self);
 	}
 	hakios_metal_cb_commit(c->cb, commandBufferDone, [self retain]);
 }

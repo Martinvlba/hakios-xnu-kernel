@@ -122,6 +122,8 @@ struct hakios_metal_queue {
     ~hakios_metal_queue() { deferrer.reset(); }
 };
 struct hakios_metal_cb {
+    void (*scheduled)(hakios_metal_cb*, void*) = nullptr;     // (hakios_metal_cb_on_scheduled)
+    void* scheduled_context = nullptr;
     std::shared_ptr<CommandBuffer> cb;
     // hakios_metal_cb_set_vertex_textures's tables, sticky as an encoder's state is: the texture objects held so that
     // what a later draw names is alive, the samplers copied (their four words are all a draw takes)
@@ -1643,8 +1645,18 @@ void hakios_metal_cb_fail(hakios_metal_cb* cb, const char* why) {
     cb->cb->refuse(why != nullptr ? why : "refused");
 }
 
+void hakios_metal_cb_on_scheduled(hakios_metal_cb* cb, void (*scheduled)(hakios_metal_cb*, void*), void* context) {
+    cb->scheduled = scheduled;
+    cb->scheduled_context = context;
+}
+
 void hakios_metal_cb_commit(hakios_metal_cb* cb, void (*callback)(hakios_metal_cb*, void*), void* context) {
     if (deferring(cb)) return cb->deferrer->post(&cb->pending, [cb, callback, context] { hakios_metal_cb_commit(cb, callback, context); });
+    if (cb->scheduled != nullptr) {    // (where the plug-in ran its scheduled handlers before: the Adreno path as it was)
+        auto scheduled = cb->scheduled;
+        cb->scheduled = nullptr;
+        scheduled(cb, cb->scheduled_context);
+    }
     if (callback != nullptr) {
         cb->cb->addCompletedHandler([cb, callback, context](CommandBuffer&) { callback(cb, context); });
     }

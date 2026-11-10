@@ -554,6 +554,10 @@ void hakios_metal_cb_set_threadgroup_length(hakios_metal_cb *cb, unsigned length
 /* something the caller could not record: the command buffer will end in HAKIOS_METAL_ERROR, saying WHY */
 void hakios_metal_cb_fail(hakios_metal_cb *cb, const char *why);
 /* CALLBACK(CB, CONTEXT) runs once, after completion or error, on the queue's thread; may be NULL */
+/* SCHEDULED(CB, CONTEXT), set before the commit: runs once during it, as soon as the work is with the GPU and before
+ * CALLBACK can (Metal's scheduled handlers -- CoreAnimation presents a frame from one, and the display then waits for the
+ * GPU work submitted before the presentation, which must include this); may be NULL */
+void hakios_metal_cb_on_scheduled(hakios_metal_cb *cb, void (*scheduled)(hakios_metal_cb *cb, void *context), void *context);
 void hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb, void *context), void *context);
 void hakios_metal_cb_wait(hakios_metal_cb *cb);
 enum hakios_metal_status hakios_metal_cb_status(hakios_metal_cb *cb);
