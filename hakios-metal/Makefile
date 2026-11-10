@@ -100,10 +100,18 @@ MALI_MESA    ?= $(HAKIOS)/xnu-deps/build/mesa26/out-ios
 IOS_CC       ?= $(patsubst %clang++,%clang,$(firstword $(IOS_CXX))) $(wordlist 2,99,$(IOS_CXX))
 IOS_LIBTOOL  ?= $(if $(filter Darwin,$(shell uname)),xcrun libtool,$(abspath $(HAKIOS))/xnu-deps/host/bin/libtool)
 
+# the compiled-program cache's key on the phone (c_api_mali.cpp: cacheKey), as IOS_CACHE_BUILD below for the Adreno: what
+# the compiler is made of -- compile_mali.c/.h, Mesa's flags and archives (the AIR front end among them) -- not the
+# library's own image, so that a rebuild that leaves the compiler alone keeps the phone's cache (11-10: every rebuild of
+# the plug-in compiled CoreAnimation's seven uber pipelines again, 20-27 s each, after the next boot)
+MALI_CACHE_BUILD = $(shell cat src/mali/compile_mali.c src/mali/compile_mali.h $(MALI_MESA)/cflags \
+	$$(cat $(MALI_MESA)/archives 2>/dev/null) 2>/dev/null | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-24)
+
 out/ios-mali/libhakios-metal.a: src/mali/c_api_mali.cpp src/mali/blit_shaders.h src/mali/compile_mali.c src/mali/compile_mali.h \
 		include/hakios-metal/hakios_metal.h $(MALI_MESA)/cflags $(MALI_MESA)/archives
 	@mkdir -p out/ios-mali/obj
-	$(IOS_CXX) $(IOS_CXXFLAGS) -Iinclude -c src/mali/c_api_mali.cpp -o out/ios-mali/obj/c_api_mali.o
+	$(IOS_CXX) $(IOS_CXXFLAGS) -Iinclude $(if $(strip $(MALI_CACHE_BUILD)),-DHAKIOS_MALI_CACHE_BUILD='"$(MALI_CACHE_BUILD)"') \
+		-c src/mali/c_api_mali.cpp -o out/ios-mali/obj/c_api_mali.o
 	eval $(IOS_CC) $$(cat $(MALI_MESA)/cflags) -DAIR_MESA_NEW_NIR -Werror -Wno-unused-command-line-argument \
 		-c src/mali/compile_mali.c -o out/ios-mali/obj/compile_mali.o
 	rm -f $@ && $(IOS_LIBTOOL) -static -no_warning_for_no_symbols -o $@ out/ios-mali/obj/c_api_mali.o \

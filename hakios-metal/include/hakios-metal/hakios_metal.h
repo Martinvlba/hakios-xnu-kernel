@@ -160,6 +160,9 @@ hakios_metal_texture *hakios_metal_texture_new_iosurface(hakios_metal_device *de
  * it. _mirrored: 1 for such a texture (or a view of one). _surface_changed: the CPU (or anything but this device's command
  * buffers) changed the surface -- the mirror is filled again from it, now. Both do nothing where there is no mirror. */
 int hakios_metal_texture_mirrored(hakios_metal_texture *texture);
+/* Metal's memoryless storage (MTLStorageModeMemoryless): contents undefined past a render pass, never read. Where the GPU
+ * has a tile buffer (the Mali), an extra colour attachment of it stays there: never loaded nor stored. */
+void hakios_metal_texture_set_memoryless(hakios_metal_texture *texture, int on);
 void hakios_metal_texture_surface_changed(hakios_metal_texture *texture);
 /* the same for a two-plane format (YCbCr8_420_2P, 500) over a '420f' or '420v' surface: CHROMA_OFFSET where the surface's
  * second plane starts in its memory (IOSurfaceGetBaseAddressOfPlane(s, 1) less IOSurfaceGetBaseAddress(s)) and

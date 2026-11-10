@@ -497,6 +497,11 @@ struct hakios_metal_texture {
     unsigned origin = 0;                        // 0 its own memory, 1 an IOSurface's, 2 a buffer's, 4 a view's
     unsigned surface = 0;                       // the IOSurface's ID (origin 1)
     bool mirrored = false;                      // ... its memory the surface's mirror (Mirror), not the surface's own
+    bool memoryless = false;                    // Metal's memoryless storage (hakios_metal_texture_set_memoryless): an
+                                                //  extra colour attachment of it lives in the tile buffer alone
+    // (11-10, a diagnostic for metal_stats: CoreAnimation's second colour attachment -- is it ever read?)
+    std::atomic<unsigned> as_extra_rt{0};       // draws it was colour attachment 1-3 of
+    std::atomic<unsigned> reads{0};             // times it was sampled by a draw or dispatch, copied from, or read back
     unsigned levels = 1, samples = 1;
     // a mipmapped texture (levels > 1): level n's rows at offset + level_off[n], level_stride[n] apart, its size
     // levelWidth/levelHeight; the levels' plane descriptors (32 bytes each, level 0 first) at planes_off in BO, written
@@ -748,6 +753,9 @@ struct DrawJob {
         uint32_t rt1, clear, blend[4];
         bool write, load;
         bool missing;                                   // written by the fragment function, absent from the pass
+        bool untouched;                                 // this draw neither writes nor reads it (kept in, loaded and stored)
+        bool memoryless;                                // a memoryless texture's: in the tile buffer only, never loaded/stored
+        bool elide;                                     // no draw of its Mali pass touches it: not loaded, not written back
         hakios_metal_texture *texture;
     } more[3] = {};
 };
@@ -1087,7 +1095,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         const DrawJob::More &m = dj.more[i - 1];
         auto *r = rt + 16 * i;
         r[0] = 1u << 26 | (1024 * i / 16) << 4;
-        r[1] = m.rt1 | (m.write ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);
+        r[1] = m.rt1 | (m.write && !m.elide ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);
         *(uint64_t *)&r[8] = m.va;
         r[10] = m.row_bytes;
         r[11] = m.row_bytes * dj.height;
@@ -1141,7 +1149,15 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         size_t size = sizeof(args) - 1;
         return !(sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, "metal_passinv=0") != nullptr);
     }();
-    if (first && pass_inv && !dj.load && !dj.clear_only) {
+    // (with every target that asked for a load elided -- passElide -- there is nothing to preload)
+    bool preload = dj.load;
+    if (preload && !dj.load0) {
+        preload = false;
+        for (unsigned i = 1; i < dj.rts; i++) {
+            preload = preload || (dj.more[i - 1].load && !dj.more[i - 1].missing && !dj.more[i - 1].elide);
+        }
+    }
+    if (first && pass_inv && !preload && !dj.clear_only) {
         s[n++] = move32(74, 0);
         s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4;                  // FLUSH_CACHE2: LSC clean, others invalidated
         s[n++] = WAIT_ALL;
@@ -1155,7 +1171,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
             s[n++] = 25ULL << 56 | 76ULL << 40 | 78ULL << 32 | 2;              // SET_EXCEPTION_HANDLER: tiler OOM
         }
     }
-    if (dj.load && first) {
+    if (preload && first) {
         // THE LOAD ACTION: the target's own pixels drawn first, one triangle over it whose fragment is the target's
         // texel (texture 0, txf), into the same tiler context as the draw -- the tile buffer preloaded through the
         // ordinary draw path. Caches first, as at a command buffer's start: what an earlier pass wrote back reaches
@@ -1174,7 +1190,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         uint64_t pbl_at = (psrt_at + 0x80 + (2 * nt + 1) * 32 + 0x3f) & ~0x3fULL;
         auto *pbl = (uint32_t *)(area + pbl_at);
         for (unsigned i = 0; i < nt; i++) {
-            bool loads = i == 0 ? dj.load0 : (dj.more[i - 1].load && !dj.more[i - 1].missing);
+            bool loads = i == 0 ? dj.load0 : (dj.more[i - 1].load && !dj.more[i - 1].missing && !dj.more[i - 1].elide);
             auto *b = pbl + 4 * i;
             b[0] = 1u << 9 | (loads ? 0u : 1u);
             b[1] = 0x132 | 0x132 << 12 | (loads ? 0xfu : 0u) << 28;
@@ -1310,7 +1326,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         auto *prt = (uint32_t *)(pass_area + rt_at);
         prt[1] = (prt[1] & ~1u) | (dj.write ? 1u : 0u);
         for (unsigned i = 1; i < dj.rts; i++) {
-            prt[16 * i + 1] = (prt[16 * i + 1] & ~1u) | (dj.more[i - 1].write ? 1u : 0u);
+            prt[16 * i + 1] = (prt[16 * i + 1] & ~1u) | (dj.more[i - 1].write && !dj.more[i - 1].elide ? 1u : 0u);
         }
         if (dj.zs) {
             auto *pfb = (uint32_t *)(pass_area + 0x80);
@@ -1362,7 +1378,7 @@ samePass(const DrawJob &a, const DrawJob &b)
     }
     for (unsigned i = 1; i < a.rts; i++) {
         if (a.more[i - 1].va != b.more[i - 1].va || a.more[i - 1].missing != b.more[i - 1].missing ||
-            (!b.more[i - 1].missing && !b.more[i - 1].load)) {
+            (!b.more[i - 1].missing && !b.more[i - 1].load && !b.more[i - 1].memoryless)) {
             return false;
         }
     }
@@ -1960,6 +1976,42 @@ hakios_metal_cb_fail(hakios_metal_cb *cb, const char *why)
 
 static void mirrorsBack(hakios_metal_cb *cb, hakios_metal_device *d);
 
+/*
+ * AN ATTACHMENT NO DRAW OF A MALI PASS TOUCHES (11-10): CoreAnimation's passes carry a second colour attachment that
+ * most of their draws neither write nor read; each such draw keeps it loaded and stored back unchanged, so a full-screen
+ * Mali pass read and wrote ~10 MB of it for nothing -- Spotlight's opening drew ~8 full-screen passes a frame at 2.1-2.8
+ * ms each, 17-25 ms of GPU time a frame (metal_stats_ms). Over the passes as the encoder will group them (samePass,
+ * which reads none of this), an attachment every draw of the pass leaves untouched is elided: not preloaded, not
+ * written back -- its memory keeps what it had, as a load and a store of it unchanged would leave it. A pass with
+ * nothing else to load has no preload at all. Boot-arg metal_noelide: not done.
+ */
+static void
+passElide(hakios_metal_cb *cb)
+{
+    static const bool off = bootArg("metal_noelide");
+    if (off) return;
+    for (size_t i = 0; i < cb->blits.size(); i++) {
+        if (cb->blits[i].shader != DRAW) continue;
+        size_t k = i;
+        while (k + 1 < cb->blits.size() && cb->blits[k + 1].shader == DRAW &&
+               samePass(cb->draws[cb->blits[k].dst], cb->draws[cb->blits[k + 1].dst])) {
+            k++;
+        }
+        const DrawJob &head = cb->draws[cb->blits[i].dst];
+        for (unsigned r = 1; r < head.rts; r++) {
+            bool all = true;
+            for (size_t j = i; j <= k && all; j++) {
+                const DrawJob::More &m = cb->draws[cb->blits[j].dst].more[r - 1];
+                all = m.untouched && !m.missing;
+            }
+            for (size_t j = i; j <= k; j++) {
+                cb->draws[cb->blits[j].dst].more[r - 1].elide = all;
+            }
+        }
+        i = k;
+    }
+}
+
 void
 hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb, void *context), void *context)
 {
@@ -1969,6 +2021,14 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
     cb->context = context;
     cb->committed_at = std::chrono::steady_clock::now();
     mirrorsBack(cb, d);
+    passElide(cb);
+    // NOT INTO THE SURFACE ON THE PANEL (11-10): the GPU service holds this until the panel has left each surface it draws
+    // into (HakiosGPU 0x80, at most 25 ms) -- CoreAnimation records its next frame into the one still shown, and the GPU
+    // overwrote what the panel was reading. Here, not at the first draw: the recording itself goes on meanwhile.
+    for (unsigned sid : cb->busy) {
+        struct { uint32_t surface; int32_t delta; } r = { sid, 0 };
+        d->call(0x80, &r, sizeof(r));
+    }
     glitchWatchCommit(cb);
     glitchScan(cb, true);
     cb->status = HAKIOS_METAL_COMMITTED;
@@ -2467,6 +2527,7 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
     }
     for (unsigned t = 0; t < j.texture_count; t++) {
         j.textures[t] = t < texture_count ? textures[t] : nullptr;
+        { hakios_metal_texture *rt_ = (j.textures[t]); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     }
     for (unsigned t = 0; t < j.sampler_count && t < sampler_count; t++) {
         if (samplers[t] != nullptr) {
@@ -2914,9 +2975,24 @@ void
 passStats(hakios_metal_cb *cb)
 {
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cb->committed_at).count();
-    if (ms < 40) {
+    // metal_stats_ms=N (11-10): the threshold, 40 ms by default -- Spotlight's opening has buffers of 23-28 ms; at most
+    // 300 said
+    static double limit = -1;
+    static std::atomic<unsigned> said{0};
+    if (limit < 0) {
+        char args[1024] = {0};
+        size_t size = sizeof(args) - 1;
+        const char *at;
+        limit = 40;
+        if (sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && (at = strstr(args, "metal_stats_ms=")) != nullptr) {
+            limit = atof(at + 15);
+        }
+    }
+    if (ms < limit || said >= 300) {
         return;
     }
+    said++;
+    double gpu_sum = 0;
     unsigned passes = 0, draws = 0, loads = 0, other = 0;
     uint64_t pixels = 0;
     std::string list;
@@ -2948,27 +3024,40 @@ passStats(hakios_metal_cb *cb)
                 }
             }
         }
+        unsigned touch1 = 0;                            // (draws of the pass that write or read attachment 1)
+        for (size_t j = i; j <= k; j++) {
+            const DrawJob &x = cb->draws[cb->blits[j].dst];
+            touch1 += x.rts > 1 && !x.more[0].missing && !x.more[0].untouched;
+        }
         double gpu_us = -1;
         if (cb->timestamps.size != 0 && 2 * passes + 1 < cb->timestamp_count) {
             auto *ts = (volatile uint64_t *)cb->timestamps.cpu;
             gpu_us = (double)(ts[2 * passes + 1] - ts[2 * passes]) / 24.576;    // (the system counter: 24.576 MHz)
+            gpu_sum += gpu_us;
         }
         passes++;
         draws += n;
         loads += dj.load;
         pixels += (uint64_t)dj.width * dj.height;
         if (list.size() < 1500) {
-            char one[160];
-            snprintf(one, sizeof(one), " [%.0fus %ux%u %u%s%s %s rts %u%s%s%s]", gpu_us, dj.width, dj.height, n, dj.load ? " L" : "",
+            char one[240];
+            char a1[64] = "";
+            if (dj.rts > 1 && dj.more[0].texture != nullptr && !dj.more[0].missing) {
+                const hakios_metal_texture *x = dj.more[0].texture;
+                snprintf(a1, sizeof(a1), " a1 fmt %u %ux%u: attachment %u times, READ %u", x->format, x->width, x->height,
+                    x->as_extra_rt.load(), x->reads.load());
+            }
+            snprintf(one, sizeof(one), " [%.0fus %ux%u %u%s%s %s rts %u%s t%u%s%s%s]", gpu_us, dj.width, dj.height, n, dj.load ? " L" : "",
                 dj.clear_only ? " C" : "", dj.name ? dj.name : "", dj.rts,
-                dj.rts > 1 ? (dj.more[0].missing ? "m" : dj.more[0].load ? "l" : dj.more[0].write ? "w" : "-") : "",
-                why[0] ? " | " : "", why);
+                dj.rts > 1 ? (dj.more[0].missing ? "m" : dj.more[0].memoryless ? "t" : dj.more[0].elide ? "e" : dj.more[0].load ? "l" :
+                              dj.more[0].write ? "w" : "-") : "",
+                touch1, a1, why[0] ? " | " : "", why);
             list += one;
         }
         i = k;
     }
-    fprintf(stderr, "hakios-metal: stats: %.1f ms: %u Mali passes (%u preload), %u draws, %u copies/dispatches, %.1f MP of "
-        "targets:%s\n", ms, passes, loads, draws, other, pixels / 1e6, list.c_str());
+    fprintf(stderr, "hakios-metal: stats: %.1f ms (the passes' GPU time %.1f ms): %u Mali passes (%u preload), %u draws, %u "
+        "copies/dispatches, %.1f MP of targets:%s\n", ms, gpu_sum / 1e3, passes, loads, draws, other, pixels / 1e6, list.c_str());
 }
 
 // a word in the boot-args (testing switches: metal_nozs)
@@ -3125,6 +3214,7 @@ int
 hakios_metal_texture_read(hakios_metal_texture *t, unsigned x, unsigned y, unsigned w, unsigned h, void *bytes,
     uint64_t bytes_per_row)
 {
+    { hakios_metal_texture *rt_ = (t); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     return copyRows(t, x, y, w, h, (uint8_t *)bytes, bytes_per_row, false);
 }
 
@@ -3311,6 +3401,8 @@ fnvImage(uint64_t &h)
     }
 }
 
+const uint32_t sizeof_binary = sizeof(mali_kernel_binary);
+
 uint64_t
 cacheKey(const void *vs, size_t vs_size, const std::vector<mali_constant> &vc, const void *fs, size_t fs_size,
     const std::vector<mali_constant> &fc, unsigned format, const mali_vertex_fetch *fetch,
@@ -3318,7 +3410,13 @@ cacheKey(const void *vs, size_t vs_size, const std::vector<mali_constant> &vc, c
 {
     uint64_t h = 14695981039346656037ULL;
     fnv(h, kCacheMagic, sizeof(kCacheMagic));
+#ifdef HAKIOS_MALI_CACHE_BUILD
+    // the compiler's own make-up (the Makefile's MALI_CACHE_BUILD), not this library's build: see there
+    fnv(h, HAKIOS_MALI_CACHE_BUILD, sizeof(HAKIOS_MALI_CACHE_BUILD) - 1);
+    fnv(h, &sizeof_binary, sizeof(sizeof_binary));
+#else
     fnvImage(h);
+#endif
     fnv(h, &vs_size, sizeof(vs_size));
     fnv(h, vs, vs_size);
     for (const mali_constant &k : vc) fnv(h, &k, sizeof(k));
@@ -3369,14 +3467,27 @@ readAll(int fd, void *p, size_t n)
     return true;
 }
 
+// (the cache's use, said once a process after 40 looks: 11-10, seven pipelines compiled again at every boot)
+std::atomic<unsigned> cache_hits{0}, cache_misses{0}, cache_bad{0}, cache_unwritten{0};
+void
+cacheSay()
+{
+    unsigned n = cache_hits + cache_misses + cache_bad;
+    if (n == 40) {
+        fprintf(stderr, "hakios-metal: shader cache %s: %u found, %u not there, %u not whole, %u not written (of the first 40 looks)\n",
+            cacheDir().empty() ? "(none: no directory)" : cacheDir().c_str(), (unsigned)cache_hits, (unsigned)cache_misses,
+            (unsigned)cache_bad, (unsigned)cache_unwritten);
+    }
+}
+
 // both stages from the file KEY names; false (and nothing left allocated) when there is none or it is not whole
 bool
 cacheLoad(uint64_t key, mali_kernel_binary *vs, mali_kernel_binary *fs)
 {
-    if (!cacheOn() || cacheDir().empty()) return false;
+    if (!cacheOn() || cacheDir().empty()) { cache_misses++; cacheSay(); return false; }
     std::string path = cachePath(key);
     int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) return false;
+    if (fd < 0) { cache_misses++; cacheSay(); return false; }
     utimes(path.c_str(), nullptr);              // (used now: the trim keeps it)
     char magic[8];
     uint64_t k = 0;
@@ -3395,6 +3506,8 @@ cacheLoad(uint64_t key, mali_kernel_binary *vs, mali_kernel_binary *fs)
         }
     }
     close(fd);
+    (ok ? cache_hits : cache_bad)++;
+    cacheSay();
     if (!ok) {
         free(vs->code);
         free(fs->code);
@@ -3410,7 +3523,7 @@ cacheStore(uint64_t key, const mali_kernel_binary &vs, const mali_kernel_binary 
     if (!cacheOn() || cacheDir().empty()) return;
     std::string path = cachePath(key), tmp = path + "." + std::to_string(getpid()) + ".tmp";
     int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return;
+    if (fd < 0) { cache_unwritten++; return; }
     uint32_t struct_size = sizeof(mali_kernel_binary);
     bool ok = writeAll(fd, kCacheMagic, 8) && writeAll(fd, &key, 8) && writeAll(fd, &struct_size, 4);
     const mali_kernel_binary *b[2] = { &vs, &fs };
@@ -3420,6 +3533,7 @@ cacheStore(uint64_t key, const mali_kernel_binary &vs, const mali_kernel_binary 
     close(fd);
     if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
         unlink(tmp.c_str());
+        cache_unwritten++;
     }
 }
 }  // namespace
@@ -3443,8 +3557,23 @@ hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_siz
         fc[i] = { fs_constants[i].index, fs_constants[i].bits };
     }
     auto *p = new hakios_metal_program;
+    auto t0 = std::chrono::steady_clock::now();
     uint64_t key = cacheKey(vs_bitcode, vs_size, vc, fs_bitcode, fs_size, fc, color_pixel_format, nullptr);
-    if (!cacheLoad(key, &p->vs, &p->fs)) {
+    auto t1 = std::chrono::steady_clock::now();
+    bool found = cacheLoad(key, &p->vs, &p->fs);
+    auto t2 = std::chrono::steady_clock::now();
+    {
+        // (a slow program's time by step, 11-10: CoreAnimation's uber pipelines took 1-3 s with their cache file found)
+        auto ms = [](std::chrono::steady_clock::duration d) {
+            return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+        };
+        if (ms(t2 - t0) >= 200) {
+            fprintf(stderr, "hakios-metal: program %016llx: key %lld ms (bitcode %zu + %zu bytes), cache %s %lld ms (%u + %u bytes of code)\n",
+                (unsigned long long)key, ms(t1 - t0), vs_size, fs_size, found ? "found in" : "not found in", ms(t2 - t1),
+                found ? p->vs.size : 0, found ? p->fs.size : 0);
+        }
+    }
+    if (!found) {
         if (mali_stage_compile(vs_bitcode, vs_size, vc.data(), vs_count, 0, nullptr, &p->vs, why, sizeof(why)) != 0 ||
             mali_stage_compile(fs_bitcode, fs_size, fc.data(), fs_count, 1, &p->vs, &p->fs, why, sizeof(why)) != 0) {
             fail("%s", why);
@@ -4099,7 +4228,10 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     bool loads = refused == nullptr && pass->load_action == 1;
     for (unsigned i = 1; refused == nullptr && i < rts; i++) {
-        loads = loads || (pass->more[i - 1].texture != nullptr &&
+        static const bool no_ml = bootArg("metal_nomemoryless");
+        const bool ml = pass->more[i - 1].texture != nullptr && pass->more[i - 1].texture->memoryless && !no_ml &&
+            !(p->fs.rt_read & 1u << i);         // (a memoryless attachment is not loaded: below)
+        loads = loads || (pass->more[i - 1].texture != nullptr && !ml &&
                           (pass->more[i - 1].load_action == 1 || !(p->fs.rt_written & 1u << i)));
     }
     const unsigned ms4 = t != nullptr && t->samples > 1 ? 4u : 0u;     // (preloads of multisample attachments: a sample a run)
@@ -4220,6 +4352,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     for (unsigned i = 0; i < dj.texture_count; i++) {
         dj.textures[i] = i < fs_texture_count ? fs_textures[i] : nullptr;
+        { hakios_metal_texture *rt_ = (dj.textures[i]); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     }
     for (unsigned i = 0; i < dj.sampler_count && i < fs_sampler_count; i++) {
         if (fs_samplers[i] != nullptr) {
@@ -4350,6 +4483,17 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         }
         m.va = a.texture->gpu();
         m.row_bytes = a.texture->stride;
+        a.texture->as_extra_rt++;
+        /*
+         * MEMORYLESS (11-10): CoreAnimation's second colour attachment is a memoryless texture -- an Apple GPU keeps it in
+         * tile memory, its contents undefined past the pass; it is never sampled, copied or read (128682 draws, 0 reads).
+         * The Mali has a tile buffer too: there it stays, never preloaded nor written back. Loaded and stored as any
+         * other, a full-screen pass moved ~20 MB for it -- Spotlight's opening, ~8 such passes a frame at 2.1-2.8 ms
+         * each. A draw whose fragment function reads it (framebuffer fetch) keeps the load and store, as before.
+         * Boot-arg metal_nomemoryless: as before everywhere.
+         */
+        static const bool no_memoryless = bootArg("metal_nomemoryless");
+        m.memoryless = a.texture->memoryless && !no_memoryless && !(p->fs.rt_read & 1u << i);
         rtFormat(a.texture->format, m.rt1);
         m.write = a.store_action == 1;
         m.load = a.load_action == 1;
@@ -4359,15 +4503,21 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         if (!(p->fs.rt_written & 1u << i)) {
             // not written by this draw: in the pass only to keep the pass whole, exactly as it is -- loaded and stored
             // back unchanged, never cleared here (as when it was left out: CoreAnimation's Settings showed another
-            // cell's label when this draw applied the attachment's Clear/DontCare)
-            m.load = true;
-            m.write = true;
+            // cell's label when this draw applied the attachment's Clear/DontCare). When no draw of the Mali pass
+            // touches it, it is not loaded nor stored at all (passElide)
+            m.load = !m.memoryless;
+            m.write = !m.memoryless;
+            m.untouched = !(p->fs.rt_read & 1u << i) && !p->more_blend_reads_dest[i - 1];
             m.clear = 0;
             m.blend[0] = 1u << 9 | 1u;
             m.blend[1] = 0x132 | 0x132 << 12;           // colour mask 0
             m.blend[2] = 2u | 3 << 3 | i << 16;
             m.blend[3] = 237u << 12;
             continue;
+        }
+        if (m.memoryless) {
+            m.load = false;                             // (its clear, if any, still starts the tile buffer's copy)
+            m.write = false;
         }
         bool reads = p->more_blend_reads_dest[i - 1] || (p->fs.rt_read & 1u << i);
         m.blend[0] = 1u << 9 | (reads ? 1u : 0);
@@ -4659,6 +4809,14 @@ hakios_metal_texture_surface_changed(hakios_metal_texture *t)
     auto it = d->mirrors.find(t->surface);
     if (it != d->mirrors.end()) {
         mirrorFill(d, it->second);
+    }
+}
+
+void
+hakios_metal_texture_set_memoryless(hakios_metal_texture *t, int on)
+{
+    if (t != nullptr) {
+        t->memoryless = on != 0;
     }
 }
 
@@ -5335,6 +5493,7 @@ hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned f
     unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned dx, unsigned dy, unsigned dw, unsigned dh,
     int linear)
 {
+    { hakios_metal_texture *rt_ = (from); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     const char *why = nullptr;
     if (cb != nullptr && to != nullptr) {
         markBusy(cb, cb->queue->device, to);    // (a copy into a surface: the display waits for it too, as for a draw)
@@ -5436,6 +5595,7 @@ hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned f
 int
 hakios_metal_cb_blit_rotated(hakios_metal_cb *cb, hakios_metal_texture *from, hakios_metal_texture *to, unsigned rotation)
 {
+    { hakios_metal_texture *rt_ = (from); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     // destination pixel (x, y) of TO (w x h) from FROM (W x H), normalized: 1 a quarter turn (TO's sides FROM's swapped):
     // u = y / H... each case the source position of the destination's, as a6xx_rotation turns
     if (cb != nullptr && to != nullptr) {
