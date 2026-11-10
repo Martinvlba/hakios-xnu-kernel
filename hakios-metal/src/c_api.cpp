@@ -589,6 +589,10 @@ hakios_metal_texture* textureOverSurface(hakios_metal_device* d, unsigned surfac
 }
 }  // namespace
 
+// (the Mali's mirrors, hakios_metal.h: none on the Adreno -- its core refuses such rows, the plug-in copies them)
+int hakios_metal_texture_mirrored(hakios_metal_texture*) { return 0; }
+void hakios_metal_texture_surface_changed(hakios_metal_texture*) {}
+
 hakios_metal_texture* hakios_metal_texture_new_iosurface(hakios_metal_device* d, unsigned surfaceId, unsigned plane, unsigned pixelFormat, unsigned width,
                                                          unsigned height, unsigned usage) {
     return textureOverSurface(d, surfaceId, plane, pixelFormat, width, height, usage, nullptr);

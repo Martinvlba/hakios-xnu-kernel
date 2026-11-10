@@ -155,6 +155,12 @@ unsigned hakios_metal_texture_samples(hakios_metal_texture *texture);   /* 1, or
  * a depth format. */
 hakios_metal_texture *hakios_metal_texture_new_iosurface(hakios_metal_device *device, unsigned surface_id, unsigned plane,
     unsigned pixel_format, unsigned width, unsigned height, unsigned usage);
+/* A texture over a surface whose rows the GPU cannot sample may stand for it through a MIRROR (the Mali, 11-10: rows not a
+ * multiple of 64 bytes): a copy of the surface the GPU makes and writes back after each command buffer that draws into
+ * it. _mirrored: 1 for such a texture (or a view of one). _surface_changed: the CPU (or anything but this device's command
+ * buffers) changed the surface -- the mirror is filled again from it, now. Both do nothing where there is no mirror. */
+int hakios_metal_texture_mirrored(hakios_metal_texture *texture);
+void hakios_metal_texture_surface_changed(hakios_metal_texture *texture);
 /* the same for a two-plane format (YCbCr8_420_2P, 500) over a '420f' or '420v' surface: CHROMA_OFFSET where the surface's
  * second plane starts in its memory (IOSurfaceGetBaseAddressOfPlane(s, 1) less IOSurfaceGetBaseAddress(s)) and
  * CHROMA_ROW_BYTES its rows; both planes are sampled as one texture. */
