@@ -1,0 +1,7 @@
+# The App Library (the home screen's rightmost page) at rest, its layers said (com.hakios.layers, inject_sb.c: a layer's
+# IOSurface sampled too), then a pause (rec-trans.sh fetches the screen recording in a "wait 20"): its background went
+# black (0,0,0) ~0.9 s after the swipe that brings it, the blurred wallpaper seen only while it slid in (11-10: a
+# material's snapshot with 4320-byte rows, sampled as they lie on the Mali). RC_JOBS=rc.jobs.applib.
+/redwood/bin/rwtouch wait 50
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 4 notify com.hakios.layers wait 3
+/redwood/bin/rwtouch wait 20

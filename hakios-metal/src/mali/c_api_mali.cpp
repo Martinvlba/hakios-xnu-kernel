@@ -4518,6 +4518,17 @@ hakios_metal_texture_new_iosurface(hakios_metal_device *d, unsigned surface_id, 
             info.height, info.row_bytes);
         return nullptr;
     }
+    if ((info.row_bytes & 63) || (info.offset & 63)) {
+        // rows not a multiple of 64 bytes, as buffer textures are held to (hakios_metal_texture_new_buffer): sampled so,
+        // the App Library's background -- a material's snapshot SpringBoard asks for with 4320-byte rows, drawn by
+        // backboardd into the surface right (its pixels checked) -- came out black on the panel (11-10). Refused, the
+        // plug-in reads such a surface through a copy of its rows and writes what is drawn into it back, as it did on
+        // the Adreno (HakiosMetalCA.m, -hakiosShadow:)
+        d->surfaceRelease(surface_id);
+        fail("a texture over IOSurface %u of rows of %u bytes at offset %u: the Mali takes rows of multiples of 64 bytes",
+            surface_id, info.row_bytes, (unsigned)info.offset);
+        return nullptr;
+    }
     hakios_metal_texture *t = textureOver(d, bo, info.offset, info.row_bytes, 2, f, pixel_format, width, height, usage, 1);
     t->surface = surface_id;
     return t;

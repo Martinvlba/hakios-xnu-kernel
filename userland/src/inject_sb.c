@@ -1737,6 +1737,38 @@ layer_line(id layer, const char *role, int depth)
 		n += (size_t)snprintf(more + n, sizeof(more) - n, " contents %s", flat);
 		CFRelease((CFTypeRef)text);
 	}
+	if (contents != NULL && CFGetTypeID((CFTypeRef)contents) == IOSurfaceGetTypeID()) {
+		/*
+		 * An IOSurface's pixels, sampled (11-10): the App Library's background is one (a material's
+		 * snapshot backboardd renders, 1080 x 2340) and the panel shows it black -- whether the
+		 * surface itself holds black, or holds the blurred wallpaper and is shown wrong, is this.
+		 */
+		IOSurfaceRef surface = (IOSurfaceRef)contents;
+		size_t w = IOSurfaceGetWidth(surface), h = IOSurfaceGetHeight(surface), row = IOSurfaceGetBytesPerRow(surface);
+
+		if (w > 0 && h > 0 && IOSurfaceGetPlaneCount(surface) == 0 && IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) == 0) {
+			const uint8_t *base = IOSurfaceGetBaseAddress(surface);
+			unsigned long sum = 0, zero = 0, samples = 0;
+			uint32_t corner = 0, middle = 0;
+
+			for (size_t y = 0; base != NULL && y < h; y += h / 16 + 1) {
+				for (size_t x = 0; x < w; x += w / 16 + 1) {
+					uint32_t v = *(const uint32_t *)(base + y * row + x * 4);
+
+					sum += (v & 0xff) + (v >> 8 & 0xff) + (v >> 16 & 0xff);
+					zero += (v & 0xffffff) == 0;
+					samples++;
+				}
+			}
+			if (base != NULL) {
+				corner = *(const uint32_t *)base;
+				middle = *(const uint32_t *)(base + h / 2 * row + w / 2 * 4);
+			}
+			IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+			n += (size_t)snprintf(more + n, sizeof(more) - n, " PIXELS mean %lu, %lu of %lu black, corner %08x middle %08x (rows %zu)",
+			    samples ? sum / samples / 3 : 0, zero, samples, corner, middle, row);
+		}
+	}
 	if (contents != NULL && class_respondsToSelector(object_getClass(layer), sel_registerName("contentsMultiplyColor")) &&
 	    SEND(void *, layer, "contentsMultiplyColor") != NULL) {
 		id text = (id)CFCopyDescription(SEND(void *, layer, "contentsMultiplyColor"));
