@@ -69,6 +69,8 @@ extern wait_result_t thread_block(thread_continue_t continuation);
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern void IOSleep(unsigned int milliseconds);
 extern void loader_return(void);        /* osfmk/arm64/loader_return.c */
+extern void apfs_stats_print_all(void); /* bsd/miscfs/apfs/apfs_vfsops.c */
+extern unsigned int preheat_max_bytes;  /* osfmk/vm/vm_object.c */
 extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm64/caches_asm.s */
 
 /* the page the loader publishes: the same layout as struct loader_block in xnuloader/loader.c */
@@ -165,6 +167,7 @@ static int ufs_bmajor = -1, ufs_cmajor = -1;
 static bool ufs_ready, ufs_dead;
 static uint32_t ufs_hvc;          /* ufs_hvc=1: the loader is called up for each request (ufs_request) */
 static uint64_t ufs_requests, ufs_errors, ufs_bytes, ufs_wait_us;
+static uint64_t ufs_lock_wait_us, ufs_lock_wait_max_us, ufs_lock_waits;  /* (11-10) readers waiting for one another */
 static uint64_t ufs_copy_us;                    /* copying out of the loader's buffer */
 static uint64_t ufs_small, ufs_medium, ufs_large; /* requests of <= 4 KB, <= 64 KB, more */
 static uint64_t ufs_sequential;                 /* requests that start where the one before ended */
@@ -480,6 +483,8 @@ hakios_ufs_report(const char *when)
 	    "the one before), %llu errors, %llu bytes; waiting %llu ms, of it in ReadBlocks %llu ms; "
 	    "copying %llu ms\n", when, ufs_requests, ufs_small, ufs_medium, ufs_large, ufs_sequential,
 	    ufs_errors, ufs_bytes, ufs_wait_us / 1000, loader_ns / 1000000, ufs_copy_us / 1000);
+	printf("ufs: %s: %llu reads waited for another's to end (over 50 us), %llu ms in all, the longest %llu ms\n", when,
+	    ufs_lock_waits, ufs_lock_wait_us / 1000, ufs_lock_wait_max_us / 1000);
 	if (ufs_write_part >= 0 || ufs_writes != 0 || ufs_write_refused != 0) {
 		printf("ufs: %s: %llu writes into darwin, %llu bytes, read back by the loader; %llu did not "
 		    "finish, %llu refused here\n", when, ufs_writes, ufs_write_bytes, ufs_write_errors,
@@ -498,14 +503,26 @@ ufs_part_bytes(uint32_t part)
  * loader: the native blocks that cover them are read a buffer at a time and the wanted bytes
  * copied out.
  */
+static void ufs_count(uint32_t part, uint64_t len);
+
 static int
 ufs_read_mailbox(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
 {
 	uint64_t nbs = ufs_page->part[part].block_size, per = ufs_buffer_size / nbs;
 	static uint8_t *bounce;
 	int error = 0;
+	uint64_t asked = mach_absolute_time(), waited_ns;
 
 	lck_mtx_lock(&ufs_lock);
+	ufs_count(part, len);           /* (under the lock: the counts and the slots' names) */
+	absolutetime_to_nanoseconds(mach_absolute_time() - asked, &waited_ns);
+	if (waited_ns >= 50000) {
+		ufs_lock_waits++;
+		ufs_lock_wait_us += waited_ns / 1000;
+		if (waited_ns / 1000 > ufs_lock_wait_max_us) {
+			ufs_lock_wait_max_us = waited_ns / 1000;
+		}
+	}
 	/*
 	 * Allocated under the lock: two first readers at once would both allocate (one 4 MB leak),
 	 * and one could copy out of a buffer the other has just replaced and never filled.
@@ -585,6 +602,64 @@ ufs_native_out(const char *why)
 	error = ufshc_switch_out(why);
 	lck_mtx_unlock(&ufs_lock);
 	return error;
+}
+
+/*
+ * WHO READS WHAT (11-10): boot read ~2 GB by 58 s, one request at a time, readers waiting 210 s in all for one another.
+ * Bytes by partition and by the process whose thread asked (proc_selfname: a kernel thread's is kernel_task), said in
+ * the 30-second report: the first 24 processes and every partition get a slot. Counted in the loader's path, under
+ * ufs_lock (ufs_read_mailbox); the native path (ufs_native=1) is not counted.
+ */
+#define UFS_WHO 24
+static struct { char name[17]; uint64_t bytes, reads; } ufs_who[UFS_WHO];
+static uint64_t ufs_part_read[BLOCK_MAX_PARTS], ufs_who_other;
+
+static void
+ufs_count(uint32_t part, uint64_t len)
+{
+	char name[17];
+	int i;
+
+	if (part < BLOCK_MAX_PARTS) {
+		ufs_part_read[part] += len;
+	}
+	proc_selfname(name, sizeof(name));
+	for (i = 0; i < UFS_WHO && ufs_who[i].name[0] != 0; i++) {
+		if (strncmp(ufs_who[i].name, name, sizeof(name)) == 0) {
+			break;
+		}
+	}
+	if (i == UFS_WHO) {
+		ufs_who_other += len;
+		return;
+	}
+	if (ufs_who[i].name[0] == 0) {
+		strlcpy(ufs_who[i].name, name, sizeof(ufs_who[i].name));
+	}
+	ufs_who[i].bytes += len;
+	ufs_who[i].reads++;
+}
+
+static void
+ufs_who_report(const char *when)
+{
+	char line[1024];
+	size_t n = 0;
+
+	for (uint32_t p = 0; p < ufs_parts && p < BLOCK_MAX_PARTS; p++) {
+		if (ufs_part_read[p] >= (1u << 20) && n < sizeof(line)) {
+			n += (size_t)snprintf(line + n, sizeof(line) - n, " %s %llu MB", ufs_page->part[p].name, ufs_part_read[p] >> 20);
+		}
+	}
+	printf("ufs: %s: read by partition:%s\n", when, line);
+	n = 0;
+	for (int i = 0; i < UFS_WHO && ufs_who[i].name[0] != 0 && n < sizeof(line); i++) {
+		if (ufs_who[i].bytes >= (1u << 20)) {
+			n += (size_t)snprintf(line + n, sizeof(line) - n, " %s %llu MB/%llu", ufs_who[i].name, ufs_who[i].bytes >> 20,
+			    ufs_who[i].reads);
+		}
+	}
+	printf("ufs: %s: read for (MB/reads):%s; others %llu MB\n", when, line, ufs_who_other >> 20);
 }
 
 /* The way chosen (ufs_native=, kern.hakios.ufs_native); if this kernel's own fails, the loader's */
@@ -881,9 +956,14 @@ static void
 ufs_var_sync_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	printf("hakios-ufs: the data volume is open for writing: synced every %u s\n", ufs_var_sync_s);
-	for (;;) {
+	for (unsigned n = 1;; n++) {
 		delay_for_interval(ufs_var_sync_s * 1000, NSEC_PER_MSEC);
 		sync_internal();
+		if (n * ufs_var_sync_s % 30 == 0) {
+			hakios_ufs_report("so far");    /* (every 30 s, 11-10: reads of the data volume seemed slow) */
+			ufs_who_report("so far");
+			apfs_stats_print_all();         /* (bsd/miscfs/apfs: each volume's page-ins and reads) */
+		}
 	}
 }
 
@@ -1779,6 +1859,23 @@ hakios_ufs_init(void)
 	vm_offset_t base;
 
 	PE_parse_boot_argn("ufs_hvc", &ufs_hvc, sizeof(ufs_hvc));
+	{
+		/*
+		 * THE VM'S READ-AHEAD AROUND A PAGE FAULT, 1 MB here (kern.preheat_max_bytes; iOS's 512 KB; XNU's most,
+		 * MAX_UPL_TRANSFER_BYTES): boot pages in ~1.4 GB of the dyld shared cache in its first minute (none of it
+		 * twice: apfs's "AGAIN" counts), and the loader takes one request at a time at ~0.22 ms each whatever its
+		 * size -- the requests' number is what costs. 11-10, two boots each: 512 KB first frames at 50.4/52.7 s, readers'
+		 * waits 188/193 s; 1024 KB 44.9/50.2 s, 148/160 s, ~100 MB more read; 128 KB worse (53.8 s, 244 s).
+		 * vm_preheat_kb=N (16-1024) for another.
+		 */
+		uint32_t kb = 1024;
+
+		(void)PE_parse_boot_argn("vm_preheat_kb", &kb, sizeof(kb));
+		if (kb >= 16 && kb <= 1024) {
+			preheat_max_bytes = kb * 1024;
+			printf("ufs: the VM reads ahead %u KB at most around a page fault (vm_preheat_kb)\n", kb);
+		}
+	}
 	if (!PE_parse_boot_argn("ufs_shared_pa", &pa, sizeof(pa)) || pa == 0) {
 		return;                 /* the loader was not asked for ufs=2: there is nothing to read through */
 	}

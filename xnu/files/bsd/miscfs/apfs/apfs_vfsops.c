@@ -381,6 +381,33 @@ sysctl_apfs_stats SYSCTL_HANDLER_ARGS
  * The same breakdown, straight to the log.  Needed where there is no user space to read
  * the sysctl: when the volume is the root, nothing else is running.
  */
+/*
+ * Every APFS volume in one line each (11-10): boot read ~1.9 GB of the darwin partition, every process tens of MB of
+ * it -- whether those are page-ins (the page cache should keep them for the next process), read(2) past the cache, or
+ * blocks read again under the cache. Called by the storage driver's 30-second report.
+ */
+void
+apfs_stats_print_all(void)
+{
+	struct apfs_mount *m;
+
+	lck_mtx_lock(&apfs_pool_lock);
+	for (m = apfs_mounts; m != NULL; m = m->am_next) {
+		struct apfs_nx *nx = &m->am_nx;
+
+		if (nx->dev_bytes < (1u << 20) && m->am_pagein_bytes < (1u << 20) && m->am_read_bytes < (1u << 20)) {
+			continue;
+		}
+		printf("apfs: %.40s: pagein %llu MB/%llu, read(2) %llu MB/%llu (from the page cache %llu MB, into it %llu MB), "
+		    "device %llu MB/%llu, data %llu MB, inflated %llu -> %llu MB, blocks %llu read %llu hits\n",
+		    m->am_vol.name, m->am_pagein_bytes >> 20, m->am_pagein_calls, m->am_read_bytes >> 20, m->am_read_calls,
+		    m->am_read_cached >> 20, m->am_read_filled >> 20, nx->dev_bytes >> 20, nx->dev_calls, nx->data_bytes >> 20,
+		    nx->inflate_in >> 20, nx->inflate_out >> 20, nx->reads, nx->hits);
+	}
+	lck_mtx_unlock(&apfs_pool_lock);
+	apfs_seen_print();
+}
+
 void
 apfs_stats_print(void)
 {
