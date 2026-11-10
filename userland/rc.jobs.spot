@@ -1,0 +1,11 @@
+# Spotlight opened from the home screen and closed, three times, the screen recording fetched after each (rec-trans.sh:
+# a "wait 20" each), cputop every 0.2 s beside (its lines say the kernel's uptime, as a recording's frames do) -- the
+# 30-40 fps for ~0.6 s as it opens and ~0.4 s as it closes (11-10). RC_JOBS=rc.jobs.spot.
+/redwood/bin/cputop 0.2 &
+/redwood/bin/rwtouch wait 50
+/redwood/bin/rwtouch swipe 0.5 0.45 0.5 0.75 250 wait 2 button home wait 1
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.5 0.45 0.5 0.75 250 wait 2 button home wait 1
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.5 0.45 0.5 0.75 250 wait 2 button home wait 1
+/redwood/bin/rwtouch wait 20
