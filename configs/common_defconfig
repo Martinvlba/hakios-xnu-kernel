@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 371 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 375 symbols in 18 groups; 35 are set, 26 of them drivers built in.
 #
 
 #
@@ -19,7 +19,7 @@
 CONFIG_FIRMWARE="device"
 
 #
-# Drivers built in (25)
+# Drivers built in (26)
 #
 
 # the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
@@ -94,14 +94,17 @@ CONFIG_HAKIOS_UFS=y
 # a disk image of the host as /dev/rvblk0 (virtio_blk=1). QEMU only [hakios.virtio_blk.c]
 CONFIG_HAKIOS_VIRTIO_BLK=y
 
-# Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c, hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp; requires CONFIG_HAKIOS_QMI]
+# Darwin's Wi-Fi side for any radio: the station thread between a radio's scanning and joining and whoever asks ... [hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp]
+CONFIG_HAKIOS_WIFI_STATION=y
+
+# Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c; requires CONFIG_HAKIOS_QMI, CONFIG_HAKIOS_WIFI_STATION]
 CONFIG_HAKIOS_WIFI=y
 
 #
 # CPU, memory and boot (21)
 #
 
-# CPU cores the kernel uses, 1 to 8; one if not set
+# CPU cores the kernel uses, 1 to 16 (MAX_CPUS); one if not set
 # CONFIG_CPUS is not set
 
 # the core the kernel runs on, 0 to 7; 7 is the biggest core (the loader keeps core 0)
@@ -165,7 +168,7 @@ CONFIG_HAKIOS_WIFI=y
 # CONFIG_XPCPROXY_IDVERSION is not set
 
 #
-# Storage and APFS (44)
+# Storage and APFS (46)
 #
 
 # the phone's storage: 1 a survey, read only; 2 the loader's block service, through which the kernel reads it (the ...
@@ -270,6 +273,9 @@ CONFIG_UFS=2
 # read by hakios.ufs.c (kernel)
 # CONFIG_UFS_CHECK is not set
 
+# read by hakios.ufs.c (kernel)
+# CONFIG_UFS_HVC is not set
+
 # through this kernel's own driver instead, its own transfer list in the controller for the run, if all is as ...
 # CONFIG_UFS_NATIVE is not set
 
@@ -296,6 +302,9 @@ CONFIG_UFS=2
 
 # read by hakios.ufs.c (kernel)
 # CONFIG_VAR_SAVE_MS is not set
+
+# read by hakios.ufs.c (kernel)
+# CONFIG_VAR_SYNC_S is not set
 
 # read by hakios.virtio_blk.c (kernel)
 # CONFIG_VIRTIO_BLK is not set
@@ -335,7 +344,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (76)
+# GPU and display (77)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -398,6 +407,9 @@ CONFIG_GPU=y
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_FB_HZ is not set
 
+# the registers of the display interface the panel is on, for a port
+# CONFIG_FB_INTF is not set
+
 # how often the panel is really refreshed
 # CONFIG_FB_MEASURE is not set
 
@@ -422,7 +434,7 @@ CONFIG_GPU=y
 # log the first N calls of every selector (default 3)
 # CONFIG_FBTRACE is not set
 
-# read by MiniIOMobileFramebuffer.cpp (kernel)
+# read by MiniIOMobileFramebuffer.cpp, inject_sb.c (kernel and user space)
 # CONFIG_FBWIDTH is not set
 
 # the surface's memory, as before

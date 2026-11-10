@@ -113,8 +113,27 @@ void hakios_adreno_minute(void) {}
 void hakios_wifi_init(void) {}
 void hakios_wifi_stop(void) {}
 void hakios_wifi_quiesce(void) {}
+#endif
+#ifndef HAKIOS_WIFI_STATION
 errno_t hakios_apple80211_ioctl(__unused u_long command, __unused void *data) { return EOPNOTSUPP; }
 void HakiosWLANStart(__unused const char *interface, __unused const uint8_t *address) {}
+#endif
+#if defined(HAKIOS_WIFI_STATION) && !defined(HAKIOS_WIFI)
+#include <stdarg.h>
+#include <sys/systm.h>
+/* (the station side's way of saying what went wrong: hakios.wifi.c's, which says it even when its own log is quiet) */
+int
+hakios_wifi_tell(const char *format, ...)
+{
+	char line[400];
+	va_list ap;
+
+	va_start(ap, format);
+	vsnprintf(line, sizeof(line), format, ap);
+	va_end(ap);
+	printf("%s", line);
+	return 0;
+}
 #endif
 
 #ifndef HAKIOS_ADSP
