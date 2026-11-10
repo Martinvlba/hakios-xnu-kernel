@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The widgets page (Today view: a full-screen blur under the widgets) left on screen, with cputop beside it -- with
+# sb_cube=1 the cube animates over it and every frame redraws the blur (11-10: 70 frames a second, GPU-bound; the
+# governor's frame boost raises the GPU while frames come late). RC_JOBS=rc.jobs.today.
+/redwood/bin/cputop 10 &
+/redwood/bin/rwtouch wait 45 swipe 0.15 0.5 0.85 0.5 300 wait 2
+/redwood/bin/rwtouch wait 200

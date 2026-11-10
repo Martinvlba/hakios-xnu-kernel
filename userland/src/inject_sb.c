@@ -2299,6 +2299,9 @@ caenv(void)
 	}
 }
 
+void hakios_cube_start(void);           /* src/inject_cube.m */
+void hakios_debug_start(void);          /* src/inject_cube.m */
+
 __attribute__((constructor))
 static void
 hakios_springboard_init(void)
@@ -2467,6 +2470,32 @@ hakios_springboard_init(void)
 	notify_register_dispatch("com.hakios.switcher", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		switcher();
 	});
+	/* sb_cube=1: a cube tumbling over the home screen with the panel's frame rate under it (src/inject_cube.m) */
+	{
+		char args[1024] = "";
+		size_t size = sizeof(args) - 1;
+		const char *arg;
+
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (arg = strstr(args, "sb_cube=1")) != NULL &&
+		    (arg == args || arg[-1] == ' ')) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+				hakios_cube_start();
+			});
+		}
+	}
+	/* sb_debug=1: a frame counter and the uptime under the status bar, for slow-motion videos (src/inject_cube.m) */
+	{
+		char args[1024] = "";
+		size_t size = sizeof(args) - 1;
+		const char *arg;
+
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (arg = strstr(args, "sb_debug=1")) != NULL &&
+		    (arg == args || arg[-1] == ' ')) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+				hakios_debug_start();
+			});
+		}
+	}
 	/*
 	 * Belt-and-suspenders unlock. The user can always swipe up to open the home screen -- that
 	 * works fine when the touch driver is doing its job. But if touch is still probing, has

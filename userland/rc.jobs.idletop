@@ -1,0 +1,5 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The phone left alone with cputop beside it (src/cputop.c): which processes (kernel_task included) take the processors
+# while nothing is touched -- 11-10: one MID core 90-100 % busy at idle on the flashed image (RC_JOBS=rc.jobs.idletop).
+/redwood/bin/cputop 5 &
+/redwood/bin/rwtouch wait 280
