@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's Wi-Fi switched off and on as Settings' switch does it (boot-args pcie=5 pcie_delay=60 wifi=8): the
+# network checked; the radio off (the network left, its flow ring deleted, WLC_DOWN) and on again (WLC_UP, the station
+# joins the standing network again: a new flow ring, DHCP); the network checked again -- twice.
+/redwood/bin/net_test waitaddr en0 150 wait 15 fetch https://www.apple.com/library/test/success.html
+/redwood/bin/net_test wifipower off wait 5 wifipower on wait 30 waitaddr en0 60 wait 15 resolve www.apple.com fetch https://www.apple.com/library/test/success.html
+/redwood/bin/net_test wifipower off wait 5 wifipower on wait 30 waitaddr en0 60 wait 15 fetch https://www.apple.com/library/test/success.html

@@ -18,13 +18,15 @@
  *   reach NAME            what SCNetworkReachability says: the question applications ask first
  *   wait SECONDS
  *   wifi                  what the job com.hakios.wifi runs in every image: if the kernel was
- *                         started with wifi=1, wait for the radio's interface (en0) to appear,
+ *                         started with wifi=N (N > 0), wait for the radio's interface (en0) to appear,
  *                         and ask for it to be configured by DHCP ("dhcp en0") only if configd
  *                         has no network service of its own for it; else nothing
  *   watch SECONDS         for so long, say when configd's store changes what tells an interface's
- *                         state: State:/Network/Service/.../IPv4, State:/Network/Interface/en0/...,
- *                         State:/Network/Global/IPv4 (the key, whether it is there, the names in it;
- *                         no addresses)
+ *                         state: State:/Network/Service/..., State:/Network/Interface/en0/...,
+ *                         State:/Network/Global/..., Plugin:... (the key, whether it is there, the names
+ *                         in it; no addresses)
+ *   wifipower on|off      the radio on or off as Settings' switch has wifid ask (Apple80211 POWER), and
+ *                         its state read back
  *   wrongjoin             ask the radio to join the network it is on with a passphrase that is
  *                         wrong on purpose, through the request wifid uses (Apple80211's
  *                         ASSOCIATE), and say what the kernel answers: Apple80211's result number
@@ -371,7 +373,7 @@ reach(const char *name)
 }
 
 /*
- * With wifi=1 among the kernel's arguments: wait for en0, and for configd's own network service for
+ * With wifi=N (N > 0) among the kernel's arguments: wait for en0, and for configd's own network service for
  * it ("Wi-Fi", made of the radio's IOKit objects, drivers/wifi/hakios.wlan.cpp). That service runs
  * DHCP by itself, and it has to be the one that does: wifid takes the interface for usable only
  * when the address appears under a service whose settings name en0, and the service "dhcp en0"
@@ -390,7 +392,8 @@ wifi(void)
 		return;
 	}
 	for (const char *word = strtok(arguments, " "); word != NULL; word = strtok(NULL, " ")) {
-		wanted |= strcmp(word, "wifi=1") == 0;
+		/* (wifi=1 on redwood; the Pixel 8a's wifi=N runs the radio's steps 1 to N, en0 from step 9) */
+		wanted |= strncmp(word, "wifi=", 5) == 0 && atoi(word + 5) > 0;
 	}
 	if (!wanted) {
 		return;
@@ -451,7 +454,8 @@ static void
 watch(double limit)
 {
 	SCDynamicStoreRef session = SCDynamicStoreCreate(NULL, CFSTR("net_test watch"), (void *)watch_changed, NULL);
-	NSArray *patterns = @[ @"State:/Network/Service/[^/]+/IPv4", @"State:/Network/Interface/en0/.*", @"State:/Network/Global/IPv4" ];
+	NSArray *patterns = @[ @"State:/Network/Service/.*", @"State:/Network/Interface/en0/.*", @"State:/Network/Global/.*",
+		               @"Plugin:.*" ];
 	CFRunLoopSourceRef source;
 
 	if (session == NULL || !SCDynamicStoreSetNotificationKeys(session, NULL, (__bridge CFArrayRef)patterns) ||
@@ -479,6 +483,48 @@ struct apple80211req {
 
 #define SIOCSA80211     0x802869c8u
 #define SIOCGA80211     0xc02869c9u
+
+/* the radio off or on, the way Settings' switch has wifid ask for it: Apple80211 POWER (19), a version, the radios, their
+ * states; then its state read back until it is so (10 s at most) */
+static void
+wifipower(bool on)
+{
+	struct apple80211req request = { .name = "en0" };
+	struct {
+		uint32_t version, radios, state[4];
+	} power = { 1, 1, { on ? 1u : 0u } };
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	double start = seconds();
+
+	request.type = 19;
+	request.length = sizeof(power);
+	request.data = &power;
+	if (s < 0 || ioctl(s, SIOCSA80211, &request) != 0) {
+		printf("net_test: wifipower %s: the kernel refuses the request: %s\n", on ? "on" : "off", strerror(errno));
+		if (s >= 0) {
+			close(s);
+		}
+		return;
+	}
+	for (;;) {
+		memset(&power, 0, sizeof(power));
+		memset(&request, 0, sizeof(request));
+		strlcpy(request.name, "en0", sizeof(request.name));
+		request.type = 19;
+		request.length = sizeof(power);
+		request.data = &power;
+		if (ioctl(s, SIOCGA80211, &request) == 0 && (power.state[0] != 0) == on) {
+			printf("net_test: wifipower %s: so after %.1f s\n", on ? "on" : "off", seconds() - start);
+			break;
+		}
+		if (seconds() - start > 10) {
+			printf("net_test: wifipower %s: NOT so after 10 s\n", on ? "on" : "off");
+			break;
+		}
+		usleep(200000);
+	}
+	close(s);
+}
 
 static void
 wrongjoin(void)
@@ -586,6 +632,8 @@ main(int argc, char **argv)
 				watch(atof(argv[++i]));
 			} else if (strcmp(step, "wrongjoin") == 0) {
 				wrongjoin();
+			} else if (strcmp(step, "wifipower") == 0 && i + 1 < argc) {
+				wifipower(strcmp(argv[++i], "on") == 0);
 			} else {
 				fprintf(stderr, "net_test: bad step \"%s\"\n", step);
 				return 1;

@@ -1,0 +1,8 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's Wi-Fi station losing and finding its network (boot-args pcie=5 pcie_delay=60 wifi=8): the network
+# checked; a join with a wrong passphrase asked the way wifid asks (Apple80211 ASSOCIATE: the network left -- its
+# flow ring deleted --, the join refused, 21 wanted) after which the station joins the standing network again (a new
+# flow ring, DHCP); the network checked again.
+/redwood/bin/net_test waitaddr en0 150 wait 15 fetch https://www.apple.com/library/test/success.html
+/redwood/bin/net_test wrongjoin
+/redwood/bin/net_test wait 20 waitaddr en0 90 wait 10 resolve www.apple.com fetch https://www.apple.com/library/test/success.html

@@ -1,0 +1,8 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's Wi-Fi switched off and on four times (boot-args pcie=5 pcie_delay=60 wifi=8 [wifi_flow_keep=1,
+# wifi_rxbufs=N]): how many associations the firmware takes before it runs out of packet ids (11-10: the third trapped).
+/redwood/bin/net_test waitaddr en0 150 wait 15 fetch https://www.apple.com/library/test/success.html
+/redwood/bin/net_test wifipower off wait 5 wifipower on wait 25 waitaddr en0 30 wait 10 fetch https://www.apple.com/library/test/success.html
+/redwood/bin/net_test wifipower off wait 5 wifipower on wait 25 waitaddr en0 30 wait 10 fetch https://www.apple.com/library/test/success.html
+/redwood/bin/net_test wifipower off wait 5 wifipower on wait 25 waitaddr en0 30 wait 10 fetch https://www.apple.com/library/test/success.html
+/redwood/bin/net_test wifipower off wait 5 wifipower on wait 25 waitaddr en0 30 wait 10 fetch https://www.apple.com/library/test/success.html
