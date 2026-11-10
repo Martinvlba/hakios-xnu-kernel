@@ -1116,6 +1116,22 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         srt = t_va | MALI_TABLES;
     }
     uint64_t vs_fau_va = area_va + vs_at, fs_fau_va = area_va + fs_at;
+    // A PASS OPENED (11-10): the texture caches dropped first (and the load/store caches cleaned) -- what an earlier pass
+    // of this command buffer wrote back is in L2, but a texture cache may still hold that memory as it was before:
+    // CoreAnimation's blur samples the passes before it (the tester's slow-motion clip: frames partly unblurred and
+    // streaked mid-swipe). Passes were only ordered (WAIT_ALL). This Mali (v11) does not invalidate them at RUN_FRAGMENT
+    // (v13+ does, implicitly; Arm's own driver forces it before every fragment job -- Mesa's panvk, IMPLICIT_OTHERS_INV).
+    // A pass that loads its targets has the same flush before its preload, below. metal_passinv=0: not done (a test).
+    static const bool pass_inv = [] {
+        char args[1024] = {0};
+        size_t size = sizeof(args) - 1;
+        return !(sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, "metal_passinv=0") != nullptr);
+    }();
+    if (first && pass_inv && !dj.load && !dj.clear_only) {
+        s[n++] = move32(74, 0);
+        s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4;                  // FLUSH_CACHE2: LSC clean, others invalidated
+        s[n++] = WAIT_ALL;
+    }
     if (first && ir != nullptr) {
         *(uint64_t *)(ir + 0x10) = 0;
         if (!dj.clear_only && dj.ir_frag_spd != 0) {
@@ -1318,7 +1334,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = 11ULL << 56 | 70ULL << 40 | 72ULL << 32 | 1;                       // FINISH_FRAGMENT: chunks r70..r72, count it
     s[n++] = WAIT_ALL;
 }
-constexpr unsigned DRAW_WORDS = 62 + 45 + 10; // (instructions emitDraw writes, at most: the preload's 45 and the
+constexpr unsigned DRAW_WORDS = 62 + 45 + 10 + 3; // (instructions emitDraw writes, at most: the preload's 45, a pass's flush, the
                                               // tiler OOM handler's on/off included)
 
 // whether draw B goes on in the Mali pass draw A is in: the same attachments, and B keeps what is in them (Load)
