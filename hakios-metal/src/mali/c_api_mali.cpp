@@ -1397,6 +1397,10 @@ bool bootArg(const char *word);
 
 struct hakios_metal_cb {
     hakios_metal_queue *queue;
+    void (*scheduled)(hakios_metal_cb *, void *) = nullptr;  // (hakios_metal_cb_on_scheduled: after the submission)
+    void *scheduled_context = nullptr;
+    std::vector<unsigned> busy;                         // the IOSurfaces it draws into, marked busy (HakiosGPU 0x7d)
+    hakios_metal_device *busy_device = nullptr;         // ... the device the marks were made through
     std::chrono::steady_clock::time_point committed_at; // (boot-arg metal_stats)
     Bo timestamps;                                      // ... the GPU's timestamp at each Mali pass's start and end
     std::chrono::steady_clock::time_point bo_at, submitted_at, waited_at;   // (boot-arg metal_cbtime)
@@ -1431,6 +1435,13 @@ struct hakios_metal_cb {
     }
     void letGo()
     {
+        // the surfaces it drew into: not busy any more (the display waits for these marks to go: markBusy)
+        for (unsigned sid : busy) {
+            struct { uint32_t surface; int32_t delta; } r = { sid, -1 };
+            std::lock_guard<std::mutex> g(busy_device->lock);
+            busy_device->call(0x7d, &r, sizeof(r));
+        }
+        busy.clear();
         for (auto *b : held) {
             b->release();
         }
@@ -1478,11 +1489,11 @@ struct hakios_metal_queue {
                 w.timeout_nsec = 10000000000LL;         // relative (HakiosGPU's convention)
                 w.count_handles = 1;
                 w.flags = 1;
-                int r;
-                {
-                    std::lock_guard<std::mutex> g(device->lock);
-                    r = device->call(SYNCOBJ_WAIT, &w, sizeof(w));
-                }
+                // (WITHOUT the device's lock, 11-10: it guards the device's buffers and addresses, not the call -- held
+                // here, every other call waited for the GPU to finish this command buffer: the next one's submission in
+                // commit, and HakiosGPU's surface marks at a command buffer's first draw, so CoreAnimation recorded its
+                // frames one GPU completion at a time; the kernel drops its own lock while it waits)
+                int r = device->call(SYNCOBJ_WAIT, &w, sizeof(w));
                 cb->waited_at = std::chrono::steady_clock::now();
                 std::lock_guard<std::mutex> g(cb->lock);
                 if (r != 0) {
@@ -1937,7 +1948,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
     } else if (!cb->blits.empty()) {
         // the stream (from 0), then each job's push constants: 32 bytes for a blit, a kernel's fau_words for a dispatch
         static const bool stats = bootArg("metal_stats");
-        size_t words = 18 + cb->blits.size() * 20 + cb->draws.size() * (DRAW_WORDS + (stats ? 4 : 0));
+        size_t words = 18 + cb->blits.size() * 24 + cb->draws.size() * (DRAW_WORDS + (stats ? 4 : 0));   // (24: a compute job's 15, its flush's 3)
         if (stats && !cb->draws.empty() && cb->timestamps.size == 0) {
             if (!d->newBo(cb->timestamps, ((cb->draws.size() * 16) + 0xfff) & ~0xfffULL, BIND_NOEXEC)) {
                 cb->timestamps.size = 0;
@@ -2119,6 +2130,16 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                     size[0] = 64, size[1] = size[2] = 1;                            // 64 invocations a workgroup
                     groups[0] = (b.count + 63) / 64, groups[1] = groups[2] = 1;
                 }
+                // A COMPUTE JOB AFTER OTHER WORK OF THIS COMMAND BUFFER (11-10): the load/store caches cleaned and the
+                // texture caches dropped first, as a render pass now opens (pass_inv) -- a blit or kernel reading what a
+                // pass or another job just wrote (CoreAnimation's backdrop blurs copy what is drawn so far) could read a
+                // core's stale texture lines: the widgets page's and the App Library's blurred backgrounds came out
+                // empty or with noise for a frame (the tester's clips). Jobs were only ordered (WAIT_ALL).
+                if (i > 0) {
+                    s[n++] = move32(74, 0);
+                    s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4;      // FLUSH_CACHE2: LSC clean, others invalidated
+                    s[n++] = WAIT_ALL;
+                }
                 s[n++] = move48(16, spd);
                 s[n++] = move48(24, local_storage);
                 s[n++] = move48(8, fau_va);
@@ -2177,11 +2198,28 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
             cb->status = HAKIOS_METAL_ERROR;
         }
     }
+    // THE SCHEDULED HANDLERS NOW (11-10), the work submitted and not yet the queue thread's (completed comes after):
+    // CoreAnimation presents its frame from one, and the framebuffer waits for what was submitted before the
+    // presentation (MiniIOSurfaceDrawn). Run before the submission, as they were, the frame's own work was not among it:
+    // the panel showed surfaces the Mali had not drawn yet -- icons missing, an older page through the new one, bands
+    // of half-written tiles (the tester's slow-motion clips of 11-10, the App Library and sb_cube=1's cube)
+    if (cb->scheduled != nullptr) {
+        auto scheduled = cb->scheduled;
+        cb->scheduled = nullptr;
+        scheduled(cb, cb->scheduled_context);
+    }
     {
         std::lock_guard<std::mutex> l(cb->queue->lock);
         cb->queue->pending.push_back(cb);
     }
     cb->queue->work.notify_all();
+}
+
+void
+hakios_metal_cb_on_scheduled(hakios_metal_cb *cb, void (*scheduled)(hakios_metal_cb *, void *), void *context)
+{
+    cb->scheduled = scheduled;
+    cb->scheduled_context = context;
 }
 
 void
@@ -2311,6 +2349,8 @@ hakios_metal_kernel_threadgroup_memory(hakios_metal_kernel *k)
 }
 
 namespace {
+static void markBusy(hakios_metal_cb *cb, hakios_metal_device *d, hakios_metal_texture *t);
+
 int
 dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[3], const unsigned threads[3],
     const unsigned grid[3], hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count,
@@ -2368,6 +2408,9 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
             if (res.index >= texture_count || textures[res.index] == nullptr) {
                 fail("dispatch of %s: nothing bound at [[texture(%u)]]", k->binary.name, res.index);
                 return -1;
+            }
+            if (res.kind == HAKIOS_METAL_RESOURCE_IMAGE) {
+                markBusy(cb, cb->queue->device, textures[res.index]);   // (a kernel writing a surface: marked as a draw is)
             }
             if (res.kind == HAKIOS_METAL_RESOURCE_IMAGE && !(textures[res.index]->usage & 2)) {
                 fail("dispatch of %s: [[texture(%u)]] is written and was made without MTLTextureUsageShaderWrite", k->binary.name,
@@ -3669,6 +3712,38 @@ hakios_metal_program_set_samples(hakios_metal_program *p, unsigned samples)
 
 namespace {
 // the stage's push constants for a draw: [[buffer(n)]]'s addresses, the viewport transform, the first vertex/instance
+/*
+ * A SURFACE THIS COMMAND BUFFER DRAWS INTO (11-10), marked busy with HakiosGPU (0x7d) from its first draw into it until
+ * the command buffer is done or dropped (letGo): the display waits for the marks to go before it shows the surface
+ * (MiniIOSurfaceDrawn, hakios.akita_gpu.cpp), as Apple's waits on a surface's own GPU writes. CoreAnimation draws some
+ * frames with several command buffers and presents from the first one's scheduled handler, before the others are even
+ * recorded: waiting only for what had been submitted, the panel showed such frames half drawn.
+ */
+static void
+markBusy(hakios_metal_cb *cb, hakios_metal_device *d, hakios_metal_texture *t)
+{
+    while (t != nullptr && t->origin == 4) {
+        t = t->parent;
+    }
+    if (t == nullptr || t->origin != 1 || t->surface == 0) {
+        return;
+    }
+    for (unsigned sid : cb->busy) {
+        if (sid == t->surface) {
+            return;
+        }
+    }
+    struct { uint32_t surface; int32_t delta; } r = { t->surface, 1 };
+    {
+        std::lock_guard<std::mutex> g(d->lock);
+        if (d->call(0x7d, &r, sizeof(r)) != 0) {
+            return;
+        }
+    }
+    cb->busy.push_back(t->surface);
+    cb->busy_device = d;
+}
+
 bool
 stagePushConstants(const mali_kernel_binary &b, hakios_metal_buffer *const *buffers, const uint64_t *offsets, unsigned count,
     const float scale[3], const float offset[3], unsigned first_vertex, unsigned base_instance, std::vector<uint32_t> &fau,
@@ -4034,6 +4109,28 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     DrawJob dj = {};
     dj.samples = t->samples;
     dj.target_tex = t;
+    markBusy(cb, d, t);
+    {
+        // marksay=1 (a test, 11-10): every big render target said once -- what it is over, and whether it is marked
+        static const bool marksay = bootArg("marksay");
+        static std::mutex said_lock;
+        static std::vector<hakios_metal_texture *> said;
+        if (marksay && t->width >= 1000 && t->height >= 1000) {
+            std::lock_guard<std::mutex> g(said_lock);
+            if (std::find(said.begin(), said.end(), t) == said.end() && said.size() < 64) {
+                said.push_back(t);
+                hakios_metal_texture *r = t;
+                unsigned depth = 0;
+                while (r != nullptr && r->origin == 4) { r = r->parent; depth++; }
+                fprintf(stderr, "hakios-metal: marksay: target %p %ux%u fmt %u origin %u (after %u views: origin %u surface %u)%s\n",
+                    (void *)t, t->width, t->height, t->format, t->origin, depth, r ? r->origin : 99, r ? r->surface : 0,
+                    r && r->origin == 1 ? " MARKED" : " NOT MARKED");
+            }
+        }
+    }
+    for (unsigned i = 0; i < 3; i++) {
+        markBusy(cb, d, pass->more[i].texture);
+    }
     std::vector<hakios_metal_buffer *> used;
     struct hakios_metal_viewport vp = viewport ? *viewport :
         hakios_metal_viewport{ 0, 0, (double)t->width, (double)t->height, 0, 1 };
@@ -4246,8 +4343,20 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.count = vertex_count;
     dj.instances = instance_count;
     dj.vertex_start = ix ? (unsigned)ix->base_vertex : vertex_start;
-    // DCD0: scissor to the bounding box, cull zero area (v11); the face culled and the front's winding
-    dj.dcd0 = 1u << 23 | 1u << 26 | (pass->winding == 1 ? 1u << 16 : 0) | (pass->cull_mode == 1 ? 1u << 17 : 0) |
+    // DCD0: scissor to the bounding box, cull zero area (v11); the face culled and the front's winding.
+    // THE WINDING IS FLIPPED (11-10): Metal names it in its normalized coordinates, y up; the Mali judges it where
+    // the vertex shader's viewport transform puts the triangle, in the target's pixels, y down (scale -height/2,
+    // above) -- the y flip turns Metal's counter-clockwise into the Mali's clockwise (panvk sets "front face CCW"
+    // from Vulkan's framebuffer-space winding). Taken as it was, culling kept the faces turned away and dropped the
+    // ones facing the viewer: sb_cube=1's cube showed its far faces, their numbers mirrored. metal_winding=metal:
+    // as before (a test).
+    static const bool winding_as_is = [] {
+        char args[1024] = {0};
+        size_t size = sizeof(args) - 1;
+        return sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, "metal_winding=metal") != nullptr;
+    }();
+    bool front_ccw = winding_as_is ? pass->winding == 1 : pass->winding == 0;
+    dj.dcd0 = 1u << 23 | 1u << 26 | (front_ccw ? 1u << 16 : 0) | (pass->cull_mode == 1 ? 1u << 17 : 0) |
         (pass->cull_mode == 2 ? 1u << 18 : 0) | (dj.samples > 1 ? 1u << 19 : 0);  // (19: multisample)
     if (dj.zs && ((dj.zsd[4] >> 29) != 7 || (dj.zsd[4] & 1u << 27) || (dj.zsd[0] >> 31))) {
         // a depth or stencil test or write: pixels killed weakly early, Z/S updated late (a fragment the shader
@@ -4767,6 +4876,13 @@ hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass
         for (auto *v : views) if (v) v->release();
         return r;
     }
+    // (the surfaces it writes marked busy, as a draw's: the display waits for them -- markBusy)
+    if (cb != nullptr && pass != nullptr) {
+        markBusy(cb, cb->queue->device, pass->color0);
+        for (unsigned i = 0; i < 7; i++) {
+            markBusy(cb, cb->queue->device, pass->more[i].texture);
+        }
+    }
     // THE ATTACHMENTS CLEARED (Clear load action), any of the eight: four a Mali pass (the tile buffer's four kilobytes
     // a tile), each its own render target -- one not cleared is not in the pass at all
     struct Cleared { hakios_metal_texture *t; const double *color; unsigned store; };
@@ -5021,6 +5137,9 @@ hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned f
     int linear)
 {
     const char *why = nullptr;
+    if (cb != nullptr && to != nullptr) {
+        markBusy(cb, cb->queue->device, to);    // (a copy into a surface: the display waits for it too, as for a draw)
+    }
     if (cb == nullptr || from == nullptr || to == nullptr) why = "a texture copy without its two textures";
     else if (from->samples > 1 && to->samples == 1) {
         // a resolve: pixel for pixel, a colour format into an RGBA8/BGRA8 one
@@ -5120,6 +5239,9 @@ hakios_metal_cb_blit_rotated(hakios_metal_cb *cb, hakios_metal_texture *from, ha
 {
     // destination pixel (x, y) of TO (w x h) from FROM (W x H), normalized: 1 a quarter turn (TO's sides FROM's swapped):
     // u = y / H... each case the source position of the destination's, as a6xx_rotation turns
+    if (cb != nullptr && to != nullptr) {
+        markBusy(cb, cb->queue->device, to);    // (as hakios_metal_cb_blit's)
+    }
     if (cb == nullptr || from == nullptr || to == nullptr || rotation > 5 || !drawable(to->format)) {
         fail("a rotated texture blit (%u) into MTLPixelFormat %u (RGBA8/BGRA8, rotations 0 to 5)", rotation, to ? to->format : 0);
         if (cb) hakios_metal_cb_fail(cb, gError.c_str());
