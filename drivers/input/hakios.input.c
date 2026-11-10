@@ -159,6 +159,9 @@ touch_feel_add(uint32_t type, uint32_t finger, uint64_t now)
 	}
 }
 
+/* a device's governor told of each touch (the Pixel 8a's DVFS raises the GPU's clock for a while), or NULL */
+void (*hakios_touch_interaction)(void);
+
 static void
 touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_driver)
 {
@@ -188,6 +191,9 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
 	}
 	lck_mtx_unlock(&touch_lock);
 	wakeup(&touch_queue);
+	if (hakios_touch_interaction != NULL && (type == HAKIOS_TOUCH_DOWN || type == HAKIOS_TOUCH_MOVE)) {
+		hakios_touch_interaction();     /* (a device's clocks raised while a finger is on the glass) */
+	}
 }
 
 /* the displayed area on the panel (MiniIOMobileFramebuffer's: left, top, width, height in 65536ths of the panel) */
