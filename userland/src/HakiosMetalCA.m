@@ -3354,8 +3354,10 @@ hm_compile_queue(void)
 		return [self hakiosRefuse:error what:"a render pipeline"
 				      why:@"a function does not answer bitcodeData, so its AIR cannot be read (not an _MTLFunction of this Metal?)"];
 	}
+	const uint64_t tBitcode = mach_absolute_time();
 	vsAir = hm_bitcode_for(vs, [descriptor label], YES);
 	fsAir = fs != nil ? hm_bitcode_for(fs, [descriptor label], NO) : nil;   /* nil: the built-in fragment function */
+	const uint64_t tCore = mach_absolute_time();
 	if (vsAir == nil || [vsAir length] == 0 || (fs != nil && (fsAir == nil || [fsAir length] == 0))) {
 		return [self hakiosRefuse:error what:"a render pipeline"
 				      why:[NSString stringWithFormat:@"%@ or %@ has no bitcode", [vs name], [fs name]]];
@@ -3368,6 +3370,11 @@ hm_compile_queue(void)
 		program = hakios_metal_program_new_bitcode_constants([vsAir bytes], [vsAir length], vsConstants, vsCount, fsAir != nil ? [fsAir bytes] : NULL,
 								     fsAir != nil ? [fsAir length] : 0,
 								     fsConstants, fsCount, format);
+		if (hm_ms_since(tBitcode) >= 300) {
+			/* (a slow pipeline's time by step, 11-10: the uber pipelines took 1-3 s even with the core's cache found) */
+			hm_print("pipeline %s + %s: %llu ms in all -- bitcode %llu, the core (compile or cache) %llu\n", [[vs name] UTF8String],
+				 [[fs name] UTF8String], hm_ms_since(tBitcode), hm_ms_since(tBitcode) - hm_ms_since(tCore), hm_ms_since(tCore));
+		}
 		if (program != NULL) {
 			hm_dump_function("vs", vs, "metal_dump=fn", vsConstants, vsCount);
 			if (fs != nil) hm_dump_function("fs", fs, "metal_dump=fn", fsConstants, fsCount);
@@ -3770,10 +3777,11 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 			}
 		}
 	}
-	/* Memoryless is a render target an Apple GPU keeps in tile memory alone, its contents undefined past the pass. This GPU
-	 * draws into memory (sysmem), so the texture is given memory like any other: what Metal leaves undefined is kept, which
-	 * is one of the things undefined allows. CoreAnimation asks for these for its blur and backdrop passes, and a refusal
-	 * here was a pass with no texture and a layer drawn from nothing. */
+	/* Memoryless is a render target an Apple GPU keeps in tile memory alone, its contents undefined past the pass. The
+	 * Adreno drew into memory (sysmem), so the texture is given memory like any other: what Metal leaves undefined is kept,
+	 * which is one of the things undefined allows. CoreAnimation asks for these for its blur and backdrop passes, and a
+	 * refusal here was a pass with no texture and a layer drawn from nothing. The Mali has a tile buffer: the core is told
+	 * (hakios_metal_texture_set_memoryless, below) and keeps such an attachment there, never loaded nor stored (11-10). */
 	if ([descriptor storageMode] == MTLStorageModeMemoryless) {
 		HM_ONCE("a texture was asked for with memoryless storage; this GPU has no tile memory to keep it in, so it is given "
 			"memory as any other texture is\n");
@@ -3831,6 +3839,10 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 		return hm_refuse_texture([NSString stringWithFormat:@"%lux%lu, pixel format %lu, usage %#lx: %s", (unsigned long)[descriptor width],
 							    (unsigned long)[descriptor height], (unsigned long)[descriptor pixelFormat],
 							    (unsigned long)usage, hakios_metal_error()]);
+	}
+	if ([descriptor storageMode] == MTLStorageModeMemoryless) {
+		/* (the Mali keeps a memoryless attachment in its tile buffer: never loaded nor stored -- hakios_metal.h) */
+		hakios_metal_texture_set_memoryless(texture, 1);
 	}
 	return [[HakiosMetalTexture alloc] initWithHakiosDevice:self texture:texture descriptor:descriptor usage:usage];
 }
