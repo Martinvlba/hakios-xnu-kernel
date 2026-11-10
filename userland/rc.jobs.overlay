@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# sb_cube/sb_debug's windows of their own (11-10): touches under the cube's window must reach the home screen. A tap on
+# Calendar (under the cube's window) then home, a tap on Settings (outside it, the control) then home; cputop says which
+# applications started (MobileCal, Preferences). RC_JOBS=rc.jobs.overlay.
+/redwood/bin/cputop 5 &
+/redwood/bin/rwtouch wait 45 tap 0.37 0.375 wait 10 button home wait 5 tap 0.37 0.80 wait 10 button home wait 4
+/redwood/bin/rwtouch wait 60

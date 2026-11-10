@@ -1,0 +1,13 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Transitions for the screen recording (rec=N, 11-10): each action, then 20 s still while the host fetches the ring of
+# the last seconds (devices/akita/tools/rec-trans.sh watches the console for the "wait 20" lines): Spotlight open and
+# closed, Settings open and closed, the widgets page and back, the App Library scrolled. RC_JOBS=rc.jobs.trans.
+/redwood/bin/rwtouch wait 50
+/redwood/bin/rwtouch swipe 0.5 0.45 0.5 0.75 250 wait 2 button home wait 1
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch tap 0.37 0.80 wait 3 button home wait 1
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 3 swipe 0.85 0.5 0.15 0.5 300 wait 1
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.5 0.8 0.5 0.3 300 wait 1
+/redwood/bin/rwtouch wait 20

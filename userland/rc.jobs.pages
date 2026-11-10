@@ -1,0 +1,8 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The widgets page and the App Library in turn, with sb_cube/sb_debug over them (11-10: the pages with backdrop blurs,
+# where frames still came half drawn): the widgets page 25 s, back, the App Library 25 s scrolled now and then, back;
+# cputop beside it. RC_JOBS=rc.jobs.pages.
+/redwood/bin/cputop 10 &
+/redwood/bin/rwtouch wait 45 swipe 0.15 0.5 0.85 0.5 300 wait 25 swipe 0.85 0.5 0.15 0.5 300 wait 3
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 8 swipe 0.5 0.8 0.5 0.3 300 wait 5 swipe 0.5 0.3 0.5 0.8 300 wait 10
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 60

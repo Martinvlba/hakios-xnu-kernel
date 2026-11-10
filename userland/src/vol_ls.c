@@ -14,6 +14,9 @@
  *                                    driver's time went -- reads, page-ins, the lock)
  *        vol_ls zero NAME...         write to it (kern.apfs_stats: its counters zeroed)
  *        vol_ls cpuload SECONDS      how busy each processor is over the next SECONDS
+ *        vol_ls du DIR [DEPTH [KB]]  the bytes under DIR, recursively, and under each directory down to DEPTH
+ *                                    levels (default 3) that holds KB kilobytes or more (default 256), the files
+ *                                    of 1 MB or more by name (11-10: what coreduetd's Biome store had grown to)
  */
 #include <dirent.h>
 #include <errno.h>
@@ -208,6 +211,46 @@ do_hash(const char *file)
 	return h_read == h_map ? 0 : 1;
 }
 
+/* vol_ls du: the bytes under PATH (files' sizes, links not followed), the directories down to DEPTH said */
+static unsigned long long
+du_walk(const char *path, int depth, int max_depth, unsigned long long min_bytes)
+{
+	DIR *d = opendir(path);
+	struct dirent *e;
+	unsigned long long total = 0;
+	unsigned files = 0;
+
+	if (d == NULL) {
+		return 0;
+	}
+	while ((e = readdir(d)) != NULL) {
+		char child[1024];
+		struct stat st;
+
+		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
+			continue;
+		}
+		snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+		if (lstat(child, &st) != 0) {
+			continue;
+		}
+		if (S_ISDIR(st.st_mode)) {
+			total += du_walk(child, depth + 1, max_depth, min_bytes);
+		} else if (S_ISREG(st.st_mode)) {
+			total += (unsigned long long)st.st_size;
+			files++;
+			if (st.st_size >= 1024 * 1024) {
+				printf("  file %10llu KB  %s\n", (unsigned long long)st.st_size / 1024, child);
+			}
+		}
+	}
+	closedir(d);
+	if (depth <= max_depth && total >= min_bytes) {
+		printf("  dir  %10llu KB  %s (%u files here)\n", total / 1024, path, files);
+	}
+	return total;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -216,6 +259,14 @@ main(int argc, char **argv)
 	if (argc < 3) {
 		printf("usage: vol_ls fs PATH | ls DIR... | cat FILE [BYTES] | hash FILE... | sysctl NAME...\n");
 		return 2;
+	}
+	if (strcmp(argv[1], "du") == 0 && argc >= 3) {
+		int max_depth = argc > 3 ? atoi(argv[3]) : 3;
+		unsigned long long min_kb = argc > 4 ? strtoull(argv[4], NULL, 10) : 256;
+		unsigned long long total = du_walk(argv[2], 0, max_depth, min_kb * 1024);
+
+		printf("vol_ls du: %s holds %llu KB\n", argv[2], total / 1024);
+		return 0;
 	}
 	if (strcmp(argv[1], "fs") == 0) {
 		return do_fs(argv[2]);

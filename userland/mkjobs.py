@@ -233,7 +233,16 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
         # for ever. Settings > General > iPhone Storage is one (AirFair.syncBundle, through AirTrafficDevice, on the
         # main thread: the watchdog kills Settings, 0x8badf00d; found on the Pixel 8a with ustacks=Preferences). Not
         # offered, a lookup fails at once and the caller goes on.
-        'fairplayd.H2')
+        'fairplayd.H2',
+        # coreduetd (11-10): one whole core for as long as the phone ran (cputop 96-98 %, logging nothing; its samples:
+        # a CoreDuet query over Biome streams, validating frames), the MID cluster held at its top clock by it at rest
+        # and the skin warmed into Android's throttling. Its "blending" asks the suggestion model server, duetexpertd
+        # (denied above), and never gets it ("Connection to Proactive Suggestion Client Model server interrupted"); its
+        # store DuetExpertCenter/streams/blendingUIHomeScreen had grown to four full 8 MB segments. duetexpertd itself
+        # traps 5 s after it starts (systrace=1, ALLOW=duetexpertd: AppPredictionInternal's
+        # ATXTriggerActionHistogramPrefillJob, right after F_GETPROTECTIONCLASS gives ENOTSUP -- the data volume has no
+        # data protection classes). Not offered, both lookups fail at once; the suggestions they make were not there anyway.
+        'com.apple.coreduetd')
 
 # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
 DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())

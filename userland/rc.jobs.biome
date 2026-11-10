@@ -1,0 +1,11 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# What coreduetd's stores on the data volume hold (11-10: coreduetd takes a whole core for as long as the phone runs,
+# validating Biome frames -- BiomeStorage's isValidFrame -- in a CoreDuet query): the Biome and CoreDuet directories'
+# sizes, the big files by name; cputop beside it. RC_JOBS=rc.jobs.biome, src/vol_ls.c's du.
+/redwood/bin/cputop 20 &
+/redwood/bin/vol_ls du /private/var/mobile/Library/Biome 4 128
+/redwood/bin/vol_ls du /private/var/mobile/Library/CoreDuet 3 128
+/redwood/bin/vol_ls du /private/var/mobile/Library/DuetExpertCenter 2 128
+/redwood/bin/vol_ls du /private/var/db/biome 3 128
+/redwood/bin/vol_ls du /private/var/mobile/Library 1 4096
+/redwood/bin/rwtouch wait 120
