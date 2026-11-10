@@ -151,6 +151,20 @@ static TUNABLE(uint32_t, gRecStart, "rec_start", 0);
 static TUNABLE(uint32_t, gRecMegabytes, "rec_mb", 480);
 static TUNABLE(uint32_t, gRecRing, "rec_ring", 0);
 static TUNABLE(uint32_t, gRecStep, "rec_step", 3);
+/*
+ * Boot-arg rec=N (11-10, the Pixel 8a): the short form for a phone recorded while nobody films it -- a ring (rec_ring=1)
+ * that never stops (rec_secs endless), one pixel of every N kept (rec_step=N), 256 MB unless rec_mb says (480 had
+ * Darwin killing processes for memory). Zero-copy frames are recorded too, as the panel starts reading them; the ring
+ * is fetched over USB while the phone runs (usbmux port 7: devices/akita/tools/usbmux-rec.py, the recording paused
+ * meanwhile), tools/recording.py makes the video.
+ */
+static TUNABLE(uint32_t, gRec, "rec", 0);
+static TUNABLE(uint32_t, gRecMbGiven, "rec_mb", 0);
+static inline uint32_t recSeconds(void) { return gRec ? 0xffffffffu : gRecSeconds; }
+static inline uint32_t recRing(void) { return gRec ? 1 : gRecRing; }
+static inline uint32_t recMegabytes(void) { return gRec && gRecMbGiven == 0 ? 256 : gRecMegabytes; }
+/* usbmux's port 7 sets it while it sends the ring (C: hakios.akita_usbmux.c) */
+extern "C" { volatile uint32_t hakios_rec_paused; }
 static TUNABLE(uint32_t, gDiff, "fb_diff", 0);
 /*
  * Boot-arg fb_filter=0: the picture is scaled to the panel nearest neighbour, as it once was. The
@@ -210,6 +224,9 @@ panel_thread_start(thread_continue_t continuation, void * parameter, thread_t * 
 /* kern.hakios.fb_surface: the IOSurface on the panel, for a picture of what is there (SpringBoard's wallpaper_freeze=1) */
 SYSCTL_DECL(_kern_hakios);
 static uint32_t gShownSurface;
+/* (the same for the GPU service, 11-10: a surface drawn into while it is on the panel is counted there) */
+extern "C" { uint32_t hakios_fb_shown_surface(void); }
+uint32_t hakios_fb_shown_surface(void) { return gShownSurface; }
 SYSCTL_UINT(_kern_hakios, OID_AUTO, fb_surface, CTLFLAG_RD | CTLFLAG_LOCKED, &gShownSurface, 0, "the IOSurface last put on the panel");
 
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
@@ -479,7 +496,9 @@ refreshHz(void)
 static inline uint32_t
 recStep(void)
 {
-	return gRecStep >= 2 && gRecStep <= 8 ? gRecStep : 3;
+	uint32_t step = gRec ? gRec : gRecStep;
+
+	return step >= 2 && step <= 8 ? step : 3;
 }
 #define REC_STEP        recStep()
 
@@ -544,6 +563,7 @@ public:
 	uint8_t         fSwap[SWAP_QUEUE][SWAP_SIZE];   /* the swaps on their way to the panel (fb_queue), from fSwapFirst on */
 	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
 	unsigned        fSwapFirst, fSwapsWaiting;
+	uint32_t        fSwapPresentedID, fSwapShownID;   /* (SwapWait: the last swap handed over, and the last on the panel) */
 	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
 	 * (boot-arg fb_beat=0: at once): frames then follow each other at an even pace whatever
@@ -605,7 +625,9 @@ public:
 	void publishRefresh(void);
 	MiniIOSurface * defaultSurface(void);
 	void present(const uint8_t * swap);
+	void swapWait(uint32_t id);
 	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
+	void swapShown(uint32_t id);
 	void settle(const uint8_t * swap, MiniIOSurface ** surfaces);
 	bool fSettling;                 /* drawing the last frame again, filtered (fb_filter=2) */
 	bool fFilterFrame;              /* this frame came slowly: filtered as it is (fb_filter=2) */
@@ -893,16 +915,16 @@ IOMobileFramebuffer::start(IOService * provider)
 	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
 	    fPanelWidth, fPanelHeight, fRowBytes);
 
-	if (gRecSeconds != 0) {
+	if (recSeconds() != 0) {
 		/* one piece of physical memory: the loader will send it over USB as it lies */
 		IOBufferMemoryDescriptor * memory = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-		    kIODirectionInOut | kIOMemoryPhysicallyContiguous, (mach_vm_size_t) gRecMegabytes << 20, ~0ULL);
+		    kIODirectionInOut | kIOMemoryPhysicallyContiguous, (mach_vm_size_t) recMegabytes() << 20, ~0ULL);
 
 		if (memory != NULL) {
 			struct rec_header * header = (struct rec_header *) memory->getBytesNoCopy();
 
 			fRecBase = (uint8_t *) header;
-			fRecSize = (uint64_t) gRecMegabytes << 20;
+			fRecSize = (uint64_t) recMegabytes() << 20;
 			fRecUsed = sizeof(*header);
 			bzero(header, sizeof(*header));
 			memcpy(header->magic, "RWREC003", 8);
@@ -912,10 +934,10 @@ IOMobileFramebuffer::start(IOService * provider)
 			loader_recording[1] = fRecUsed;
 			loader_recording[2] = (uint64_t) (uintptr_t) fRecBase;
 			IOLog("MiniIOMobileFramebuffer: recording %u s of the screen at %ux%u from second %u, into %u MB at %#llx%s\n",
-			    gRecSeconds, header->width, header->height, gRecStart, gRecMegabytes, loader_recording[0],
-			    gRecRing ? ", the last of it kept (rec_ring)" : "");
+			    recSeconds(), header->width, header->height, gRecStart, recMegabytes(), loader_recording[0],
+			    recRing() ? ", the last of it kept (rec_ring)" : "");
 		} else {
-			IOLog("MiniIOMobileFramebuffer: no memory for a recording of %u MB\n", gRecMegabytes);
+			IOLog("MiniIOMobileFramebuffer: no memory for a recording of %u MB\n", recMegabytes());
 		}
 	}
 
@@ -942,6 +964,40 @@ surfaceHolds(const MiniIOSurface * s, uint64_t rows, uint64_t columns)
 	return (uint64_t) s->info.offset + (rows - 1) * s->info.bytesPerRow + columns * 4 <= s->info.allocSize;
 }
 
+/*
+ * A scan-out slot seen through a CACHED mapping, for the recording to read (11-10): the surfaces' own kernel mapping is
+ * write-combined, every read a trip to memory -- a frame's every fourth pixel took 131 ms (6 frames a second); the
+ * default cache mode is no better for this reserved memory (not the kernel's managed pages: device memory, 74 ms).
+ * Copy-back cached, read through this one, each row's lines invalidated first (what the GPU wrote is in memory, not in the CPU's caches).
+ */
+extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
+static IOMemoryMap *    gRecSlotMap[ZC_SLOTS];
+
+static const uint8_t *
+recPixels(MiniIOSurface * s)
+{
+	int slot = s->scanoutSlot;
+
+	if (slot <= 0 || slot >= ZC_SLOTS || s->client == NULL || gZCPhys[slot] == 0) {
+		return s->pixels();
+	}
+	if (gRecSlotMap[slot] == NULL) {
+		IOMemoryDescriptor * md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress) gZCPhys[slot], gZCSize,
+		    kIODirectionInOut);
+
+		if (md == NULL || md->prepare() != kIOReturnSuccess ||
+		    (gRecSlotMap[slot] = md->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapCopybackCache)) == NULL) {
+			return s->pixels();     /* (md kept with its mapping: one a slot, for the run) */
+		}
+	}
+	uint64_t phys = s->client->getPhysicalSegment(0, NULL);
+
+	if (phys < gZCPhys[slot] || phys >= gZCPhys[slot] + gZCSize) {
+		return s->pixels();
+	}
+	return (const uint8_t *) gRecSlotMap[slot]->getVirtualAddress() + (phys - gZCPhys[slot]) + s->info.offset;
+}
+
 /* Keep a small copy of the frame that is about to be shown (the surface is the whole screen). */
 void
 IOMobileFramebuffer::record(MiniIOSurface * s)
@@ -954,7 +1010,7 @@ IOMobileFramebuffer::record(MiniIOSurface * s)
 	if (fFirstFrame == 0) {
 		fFirstFrame = now;
 	}
-	if (fRecBase == NULL || fRecDone || s->info.width < fWidth || s->info.height < fHeight) {
+	if (fRecBase == NULL || fRecDone || hakios_rec_paused || s->info.width < fWidth || s->info.height < fHeight) {
 		return;
 	}
 	/* a surface whose rows do not fit in its memory is not read */
@@ -976,7 +1032,7 @@ IOMobileFramebuffer::record(MiniIOSurface * s)
 	}
 	absolutetime_to_nanoseconds(now - fRecFirst, &since_start);
 	frame_size = sizeof(*frame) + (uint64_t) header->width * header->height * 3;
-	if (since_start > (uint64_t) gRecSeconds * NSEC_PER_SEC || (fRecUsed + frame_size > fRecSize && !gRecRing)) {
+	if (since_start > (uint64_t) recSeconds() * NSEC_PER_SEC || (fRecUsed + frame_size > fRecSize && !recRing())) {
 		fRecDone = true;
 		IOLog("MiniIOMobileFramebuffer: recording finished: %u frames, %llu MB\n", header->frames, fRecUsed >> 20);
 		return;
@@ -987,10 +1043,18 @@ IOMobileFramebuffer::record(MiniIOSurface * s)
 		fRecWrapped = true;
 	}
 	frame = (struct rec_frame *) (fRecBase + fRecUsed);
-	frame->nanoseconds = since_start;
+	/* (the lowest bit, 11-10: the GPU still had work when the frame was recorded -- MiniIOSurfaceDrawn not waiting) */
+	frame->nanoseconds = (since_start & ~1ULL) | (MiniIOSurfaceDrawn(s, 0) ? 0 : 1);
 	to = (uint8_t *) (frame + 1);
+	const uint8_t * pixels = recPixels(s);
+	bool cached = pixels != s->pixels();
+
 	for (uint32_t y = 0; y < header->height; y++) {
-		const uint32_t * from = (const uint32_t *) (s->pixels() + (size_t) (y * REC_STEP + 1) * s->info.bytesPerRow);
+		const uint32_t * from = (const uint32_t *) (pixels + (size_t) (y * REC_STEP + 1) * s->info.bytesPerRow);
+
+		if (cached) {
+			flush_dcache64((addr64_t) (uintptr_t) from, header->width * REC_STEP * 4, FALSE);
+		}
 
 		for (uint32_t x = 0; x < header->width; x++) {
 			uint32_t pixel = from[x * REC_STEP + 1];        /* B G R A in memory */
@@ -1516,6 +1580,43 @@ IOMobileFramebuffer::reportFrameTimes(void)
 	fFramePauses = fFrameLongest = 0;
 }
 
+/*
+ * SWAPWAIT FOR REAL (11-10): CoreAnimation calls it with the swap before the one it is about to hand over, and takes the
+ * answer as "on the panel" -- the surface shown before that one is then its to draw into. Answered at once (as it was),
+ * it drew the next frame into the surface the panel was showing or about to show: 17800 times in 230 s (the GPU
+ * service's count), the half-drawn frames of the screen recording. Now until that swap is on the panel, 50 ms at most,
+ * not for one never handed over -- one frame in flight with two surfaces: 69 fps. fb_swapwait=1 for it; by default the
+ * GPU service holds a command buffer for the surface on the panel instead (kHakiosSurfaceBusy), SwapWait at once.
+ */
+static TUNABLE(uint32_t, gSwapWaitOn, "fb_swapwait", 2);   /* (2: until the switch to it is set up, not done -- see show()) */
+
+void
+IOMobileFramebuffer::swapShown(uint32_t id)
+{
+	IOLockLock(fSwapLock);
+	fSwapShownID = id;
+	IOLockWakeup(fSwapLock, &fSwapShownID, false);
+	IOLockUnlock(fSwapLock);
+}
+
+void
+IOMobileFramebuffer::swapWait(uint32_t id)
+{
+	AbsoluteTime deadline;
+
+	if (!gSwapWaitOn || id == 0) {
+		return;
+	}
+	clock_interval_to_deadline(50, kMillisecondScale, &deadline);
+	IOLockLock(fSwapLock);
+	while ((int32_t) (fSwapShownID - id) < 0 && (int32_t) (fSwapPresentedID - id) >= 0) {
+		if (IOLockSleepDeadline(fSwapLock, &fSwapShownID, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) {
+			break;
+		}
+	}
+	IOLockUnlock(fSwapLock);
+}
+
 /* SwapEnd: the swap is handed to the thread that puts frames on the panel, as soon as that has no other waiting. */
 void
 IOMobileFramebuffer::present(const uint8_t * swap)
@@ -1531,6 +1632,26 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 	if (gTouchLat) {
 		hakios_tl("tl: s %u at %llu\n", swapWord(swap, SWAP_ID), micros(now));
 	}
+	/* (11-10, a look for a fence: the swap's words this driver does not read, when not zero -- the first swaps, then one in 500) */
+	{
+		static uint32_t looked;
+
+		if (looked < 6 || looked % 500 == 0) {
+			char line[600];
+			int at = snprintf(line, sizeof(line), "MiniIOMobileFramebuffer: swap %u unread words:", swapWord(swap, SWAP_ID));
+
+			for (uint32_t off = 0; off + 4 <= SWAP_SIZE && at < (int) sizeof(line) - 24; off += 4) {
+				bool known = off == SWAP_ID || (off >= 0x54 && off < 0x10c);
+				uint32_t v = swapWord(swap, off);
+
+				if (!known && v != 0) {
+					at += snprintf(line + at, sizeof(line) - at, " %#x=%#x", off, v);
+				}
+			}
+			IOLog("%s\n", line);
+		}
+		looked++;
+	}
 	IOLockLock(fSwapLock);
 	fStatSwapsLate += fSwapTime != 0 && now - fSwapTime > period && now - fSwapTime < pause;
 	fSwapTime = now;
@@ -1539,17 +1660,29 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
 		    fSwapsWaiting >= swapQueue()) {
 			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
+			fSwapPresentedID = fSwapShownID = swapWord(swap, SWAP_ID);     /* (nobody waits for it: SwapWait) */
+			IOLockWakeup(fSwapLock, &fSwapShownID, false);
 			IOLockUnlock(fSwapLock);
 			return;
 		}
 	}
 	unsigned slot = (fSwapFirst + fSwapsWaiting) % SWAP_QUEUE;
 
+	fSwapPresentedID = swapWord(swap, SWAP_ID);
 	memcpy(fSwap[slot], swap, SWAP_SIZE);
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 
 		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+		/*
+		 * IN USE FROM HERE (11-10), not only once show() puts it on the panel: a swap waits here (up to fb_queue) and in
+		 * the presenter's wait for the GPU, and meanwhile CoreAnimation took the surface for a later frame
+		 * (IOSurfaceIsInUse said no) -- the panel then got it half redrawn, tile by tile (sb_debug's strip with half
+		 * its squares, the tester's clip). Let go of after show() (by then the zero-copy hold, fZCHeld, has it).
+		 */
+		if (fSwapSurfaces[slot][layer] != NULL) {
+			MiniIOSurfaceDisplayUse(fSwapSurfaces[slot][layer], 1);
+		}
 	}
 	fSwapsWaiting++;
 	IOLockWakeup(fSwapLock, fSwap, true);
@@ -1651,6 +1784,7 @@ IOMobileFramebuffer::presenter(void)
 		 */
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 			if (surfaces[layer] != NULL) {
+				MiniIOSurfaceDisplayUse(surfaces[layer], -1);   /* (its use from present()) */
 				MiniIOSurfaceDrop(surfaces[layer]);
 				surfaces[layer] = NULL;
 			}
@@ -1822,8 +1956,14 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 
 			MiniIOSurfaceDisplayUse(held, 1);
 			hakios_display_ops->scanout(gZCBase[s->scanoutSlot], s->info.bytesPerRow);
+			if (gSwapWaitOn == 2) {
+				swapShown(swapWord(swap, SWAP_ID));     /* (fb_swapwait=2: SwapWait answered once the switch is set up) */
+			}
 			/* the one shown before is let go of once the panel has left it (its next refresh), not before */
 			zcWaitScanned(gZCBase[s->scanoutSlot]);
+			if (fRecBase != NULL) {
+				record(s);              /* (rec=N: as the panel begins to read it -- an unfinished frame is caught so) */
+			}
 			zcShown(s->scanoutSlot);
 			if (fZCHeld != NULL) {
 				MiniIOSurfaceDisplayUse(fZCHeld, -1);
@@ -1913,6 +2053,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fSwapsShown++;
 counted:
+	swapShown(swapWord(swap, SWAP_ID));
 	if (gTouchLat) {
 		hakios_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));
@@ -2252,10 +2393,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		fOwner->present((const uint8_t *) args->structureInput);
 		return kIOReturnSuccess;
 
-	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
+	case kFBMethodSwapWait:                         /* until that swap is on the panel (swapWait) */
 		if (gTouchLat) {
 			hakios_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
 			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
+		}
+		if (args->scalarInputCount > 0) {
+			fOwner->swapWait((uint32_t) in[0]);
 		}
 		return kIOReturnSuccess;
 	case kFBMethodSwapSignal:
