@@ -114,6 +114,9 @@ void hakios_wifi_init(void) {}
 void hakios_wifi_stop(void) {}
 void hakios_wifi_quiesce(void) {}
 #endif
+#if !defined(HAKIOS_AKITA_WIFI)
+void hakios_akita_wifi_early(void) {}
+#endif
 #ifndef HAKIOS_WIFI_STATION
 errno_t hakios_apple80211_ioctl(__unused u_long command, __unused void *data) { return EOPNOTSUPP; }
 void HakiosWLANStart(__unused const char *interface, __unused const uint8_t *address) {}

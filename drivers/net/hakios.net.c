@@ -35,6 +35,7 @@
 #include <sys/systm.h>
 
 extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* drivers/wifi/hakios.wlan.cpp */
+extern void hakios_akita_wifi_early(void);     /* devices/akita/drivers/wifi/hakios.akita_bcm.c (a stub without it) */
 
 static LCK_GRP_DECLARE(net_lck_grp, "hakios-net");
 
@@ -425,4 +426,5 @@ hakios_net_init(void)
 	PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
 	PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
 	hakios_virtio_net_init();
+	hakios_akita_wifi_early();             /* the Pixel 8a's radio: en0 from the start (devices/akita) */
 }
