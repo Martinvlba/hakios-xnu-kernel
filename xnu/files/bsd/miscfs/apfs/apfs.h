@@ -228,6 +228,8 @@ void apfs_node_detach(struct apfs_node *an);
 
 /* the breakdown of where the time went, straight to the log (apfs_vfsops.c) */
 void apfs_stats_print(void);
+void apfs_stats_print_all(void);
+void apfs_seen_print(void);
 
 void apfs_lock_at(struct apfs_mount *am, const char *site);  /* an operation begins */
 #define apfs_lock(am) apfs_lock_at((am), __func__)

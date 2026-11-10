@@ -711,6 +711,95 @@ apfs_vnop_read(struct vnop_read_args *ap)
 }
 
 /*
+ * PAGES READ TWICE (11-10): boot paged in ~1.4 GB of the system cryptex (the dyld shared cache, ~2.5 GB) in a minute.
+ * For each file of 64 MB or more, a bit a page of what has been paged in already, by the file's object id -- not the
+ * vnode's, so that a vnode recycled (its pages gone with it) shows as pages read again too, and as a vnode change.
+ * Said by apfs_seen_print, from apfs_stats_print_all.
+ */
+#define APFS_SEEN_FILES 24
+static LCK_GRP_DECLARE(apfs_seen_grp, "apfs-seen");
+static LCK_MTX_DECLARE(apfs_seen_lock, &apfs_seen_grp);
+static struct {
+	struct apfs_mount *am;
+	uint64_t           id, pages, first, again, vnodes;
+	vnode_t            vp;
+	uint8_t           *bits;
+} apfs_seen[APFS_SEEN_FILES];
+
+static void
+apfs_seen_note(struct apfs_mount *am, vnode_t vp, uint64_t id, uint64_t size, off_t offset, size_t len)
+{
+	int i, free_slot = -1;
+
+	if (size < (64ull << 20)) {
+		return;
+	}
+	lck_mtx_lock(&apfs_seen_lock);
+	for (i = 0; i < APFS_SEEN_FILES; i++) {
+		if (apfs_seen[i].bits != NULL && apfs_seen[i].am == am && apfs_seen[i].id == id) {
+			break;
+		}
+		if (apfs_seen[i].bits == NULL && free_slot < 0) {
+			free_slot = i;
+		}
+	}
+	if (i == APFS_SEEN_FILES) {
+		uint64_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+		uint8_t *bits;
+
+		if (free_slot < 0) {
+			lck_mtx_unlock(&apfs_seen_lock);
+			return;
+		}
+		lck_mtx_unlock(&apfs_seen_lock);
+		bits = kalloc_data((size_t)((pages + 7) / 8), Z_WAITOK | Z_ZERO);
+		lck_mtx_lock(&apfs_seen_lock);
+		if (bits == NULL || apfs_seen[free_slot].bits != NULL) {
+			lck_mtx_unlock(&apfs_seen_lock);
+			if (bits != NULL) {
+				kfree_data(bits, (size_t)((pages + 7) / 8));
+			}
+			return;
+		}
+		i = free_slot;
+		apfs_seen[i].am = am;
+		apfs_seen[i].id = id;
+		apfs_seen[i].pages = pages;
+		apfs_seen[i].bits = bits;
+	}
+	if (apfs_seen[i].vp != vp) {
+		apfs_seen[i].vp = vp;
+		apfs_seen[i].vnodes++;
+	}
+	for (uint64_t pg = (uint64_t)offset / PAGE_SIZE; pg < ((uint64_t)offset + len + PAGE_SIZE - 1) / PAGE_SIZE &&
+	    pg < apfs_seen[i].pages; pg++) {
+		uint8_t bit = (uint8_t)(1u << (pg & 7));
+
+		if (apfs_seen[i].bits[pg / 8] & bit) {
+			apfs_seen[i].again += PAGE_SIZE;
+		} else {
+			apfs_seen[i].bits[pg / 8] |= bit;
+			apfs_seen[i].first += PAGE_SIZE;
+		}
+	}
+	lck_mtx_unlock(&apfs_seen_lock);
+}
+
+void
+apfs_seen_print(void)
+{
+	lck_mtx_lock(&apfs_seen_lock);
+	for (int i = 0; i < APFS_SEEN_FILES; i++) {
+		if (apfs_seen[i].bits != NULL && apfs_seen[i].first + apfs_seen[i].again >= (8u << 20)) {
+			printf("apfs: %.24s file %llu (%llu MB): paged in %llu MB first, %llu MB AGAIN; %llu vnode(s)\n",
+			    apfs_seen[i].am->am_vol.name, apfs_seen[i].id, (apfs_seen[i].pages * PAGE_SIZE) >> 20,
+			    apfs_seen[i].first >> 20, apfs_seen[i].again >> 20, apfs_seen[i].vnodes);
+		}
+	}
+	lck_mtx_unlock(&apfs_seen_lock);
+}
+
+/*
  * Page in.  Everything goes through apfs_read_file rather than the cluster layer: a
  * compressed file has no block mapping at all, and a plain one is read out of the extents
  * just as cheaply here.
@@ -811,6 +900,9 @@ apfs_vnop_pagein(struct vnop_pagein_args *ap)
 	os_atomic_add(&am->am_pagein_ticks, apfs_ticks() - t0, relaxed);
 	os_atomic_inc(&am->am_pagein_calls, relaxed);
 	os_atomic_add(&am->am_pagein_bytes, (uint64_t)ap->a_size, relaxed);
+	if (error == 0) {
+		apfs_seen_note(am, vp, APFS_VP(vp)->an_id, size, offset, (size_t)ap->a_size);
+	}
 	if (!(ap->a_flags & UPL_NOCOMMIT)) {
 		if (error) {
 			ubc_upl_abort_range(upl, upl_offset, (upl_size_t)ap->a_size,
