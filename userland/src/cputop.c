@@ -8,9 +8,14 @@
  * window server's frames came late; this says with whom it shared them. A process born since the last look counts
  * with all the time it has had.
  *
- *   usage: cputop [SECONDS [LOOKS]]     every SECONDS (default 5), LOOKS times (default: until the run ends)
+ *   usage: cputop [SECONDS [LOOKS]]     every SECONDS (default 5; fractions too, 0.1 the least -- each line then
+ *                                       says the kernel's uptime, to be matched with a recording), LOOKS times
+ *                                       (default: until the run ends)
  */
 #include <mach/mach_time.h>
+#include <mach/mach.h>
+#include <mach/processor_info.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,17 +86,58 @@ time_before(int pid, int *found)
 	return 0;
 }
 
+/*
+ * With SECONDS under 1, each core's busy share since the look before too (11-10): which cores a burst of work went to --
+ * the A510s (0-3) are to be used only when the faster ones are all busy (ml_pair_slow_processors), the X3 is 8.
+ */
+static void
+cpu_shares(void)
+{
+	static natural_t was[16][CPU_STATE_MAX];
+	static bool have;
+	processor_cpu_load_info_t load;
+	mach_msg_type_number_t words;
+	natural_t n;
+
+	if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &n, (processor_info_array_t *)&load, &words) != KERN_SUCCESS) {
+		return;
+	}
+	if (have) {
+		printf("cputop: cores busy %%:");
+		for (natural_t c = 0; c < n && c < 16; c++) {
+			natural_t busy = 0, all = 0;
+
+			for (int k = 0; k < CPU_STATE_MAX; k++) {
+				natural_t d = load[c].cpu_ticks[k] - was[c][k];
+
+				all += d;
+				busy += k == CPU_STATE_IDLE ? 0 : d;
+			}
+			printf("%s %u", c == 4 || c == 8 ? " |" : "", all ? 100 * busy / all : 0);
+		}
+		printf("\n");
+	}
+	for (natural_t c = 0; c < n && c < 16; c++) {
+		memcpy(was[c], load[c].cpu_ticks, sizeof(was[c]));
+	}
+	have = true;
+	vm_deallocate(mach_task_self(), (vm_address_t)load, words * sizeof(natural_t));
+}
+
 int
 main(int argc, char **argv)
 {
-	unsigned seconds = argc > 1 ? (unsigned)atoi(argv[1]) : 5, looks = argc > 2 ? (unsigned)atoi(argv[2]) : 0;
+	double seconds = argc > 1 ? atof(argv[1]) : 5;
+	unsigned looks = argc > 2 ? (unsigned)atoi(argv[2]) : 0;
 	static int pids[MAX_PROCS];
 	static struct share shares[MAX_PROCS];
 	mach_timebase_info_data_t timebase;
 	uint64_t start = mach_absolute_time(), before = start;
 
-	if (seconds == 0) {
+	if (seconds <= 0) {
 		seconds = 5;
+	} else if (seconds < 0.1) {
+		seconds = 0.1;
 	}
 	mach_timebase_info(&timebase);
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -126,8 +172,14 @@ main(int argc, char **argv)
 			qsort(shares, (size_t)n, sizeof(shares[0]), by_time);
 			/* the shares as percent of one core over the time between the looks (both in mach_absolute_time's units) */
 			double span = (double)(at - before);
-			printf("cputop: %llu s: %.0f%% in all:", (unsigned long long)((at - start) * timebase.numer / timebase.denom / 1000000000ull),
-			    span > 0 ? 100.0 * (double)all / span : 0);
+			if (seconds < 1) {
+				/* (the kernel's uptime, as its log and a recording's frames say it: mach_absolute_time) */
+				printf("cputop: at %.3f s: %.0f%% in all:", (double)at * timebase.numer / timebase.denom / 1e9,
+				    span > 0 ? 100.0 * (double)all / span : 0);
+			} else {
+				printf("cputop: %llu s: %.0f%% in all:", (unsigned long long)((at - start) * timebase.numer / timebase.denom / 1000000000ull),
+				    span > 0 ? 100.0 * (double)all / span : 0);
+			}
 			for (int i = 0; i < n && shown < SHOWN; i++) {
 				char name[64] = "?";
 				double percent = span > 0 ? 100.0 * (double)shares[i].time / span : 0;
@@ -140,6 +192,9 @@ main(int argc, char **argv)
 				shown++;
 			}
 			printf("\n");
+			if (seconds < 1) {
+				cpu_shares();
+			}
 		}
 		memcpy(last, now, sizeof(now[0]) * (size_t)count);
 		last_count = count;
@@ -147,7 +202,7 @@ main(int argc, char **argv)
 		if (looks != 0 && look == looks) {
 			break;
 		}
-		sleep(seconds);
+		usleep((useconds_t)(seconds * 1e6));
 	}
 	return 0;
 }

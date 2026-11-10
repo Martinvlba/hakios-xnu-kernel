@@ -1,0 +1,12 @@
+# Slow swipes between the home screen's pages (the tester, 11-10: the glitches show most while a swipe is in progress,
+# and slowly they show more), each pair followed by a pause in which rec-trans.sh fetches the screen recording.
+# Page 1 <-> widgets page, page 1 <-> page 2, then held mid-way. RC_JOBS=rc.jobs.slowswipe.
+/redwood/bin/rwtouch wait 50
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 1800 wait 1 swipe 0.85 0.5 0.15 0.5 1800 wait 0.5
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 1800 wait 1 swipe 0.15 0.5 0.85 0.5 1800 wait 0.5
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch drag 0.2 0.5 0.6 0.5 1500 1500 wait 0.5
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch drag 0.8 0.5 0.4 0.5 1500 1500 wait 0.5
+/redwood/bin/rwtouch wait 20
