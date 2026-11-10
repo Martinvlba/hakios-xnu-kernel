@@ -285,6 +285,8 @@ struct hakios_display_ops {
 	uint64_t (*slot)(unsigned i, uint64_t *size);
 	void (*scanout)(uint64_t phys, uint32_t row_bytes);
 	uint64_t (*scanned)(void);
+	/* (optional) until the display reads BASE, at most US microseconds: true if it does -- woken by the switch */
+	bool (*wait_scanned)(uint64_t base, uint32_t us);
 };
 const struct hakios_display_ops * hakios_display_ops;
 /*
@@ -389,8 +391,13 @@ zcWaitScanned(uint64_t base)
 	if (hakios_display_ops->scanned == NULL) {
 		return;
 	}
-	for (i = 0; i < 25 && hakios_display_ops->scanned() != base; i++) {
-		IOSleep(1);
+	if (hakios_display_ops->wait_scanned != NULL) {
+		/* (woken by the display driver's switch: not up to a millisecond late, as polling with IOSleep(1) was) */
+		i = hakios_display_ops->wait_scanned(base, 25000) ? 0 : 25;
+	} else {
+		for (i = 0; i < 25 && hakios_display_ops->scanned() != base; i++) {
+			IOSleep(1);
+		}
 	}
 	gZCWaitAbs += mach_absolute_time() - t0;
 	gZCWaits++;
