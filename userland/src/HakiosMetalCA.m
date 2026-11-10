@@ -534,6 +534,8 @@ _Static_assert(sizeof(struct MTLTargetDeviceArch) == 24 && __builtin_offsetof(st
 	BOOL _shadow;                       /* the rows are a copy of _iosurface's, refreshed when its seed moves (see below) */
 	uint32_t _shadowSeed;
 	uint8_t *_shadowBase;               /* ... and, for a copy something writes, the surface's rows as the copy last took them */
+	BOOL _mirrored;                     /* the core stands for _iosurface through a mirror (the Mali, hakios_metal.h): _shadowSeed
+					     * watched -- the CPU's changes told to the core, which fills the mirror again */
 	hakios_metal_texture *_turnedSurface; /* a framebuffer with a rotation: the surface itself, upright, that _texture is turned into */
 	unsigned _turn;                     /* ... by this a6xx_rotation (the 2D engine's, probe "2D rotation") */
 	HakiosMetalTexture *_parent;        /* a view: _texture is the parent's and is freed with it, not with the view... */
@@ -571,6 +573,7 @@ static BOOL hm_fps_on(void);                          /* metal_fps: command buff
 static BOOL hm_gmem_on(void);                         /* metal_gmem=1: tiled rendering where a pass allows it */
 - (void)hakiosShadowYCbCr:(IOSurfaceRef)surface format:(MTLPixelFormat)format;
 - (void)hakiosRefreshShadow;
+- (void)hakiosMirroredFrom:(uint32_t)seed;
 - (void)hakiosSetDeallocator:(void (^)(void *, NSUInteger))deallocator bytes:(void *)bytes length:(NSUInteger)length;
 - (unsigned)hakiosStorageKind;   /* metal_fps=timeline: 0 a surface's, else 1 + its storage mode */
 @end
@@ -4016,6 +4019,9 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 	}
 	t = [[HakiosMetalTexture alloc] initWithHakiosDevice:self texture:texture descriptor:descriptor usage:usage];
 	[t hakiosSetIOSurface:surface plane:plane];
+	if (hakios_metal_texture_mirrored(texture)) {
+		[t hakiosMirroredFrom:IOSurfaceGetSeed(surface)];
+	}
 	return t;
 }
 
@@ -4495,6 +4501,19 @@ HM_REFUSES_OUT_LOUD
 
 /* A copy a kernel or a pass may have written: its rows back into the surface, the surface's seed moving as for any
  * write, and the copy then current with it (the next refresh does not read back what was just written). */
+/* (a copy of a surface's rows over 5 ms said, the first 30: the App Library's snapshot came with a ~100 ms stall, 11-10) */
+static void
+hm_shadow_say(const char *what, unsigned surface, size_t bytes, double began, double copied, double read, double done)
+{
+	static unsigned said;
+
+	if (done - began >= 0.005 && said < 30) {
+		said++;
+		hm_print("shadow: surface %u %s, %zu bytes, %.1f ms (copy %.1f, GPU's rows read %.1f, merged %.1f)\n", surface, what, bytes,
+			 (done - began) * 1e3, (copied - began) * 1e3, (read - copied) * 1e3, (done - read) * 1e3);
+	}
+}
+
 - (void)hakiosWriteBackShadow
 {
 	if (_parent != nil) {
@@ -4520,8 +4539,10 @@ HM_REFUSES_OUT_LOUD
 	uint8_t *surface = IOSurfaceGetBaseAddress(_iosurface);
 
 	memcpy(now, _shadowBase != NULL ? _shadowBase : surface, bytes);
+	const double copied = hm_now();
 	(void)hakios_metal_texture_read(_texture, 0, 0, hakios_metal_texture_width(_texture), hakios_metal_texture_height(_texture), now,
 					(uint64_t)IOSurfaceGetBytesPerRow(_iosurface));
+	const double read = hm_now();
 	if (_shadowBase == NULL) {
 		memcpy(surface, now, bytes);
 	} else {
@@ -4536,6 +4557,7 @@ HM_REFUSES_OUT_LOUD
 	_shadowBase = now;
 	_shadowSeed = IOSurfaceGetSeed(_iosurface);
 	hm_fps_shadow(NO, hm_now() - began);
+	hm_shadow_say("written back", IOSurfaceGetID(_iosurface), bytes, began, copied, read, hm_now());
 }
 
 - (void)hakiosShadow:(IOSurfaceRef)surface
@@ -4637,6 +4659,12 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 	}
 }
 
+- (void)hakiosMirroredFrom:(uint32_t)seed
+{
+	_mirrored = YES;
+	_shadowSeed = seed;
+}
+
 - (void)hakiosRefreshShadow
 {
 	if (_parent != nil) {
@@ -4644,6 +4672,15 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 		return;
 	}
 	uint32_t seed;
+
+	if (_mirrored) {
+		/* (a mirror: the GPU's copy, kept by the core; only what the CPU did to the surface is news to it) */
+		if (_iosurface != NULL && (seed = IOSurfaceGetSeed(_iosurface)) != _shadowSeed) {
+			_shadowSeed = seed;
+			hakios_metal_texture_surface_changed(_texture);
+		}
+		return;
+	}
 
 	if (!_shadow || _iosurface == NULL || (seed = IOSurfaceGetSeed(_iosurface)) == _shadowSeed) {
 		return;
@@ -4672,6 +4709,8 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 	IOSurfaceUnlock(_iosurface, kIOSurfaceLockReadOnly, NULL);
 	_shadowSeed = seed;
 	hm_fps_shadow(YES, hm_now() - began);
+	hm_shadow_say("taken", IOSurfaceGetID(_iosurface), IOSurfaceGetBytesPerRow(_iosurface) * IOSurfaceGetHeight(_iosurface), began,
+		      began, began, hm_now());
 }
 
 - (void)hakiosSetIOSurface:(IOSurfaceRef)surface plane:(NSUInteger)plane

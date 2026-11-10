@@ -1,9 +1,12 @@
 /*
- * pan_blit_shaders: the four compute shaders hakios-metal's Mali back end does Metal's blit copies and fills with,
+ * pan_blit_shaders: the five compute shaders hakios-metal's Mali back end does Metal's blit copies and fills with,
  * built in NIR and compiled by Mesa 26.2.5's panfrost compiler for the Pixel 8a's Mali-G715 (GPU_ID 0xb8a21020):
  *
  *   copy_u32, fill_u32    a 32-bit word an invocation (offsets and length multiples of 4)
  *   copy_u8,  fill_u8     a byte an invocation (anything else)
+ *   copy_rows_u32         rows of words between two strides: invocation i copies word i % W of row i / W, W the
+ *                         value (byte 16), the source's stride at byte 24, the destination's at 28 (11-10: an IOSurface
+ *                         whose rows the Mali cannot sample, 4320 bytes, mirrored into a texture of 64-byte rows)
  *
  * 64 invocations a workgroup; invocation i acts if i < count. Push constants (8 words, the same for all four):
  * byte 0 the destination's address, 8 the source's (copies), 16 the value (fills: the byte, or it repeated in a word),
@@ -24,7 +27,7 @@
 #define GPU_ID 0xb8a21020ULL
 
 static void
-emit(FILE *out, const char *name, bool copy, unsigned bits)
+emit(FILE *out, const char *name, bool copy, unsigned bits, bool rows)
 {
 	const nir_shader_compiler_options *options =
 	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_COMPUTE, false);
@@ -42,7 +45,20 @@ emit(FILE *out, const char *name, bool copy, unsigned bits)
 	nir_push_if(&b, nir_ult(&b, gid, count));
 	offset = nir_u2u64(&b, nir_imul_imm(&b, gid, bits / 8));
 	dst = nir_iadd(&b, nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0), offset);
-	if (copy) {
+	if (copy && rows) {
+		nir_def *w = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 16), .base = 0);
+		nir_def *row = nir_udiv(&b, gid, w);
+		nir_def *col4 = nir_imul_imm(&b, nir_isub(&b, gid, nir_imul(&b, row, w)), 4);
+		nir_def *ss = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 24), .base = 0);
+		nir_def *ds = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 28), .base = 0);
+		nir_def *so = nir_iadd(&b, nir_imul(&b, nir_u2u64(&b, row), nir_u2u64(&b, ss)), nir_u2u64(&b, col4));
+		nir_def *dof = nir_iadd(&b, nir_imul(&b, nir_u2u64(&b, row), nir_u2u64(&b, ds)), nir_u2u64(&b, col4));
+		nir_def *src = nir_iadd(&b, nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 8), .base = 0), so);
+		nir_def *v = nir_load_global(&b, 1, 32, src, .align_mul = 4);
+
+		dst = nir_iadd(&b, nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0), dof);
+		nir_store_global(&b, v, dst, .align_mul = 4, .write_mask = 1);
+	} else if (copy) {
 		nir_def *src = nir_iadd(&b, nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 8), .base = 0), offset);
 		nir_def *v = nir_load_global(&b, 1, bits, src, .align_mul = bits / 8);
 
@@ -87,13 +103,14 @@ main(int argc, char **argv)
 		return 1;
 	}
 	fprintf(out, "/* made by hakios-kernel's tools/mesa/pan/pan_blit_shaders.c: Mesa 26.2.5's panfrost compiler for the "
-	    "Mali-G715 (GPU_ID 0x%llx). Push constants: dst @0, src @8, value @16, count @20; 64 invocations a workgroup. */\n"
+	    "Mali-G715 (GPU_ID 0x%llx). Push constants: dst @0, src @8, value @16, count @20 (copy_rows_u32: strides @24 @28); 64 invocations a workgroup. */\n"
 	    "#pragma once\n#include <stdint.h>\nstruct mali_blit_shader { unsigned work_regs; uint64_t preload; unsigned fau_words; "
-	    "unsigned size; uint8_t code[512]; };\n", (unsigned long long)GPU_ID);
-	emit(out, "copy_u32", true, 32);
-	emit(out, "fill_u32", false, 32);
-	emit(out, "copy_u8", true, 8);
-	emit(out, "fill_u8", false, 8);
+	    "unsigned size; uint8_t code[1024]; };\n", (unsigned long long)GPU_ID);
+	emit(out, "copy_u32", true, 32, false);
+	emit(out, "fill_u32", false, 32, false);
+	emit(out, "copy_u8", true, 8, false);
+	emit(out, "fill_u8", false, 8, false);
+	emit(out, "copy_rows_u32", true, 32, true);
 	fclose(out);
 	return 0;
 }
