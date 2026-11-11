@@ -1235,6 +1235,7 @@ HM_REFUSES_OUT_LOUD
 - (hakios_metal_program *)hakiosTakeProgram;                   /* its program, given up (the state then has none) */
 - (void)hakiosKeepFragment:(NSData *)air constants:(const hakios_metal_constant *)constants count:(unsigned)count;
 - (hakios_metal_program *)hakiosProgramFor:(hakios_metal_buffer *const *)buffers offsets:(const uint64_t *)offsets count:(unsigned)count;
+- (void)hakiosAdoptSpecialisationOf:(HakiosMetalRenderPipelineState *)real;   /* a background compile's kept fragment */
 @end
 
 @interface HakiosMetalCommandQueue : _MTLCommandQueue {
@@ -3284,9 +3285,13 @@ hm_compile_queue(void)
 	static dispatch_queue_t q;
 	static dispatch_once_t once;
 
+	/* (USER_INITIATED since 11-11: what waits on it is on the screen -- CoreAnimation's generic pipelines, whose draws are
+	 * skipped until they are in. At UTILITY a fresh boot's loads of them from the cache took 0.24-2.2 s each, growing as
+	 * the boot got busier, from the RAM disk's seed as from the flash: the thread waited for the processors, not for
+	 * the file) */
 	dispatch_once(&once, ^{
 		q = dispatch_queue_create("com.hakios.metal.compile", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
-		    QOS_CLASS_UTILITY, 0));
+		    QOS_CLASS_USER_INITIATED, 0));
 	});
 	return q;
 }
@@ -3338,6 +3343,7 @@ hm_compile_queue(void)
 			hm_no_defer = NO;
 			if (real != nil && [real hakiosStandIn] == NULL) {
 				[later hakiosSetProgram:[real hakiosTakeProgram]];
+				[later hakiosAdoptSpecialisationOf:real];
 				hm_print("compiled in the background: %s, in %llu ms\n", [name UTF8String], hm_ms_since(t0));
 			} else {
 				[later hakiosSetStandIn:real != nil ? [real hakiosStandIn] : "refused in the background"];
@@ -7623,6 +7629,8 @@ HM_REFUSES_OUT_LOUD
 	_hakiosDevice = [device retain];
 	_program = program;
 	_hakiosUniqueIdentifier = hm_next_resource_id();
+	_specBinding = -1;          /* (none until hakiosKeepFragment: an ivar's 0 named buffer 0 -- a background compile's
+				     *  state asked to specialise with no bitcode and no bytes at every draw, 11-11) */
 	return self;
 }
 
@@ -7653,6 +7661,21 @@ HM_REFUSES_OUT_LOUD
 	hakios_metal_program *p = _program;
 	_program = NULL;
 	return p;
+}
+
+/* THE BACKGROUND COMPILE'S KEPT FRAGMENT (11-11): CoreAnimation's generic pipelines (fixed_frag_lph_cpf) are the ones
+ * compiled in the background (hm_deferred), and their stand-in never kept the fragment function -- so no uber shader
+ * was ever specialised, and the widgets drew with the whole of it. After the program (a draw that sees the binding
+ * sees the program too). */
+- (void)hakiosAdoptSpecialisationOf:(HakiosMetalRenderPipelineState *)real
+{
+	if (real == nil || real->_specBinding < 0 || real->_fsAir == nil || _fsAir != nil) return;
+	_fsAir = [real->_fsAir retain];
+	memcpy(_fsConstants, real->_fsConstants, sizeof(_fsConstants));
+	_fsConstantCount = real->_fsConstantCount;
+	_specLength = real->_specLength;
+	_specialised = [[NSMutableDictionary alloc] init];
+	__atomic_store_n(&_specBinding, real->_specBinding, __ATOMIC_RELEASE);
 }
 
 /* boot-arg metal_nospec: every draw with the pipeline's own program, no uber shader specialised */
@@ -7703,7 +7726,8 @@ hm_spec_off(void)
 	static dispatch_queue_t compiling;
 	static dispatch_once_t once;
 
-	if (_specBinding < 0 || (unsigned)_specBinding >= count || buffers[_specBinding] == NULL) return _program;
+	if (__atomic_load_n(&_specBinding, __ATOMIC_ACQUIRE) < 0 || (unsigned)_specBinding >= count || buffers[_specBinding] == NULL ||
+	    _program == NULL) return _program;
 	const uint8_t *bytes = (const uint8_t *)hakios_metal_buffer_contents(buffers[_specBinding]);
 	const uint64_t length = hakios_metal_buffer_length(buffers[_specBinding]), at = offsets[_specBinding];
 	if (bytes == NULL || at > length || length - at < _specLength) return _program;
@@ -7733,13 +7757,23 @@ hm_spec_off(void)
 			hakios_metal_program *p = hakios_metal_program_specialize(_program, [_fsAir bytes], [_fsAir length], _fsConstants, _fsConstantCount,
 										 (unsigned)_specBinding, [key bytes], [key length]);
 			clock_gettime(CLOCK_MONOTONIC, &t1);
+			static int said;
 			if (p == NULL) {
 				hm_print("specialise: %s for its buffer %d: %s; its own program goes on\n", hakios_metal_program_name(_program), _specBinding,
 					 hakios_metal_error());
-			} else if (hm_fps_on()) {
+			} else if (hm_fps_on() || said < 24) {
 				hm_print("specialise: %s for %u bytes of its buffer %d: %u instruction words, not %u, in %.0f ms\n", hakios_metal_program_name(_program),
 					 _specLength, _specBinding, hakios_metal_program_stage_words(p, 1), hakios_metal_program_stage_words(_program, 1),
 					 (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
+			}
+			if (said++ < 24) {
+				/* (11-11: the bytes, for tools/mesa/pan/mali_stage_host's BINDING:HEX) */
+				char hex[2 * 256 + 1] = "";
+				const uint8_t *kb = (const uint8_t *)[key bytes];
+				for (unsigned i = 0; i < [key length] && i < 256; i++) {
+					snprintf(hex + 2 * i, 3, "%02x", kb[i]);
+				}
+				hm_print("specialise: %s, buffer %d holds %s\n", [[(id)self label] UTF8String] ?: "?", _specBinding, hex);
 			}
 			@synchronized(self) {
 				if (p != NULL) [_specialised setObject:[NSValue valueWithPointer:p] forKey:key];

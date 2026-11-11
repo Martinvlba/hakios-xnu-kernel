@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# As rc.jobs.widgetsopen, the first opening 100 s after the job starts instead of 38 (11-11: is a fresh boot's stall
+# the boot's own work still going on?). RC_JOBS=rc.jobs.widgetslate.
+/redwood/bin/rwtouch wait 100
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 4 swipe 0.85 0.5 0.15 0.5 300 wait 3
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 4 swipe 0.85 0.5 0.15 0.5 300 wait 3
+/redwood/bin/rwtouch wait 20

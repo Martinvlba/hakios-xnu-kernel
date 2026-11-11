@@ -97,6 +97,12 @@ int mali_vertex_compile(const void *bitcode, size_t size, const struct mali_cons
 /* a vertex function (FRAGMENT 0), or a fragment function (FRAGMENT 1) against VERTEX's varyings; as mali_kernel_compile */
 int mali_stage_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count, int fragment,
     const struct mali_kernel_binary *vertex, struct mali_kernel_binary *out, char *error, size_t error_size);
+/* A FRAGMENT STAGE SPECIALISED FOR ONE BUFFER'S BYTES (hakios_metal_program_specialize, 11-11): this thread's fragment
+ * compiles read [[buffer(BINDING)]] at constant offsets as these bytes, folded through the shader -- an uber shader
+ * (CoreAnimation's fixed_frag_lph_cpf, ~20 000 instructions) keeps only the path the buffer's configuration takes.
+ * NULL: none (the default) */
+struct mali_known_buffer { unsigned binding; const uint8_t *bytes; size_t length; };
+void mali_compile_known(const struct mali_known_buffer *known);
 /* a fragment function with the blend of the targets in BLEND->MASK done in the shader (Metal's numbers: MTLBlendOperation,
  * MTLBlendFactor, MTLColorWriteMask), from the tile buffer's pixel (framebuffer fetch); otherwise mali_stage_compile's */
 struct mali_blend_rt { unsigned rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask; };

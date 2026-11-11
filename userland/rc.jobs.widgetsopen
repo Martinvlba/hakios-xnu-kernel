@@ -1,0 +1,8 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The widgets page opened cold after a boot, then again warm (11-11: the first opening stalled ~430 ms mid-swipe in the
+# pages-fresh2 recording). With rec=4 touch_lat=1: the recording fetched at the "wait 20", SpringBoard's long run-loop
+# turns in the console (devices/akita/tools/tl-symbols.py). RC_JOBS=rc.jobs.widgetsopen.
+/redwood/bin/rwtouch wait 38
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 4 swipe 0.85 0.5 0.15 0.5 300 wait 3
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 4 swipe 0.85 0.5 0.15 0.5 300 wait 3
+/redwood/bin/rwtouch wait 20

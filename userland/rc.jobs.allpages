@@ -1,0 +1,22 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Every page from a fresh boot, for the screen recording (rec=4 sb_debug=1, 11-11: the tester saw the widgets page flicker
+# when he opened it right after a boot): each step, then 20 s still while the host fetches the ring of the last seconds
+# (the "wait 20" lines). The widgets page as soon as the home screen is up, held; scrolled; every home page to the App
+# Library, scrolled; Spotlight; Notification Center; Control Center; the widgets page again. RC_JOBS=rc.jobs.allpages.
+/redwood/bin/rwtouch wait 38
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 6
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.5 0.8 0.5 0.3 400 wait 2 swipe 0.5 0.3 0.5 0.8 400 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.5 0.8 0.5 0.3 400 wait 2 button home wait 2
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.5 0.45 0.5 0.75 250 wait 2 button home wait 2
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.3 0.005 0.3 0.6 300 wait 2 button home wait 2
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.95 0.005 0.95 0.55 300 wait 2 button home wait 2
+/redwood/bin/rwtouch wait 20
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 3 swipe 0.5 0.8 0.5 0.3 400 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2
+/redwood/bin/rwtouch wait 20

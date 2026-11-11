@@ -461,6 +461,10 @@ struct hakios_metal_program {
     std::string more_blend_refusal[3];
     char name[300] = "";
     char label[128] = "";       // the pipeline descriptor's (hakios_metal_program_set_label: diagnostics only)
+    // a program specialised for a buffer's bytes (hakios_metal_program_specialize): its fragment stage compiled with
+    // [[buffer(known_binding)]] read as KNOWN (compile_mali.c's mali_compile_known), every compile of it alike
+    int known_binding = -1;
+    std::vector<uint8_t> known;
 
     void retain() { refs.fetch_add(1); }
     void release()
@@ -539,6 +543,7 @@ struct hakios_metal_texture {
     bool mirrored = false;                      // ... its memory the surface's mirror (Mirror), not the surface's own
     bool memoryless = false;                    // Metal's memoryless storage (hakios_metal_texture_set_memoryless): an
                                                 //  extra colour attachment of it lives in the tile buffer alone
+    std::atomic<unsigned> widest_rts{0};        // the most targets a draw with it as colour attachment 1 had (passWide)
     // (11-10, a diagnostic for metal_stats: CoreAnimation's second colour attachment -- is it ever read?)
     std::atomic<unsigned> as_extra_rt{0};       // draws it was colour attachment 1-3 of
     std::atomic<unsigned> reads{0};             // times it was sampled by a draw or dispatch, copied from, or read back
@@ -1602,7 +1607,7 @@ struct hakios_metal_queue {
                 uint64_t nothing = 0;
                 device->call(0x7f, &nothing, sizeof(nothing));        // (HakiosGPU: the queues and heaps into its log)
             }
-            static const bool stats = bootArg("metal_stats"), cbtime = bootArg("metal_cbtime");
+            static const bool stats = bootArg("metal_stats") || bootArg("mdsay="), cbtime = bootArg("metal_cbtime");
             if (stats) {
                 passStats(cb);
             }
@@ -2084,7 +2089,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
         cb->status = HAKIOS_METAL_ERROR;
     } else if (!cb->blits.empty()) {
         // the stream (from 0), then each job's push constants: 32 bytes for a blit, a kernel's fau_words for a dispatch
-        static const bool stats = bootArg("metal_stats");
+        static const bool stats = bootArg("metal_stats") || bootArg("mdsay=");
         size_t words = 18 + cb->blits.size() * 24 + cb->draws.size() * (DRAW_WORDS + (stats ? 4 : 0));   // (24: a compute job's 15, its flush's 3)
         if (stats && !cb->draws.empty() && cb->timestamps.size == 0) {
             if (!d->newBo(cb->timestamps, ((cb->draws.size() * 16) + 0xfff) & ~0xfffULL, BIND_NOEXEC)) {
@@ -3034,7 +3039,9 @@ passStats(hakios_metal_cb *cb)
         limit = 40;
         if (sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && (at = strstr(args, "metal_stats_ms=")) != nullptr) {
             limit = atof(at + 15);
-        }
+        } else if ((at = strstr(args, "mdsay=")) != nullptr) {
+            limit = atof(at + 6);                       // (mdsay=N: the threshold, and each slow pass's draws -- short:
+        }                                               //  the command line holds 490 characters)
     }
     if (ms < limit || said >= 300) {
         return;
@@ -3079,6 +3086,42 @@ passStats(hakios_metal_cb *cb)
         }
         double gpu_us = -1;
         if (cb->timestamps.size != 0 && 2 * passes + 1 < cb->timestamp_count) {
+            auto *ts0 = (volatile uint64_t *)cb->timestamps.cpu;
+            double us = (double)(ts0[2 * passes + 1] - ts0[2 * passes]) / 24.576;
+            static const bool draws_say = bootArg("mdsay=");
+            if (draws_say && us >= limit * 1000 * 0.5) {
+                // (boot-arg mdsay=MS, 11-11: a slow pass's draws -- each one's area (its scissor), vertices,
+                // program, the textures it samples (size, format, stride; an IOSurface's ID) and its flags)
+                std::string d;
+                for (size_t j = i; j <= k && d.size() < 3000; j++) {
+                    const DrawJob &x = cb->draws[cb->blits[j].dst];
+                    unsigned w = (x.scissor_max & 0xffff) - (x.scissor_min & 0xffff) + 1;
+                    unsigned h = (x.scissor_max >> 16) - (x.scissor_min >> 16) + 1;
+                    char one[400];
+                    const hakios_metal_program *xp = (const hakios_metal_program *)x.program;
+                    const char *lab = xp ? xp->label : "";
+                    if (strncmp(lab, "com.apple.coreanimation.draw.", 29) == 0) lab += 29;
+                    int at = snprintf(one, sizeof(one), " {%ux%u@%u,%u %uv %s %s fs %u dcd0 %x blend %x", w, h,
+                        x.scissor_min & 0xffff, x.scissor_min >> 16, x.count * (x.instances ? x.instances : 1),
+                        x.name ? x.name + (strlen(x.name) > 12 ? strlen(x.name) - 12 : 0) : "", lab, xp ? xp->fs.size : 0,
+                        x.dcd0, x.blend[0]);
+                    for (unsigned t = 0; t < x.texture_count && at < (int)sizeof(one) - 60; t++) {
+                        const hakios_metal_texture *tx = x.textures[t];
+                        if (tx) at += snprintf(one + at, sizeof(one) - at, " T%ux%u f%u s%u%s", tx->width, tx->height, tx->format,
+                            tx->stride, tx->surface ? " ios" : "");
+                    }
+                    snprintf(one + at, sizeof(one) - at, "}");
+                    d += one;
+                }
+                const DrawJob &h0 = cb->draws[cb->blits[i].dst];
+                const hakios_metal_texture *tt = h0.target_tex;
+                fprintf(stderr, "hakios-metal: slow pass %.0f us, %u draws into %ux%u f%u s%u origin %u surface %u%s%s%s at %llx:%s\n",
+                    us, n, tt ? tt->width : 0, tt ? tt->height : 0, tt ? tt->format : 0, tt ? tt->stride : 0, tt ? tt->origin : 0,
+                    tt ? tt->surface : 0, tt && tt->mirrored ? " mirrored" : "", h0.load ? " L" : "", h0.write ? " W" : "",
+                    (unsigned long long)h0.target_va, d.c_str());
+            }
+        }
+        if (cb->timestamps.size != 0 && 2 * passes + 1 < cb->timestamp_count) {
             auto *ts = (volatile uint64_t *)cb->timestamps.cpu;
             gpu_us = (double)(ts[2 * passes + 1] - ts[2 * passes]) / 24.576;    // (the system counter: 24.576 MHz)
             gpu_sum += gpu_us;
@@ -3087,13 +3130,19 @@ passStats(hakios_metal_cb *cb)
         draws += n;
         loads += dj.load;
         pixels += (uint64_t)dj.width * dj.height;
-        if (list.size() < 1500) {
-            char one[240];
-            char a1[64] = "";
+        if (list.size() < 2500) {
+            char one[400];
+            char a1[160] = "";
             if (dj.rts > 1 && dj.more[0].texture != nullptr && !dj.more[0].missing) {
                 const hakios_metal_texture *x = dj.more[0].texture;
-                snprintf(a1, sizeof(a1), " a1 fmt %u %ux%u: attachment %u times, READ %u", x->format, x->width, x->height,
-                    x->as_extra_rt.load(), x->reads.load());
+                int at = snprintf(a1, sizeof(a1), " a1 fmt %u %ux%u: attachment %u times, READ %u @%llx", x->format, x->width,
+                    x->height, x->as_extra_rt.load(), x->reads.load(), (unsigned long long)(dj.more[0].va & 0xffffffffff));
+                if (dj.rts > 2 && dj.more[1].texture != nullptr && !dj.more[1].missing) {
+                    const hakios_metal_texture *y = dj.more[1].texture;
+                    snprintf(a1 + at, sizeof(a1) - at, " a2 %c fmt %u %ux%u @%llx", dj.more[1].memoryless ? 't' : dj.more[1].load ?
+                        'l' : dj.more[1].write ? 'w' : '-', y->format, y->width, y->height,
+                        (unsigned long long)(dj.more[1].va & 0xffffffffff));
+                }
             }
             snprintf(one, sizeof(one), " [%.0fus %ux%u %u%s%s %s rts %u%s t%u%s%s%s]", gpu_us, dj.width, dj.height, n, dj.load ? " L" : "",
                 dj.clear_only ? " C" : "", dj.name ? dj.name : "", dj.rts,
@@ -3521,27 +3570,58 @@ readAll(int fd, void *p, size_t n)
 }
 
 // (the cache's use, said once a process after 40 looks: 11-10, seven pipelines compiled again at every boot)
-std::atomic<unsigned> cache_hits{0}, cache_misses{0}, cache_bad{0}, cache_unwritten{0};
+std::atomic<unsigned> cache_hits{0}, cache_misses{0}, cache_bad{0}, cache_unwritten{0}, cache_seeded{0};
 void
 cacheSay()
 {
     unsigned n = cache_hits + cache_misses + cache_bad;
     if (n == 40) {
-        fprintf(stderr, "hakios-metal: shader cache %s: %u found, %u not there, %u not whole, %u not written (of the first 40 looks)\n",
-            cacheDir().empty() ? "(none: no directory)" : cacheDir().c_str(), (unsigned)cache_hits, (unsigned)cache_misses,
-            (unsigned)cache_bad, (unsigned)cache_unwritten);
+        fprintf(stderr, "hakios-metal: shader cache %s: %u found (%u of them in the image's seed), %u not there, %u not whole, "
+            "%u not written (of the first 40 looks)\n", cacheDir().empty() ? "(none: no directory)" : cacheDir().c_str(),
+            (unsigned)cache_hits, (unsigned)cache_seeded, (unsigned)cache_misses, (unsigned)cache_bad, (unsigned)cache_unwritten);
     }
+}
+
+// THE IMAGE'S SEED (TODO 21, 11-11): programs compiled on an earlier boot and put into the image's RAM disk
+// (devices/akita/tools/usbmux-pull-cache.py -> userland/hakios-metal-cache-mali -> userland/build.sh), read-only, looked
+// at before the phone's own cache: at boot a 160 KB file of the latter took 1.1-2.5 s to read (behind the boot's ~2 GB
+// of storage reads: CoreAnimation's seven generic pipelines ~12 s, their draws skipped meanwhile), and a new image's
+// first boot compiled for minutes. Names as the cache's own (cachePath); boot-arg metal_seed=0: not looked at.
+const std::string &
+seedDir()
+{
+    static std::string dir;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const char *d = "/redwood/share/hakios-metal-cache-mali";
+        struct stat st;
+        if (!bootArg("metal_seed=0") && stat(d, &st) == 0 && S_ISDIR(st.st_mode)) {
+            dir = d;
+        }
+    });
+    return dir;
 }
 
 // both stages from the file KEY names; false (and nothing left allocated) when there is none or it is not whole
 bool
 cacheLoad(uint64_t key, mali_kernel_binary *vs, mali_kernel_binary *fs)
 {
-    if (!cacheOn() || cacheDir().empty()) { cache_misses++; cacheSay(); return false; }
-    std::string path = cachePath(key);
-    int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) { cache_misses++; cacheSay(); return false; }
-    utimes(path.c_str(), nullptr);              // (used now: the trim keeps it)
+    if (!cacheOn()) { cache_misses++; cacheSay(); return false; }
+    int fd = -1;
+    bool seeded = false;
+    if (!seedDir().empty()) {
+        char name[32];
+        snprintf(name, sizeof(name), "/%016llx.prog", (unsigned long long)key);
+        fd = open((seedDir() + name).c_str(), O_RDONLY);
+        seeded = fd >= 0;
+    }
+    if (fd < 0) {
+        if (cacheDir().empty()) { cache_misses++; cacheSay(); return false; }
+        std::string path = cachePath(key);
+        fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0) { cache_misses++; cacheSay(); return false; }
+        utimes(path.c_str(), nullptr);          // (used now: the trim keeps it)
+    }
     char magic[8];
     uint64_t k = 0;
     uint32_t struct_size = 0;
@@ -3560,6 +3640,7 @@ cacheLoad(uint64_t key, mali_kernel_binary *vs, mali_kernel_binary *fs)
     }
     close(fd);
     (ok ? cache_hits : cache_bad)++;
+    if (ok && seeded) cache_seeded++;
     cacheSay();
     if (!ok) {
         free(vs->code);
@@ -3637,6 +3718,16 @@ hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_siz
     }
     p->color_format = color_pixel_format;
     snprintf(p->name, sizeof(p->name), "%s+%s", p->vs.name, p->fs.name);
+    {
+        // (boot-arg metal_shaderstats, 11-11: each program's compiled size, registers and spilling -- CoreAnimation's
+        // full-screen cph passes took 7 ms each with a few draws: how big is the shader)
+        static const bool stats = bootArg("metal_shaderstats");
+        if (stats) {
+            fprintf(stderr, "hakios-metal: shader %s: vertex %u bytes %u regs tls %u; fragment %u bytes %u regs tls %u, "
+                "%u constants, %u resources%s\n", p->name, p->vs.size, p->vs.work_regs, p->vs.tls_size, p->fs.size,
+                p->fs.work_regs, p->fs.tls_size, fs_count, p->fs.num_resources, found ? " (cached)" : "");
+        }
+    }
     p->vs_bitcode.assign((const uint8_t *)vs_bitcode, (const uint8_t *)vs_bitcode + vs_size);
     p->fs_bitcode.assign((const uint8_t *)fs_bitcode, (const uint8_t *)fs_bitcode + fs_size);
     p->vs_constants = vc;
@@ -3722,6 +3813,41 @@ hakios_metal_program_set_vertex_layout(hakios_metal_program *p, unsigned buffer_
 }
 
 namespace {
+// the fragment constants as the cache's key holds them: a specialised program's buffer bytes after them (pseudo-
+// constants: what the stage is compiled for, not what the front end is given)
+std::vector<mali_constant>
+keyedConstants(const hakios_metal_program *p, const std::vector<mali_constant> &fc)
+{
+    if (p->known_binding < 0) return fc;
+    std::vector<mali_constant> k(fc.size() + 1 + (p->known.size() + 7) / 8);   // (value-initialised: no stray padding)
+    std::copy(fc.begin(), fc.end(), k.begin());
+    size_t at = fc.size();
+    k[at].index = 0x40000000u | (unsigned)p->known_binding;
+    k[at++].bits = p->known.size();
+    for (size_t i = 0; i < p->known.size(); i += 8, at++) {
+        uint64_t w = 0;
+        memcpy(&w, p->known.data() + i, std::min<size_t>(8, p->known.size() - i));
+        k[at].index = 0x40010000u + (unsigned)(i / 8);
+        k[at].bits = w;
+    }
+    return k;
+}
+
+// this thread's fragment compiles fold P's known buffer while it lives
+struct KnownNow {
+    mali_known_buffer kb = {};
+    explicit KnownNow(const hakios_metal_program *p)
+    {
+        if (p->known_binding >= 0) {
+            kb = { (unsigned)p->known_binding, p->known.data(), p->known.size() };
+            mali_compile_known(&kb);
+        }
+    }
+    ~KnownNow() { mali_compile_known(nullptr); }
+};
+}  // namespace
+
+namespace {
 // the stages again with the vertex descriptor's attributes fetched in the shader, before the program's first upload;
 // true when there is nothing to do or it was done, false with p->fetch_refusal said
 bool
@@ -3744,9 +3870,10 @@ compileFetch(hakios_metal_program *p)
     mali_kernel_binary vs = {}, fs = {};
     char why[512] = "";
     uint64_t key = cacheKey(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants, p->fs_bitcode.data(),
-                            p->fs_bitcode.size(), p->fs_constants, p->color_format, p->fetch_described ? &p->fetch : nullptr,
-                            blended ? &p->shader_blend : nullptr);
+                            p->fs_bitcode.size(), keyedConstants(p, p->fs_constants), p->color_format,
+                            p->fetch_described ? &p->fetch : nullptr, blended ? &p->shader_blend : nullptr);
     if (!cacheLoad(key, &vs, &fs)) {
+        KnownNow known(p);
         int r = p->fetch_described ?
             mali_vertex_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(),
                                 &p->fetch, &vs, why, sizeof(why)) :
@@ -4275,6 +4402,29 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         }
         rts = i + 1;
     }
+    // ONE MALI PASS FOR CROSS-FADED DRAWS (11-11): CoreAnimation's fixed_frag_lph_cpf (the generic pipeline) writes a
+    // third colour output its passes have no attachment for -- a target of the scratch's (dj.more below) -- and so it had
+    // a Mali pass of three targets amid the passes of two of the same encoder: the home screen's frames split into up to
+    // 16 full-screen passes, each preloading and writing back the screen (~1.1 ms each, 18 ms a frame; metal_stats_ms).
+    // So each target set (keyed on colour attachment 1, CoreAnimation's memoryless one, or else attachment 0) remembers
+    // the most targets a draw of it had, and a draw with fewer takes the missing ones too -- outputs it never writes, a
+    // scratch target never loaded nor written back -- and samePass keeps it in the Mali pass. Boot-arg mwide=0: not done.
+    static const bool no_wide = bootArg("mwide=0");
+    if (refused == nullptr && !no_wide && t != nullptr) {
+        hakios_metal_texture *key = rts > 1 && pass->more[0].texture != nullptr ? pass->more[0].texture : t;
+        unsigned seen = key->widest_rts.load();
+        if (rts > seen) {
+            key->widest_rts.store(rts);
+        } else if (seen > rts) {
+            bool none = true;                           // (only past every attachment the pass has)
+            for (unsigned i = rts; i < seen && none; i++) {
+                none = pass->more[i - 1].texture == nullptr;
+            }
+            if (none) {
+                rts = seen;
+            }
+        }
+    }
     for (unsigned i = rts; refused == nullptr && i < 8; i++) {
         if (pass->more[i - 1].texture != nullptr && pass->more[i - 1].load_action == 2) {
             static std::atomic<bool> told{false};
@@ -4285,9 +4435,9 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     }
     bool loads = refused == nullptr && pass->load_action == 1;
     for (unsigned i = 1; refused == nullptr && i < rts; i++) {
-        static const bool no_ml = bootArg("metal_nomemoryless");
+        static const bool no_ml = bootArg("metal_nomemoryless"), mlread_old = bootArg("mlread=1");
         const bool ml = pass->more[i - 1].texture != nullptr && pass->more[i - 1].texture->memoryless && !no_ml &&
-            !(p->fs.rt_read & 1u << i);         // (a memoryless attachment is not loaded: below)
+            (!(p->fs.rt_read & 1u << i) || !mlread_old);    // (a memoryless attachment is not loaded: below)
         loads = loads || (pass->more[i - 1].texture != nullptr && !ml &&
                           (pass->more[i - 1].load_action == 1 || !(p->fs.rt_written & 1u << i)));
     }
@@ -4576,8 +4726,11 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
          * each. A draw whose fragment function reads it (framebuffer fetch) keeps the load and store, as before.
          * Boot-arg metal_nomemoryless: as before everywhere.
          */
-        static const bool no_memoryless = bootArg("metal_nomemoryless");
-        m.memoryless = a.texture->memoryless && !no_memoryless && !(p->fs.rt_read & 1u << i);
+        // (11-11: read by the fragment function too -- framebuffer fetch reads the tile buffer, and Metal never loads a
+        // memoryless attachment from memory: CoreAnimation's cross-fade reads it, and its Mali pass loaded and wrote back
+        // ~20 MB of stale memory for it. Boot-arg mlread=1: loaded and stored when read, as before)
+        static const bool no_memoryless = bootArg("metal_nomemoryless"), mlread_old = bootArg("mlread=1");
+        m.memoryless = a.texture->memoryless && !no_memoryless && (!(p->fs.rt_read & 1u << i) || !mlread_old);
         rtFormat(a.texture->format, m.rt1);
         m.write = a.store_action == 1;
         m.load = a.load_action == 1;
@@ -5755,10 +5908,81 @@ hakios_metal_program *
 hakios_metal_program_specialize(hakios_metal_program *base, const void *fs_bitcode, size_t fs_size,
     const hakios_metal_constant *fs_constants, unsigned fs_count, unsigned binding, const void *bytes, size_t length)
 {
-    (void)base; (void)fs_bitcode; (void)fs_size; (void)fs_constants; (void)fs_count; (void)binding; (void)bytes;
-    (void)length;
-    fail("a program specialized for its buffer's bytes (not on the Mali yet)");
-    return nullptr;
+    // AN UBER SHADER SPECIALISED FOR ITS BUFFER'S BYTES (11-11): CoreAnimation draws widgets and cross-fades with its
+    // generic fixed_frag_lph_cpf -- 160 KB of code, 64 registers, 144 bytes spilled a thread, ~30 cycles a pixel (a
+    // 423x423 widget's 4 draws: 3.5 ms) -- whose path every fragment takes by a small constant buffer. HakiosMetalCA asks
+    // for a program per content of that buffer (hakiosProgramFor:, in the background): the base's pipeline state with
+    // the fragment stage compiled for those bytes (compile_mali.c's fold_known) -- 256 bytes to a few KB of code.
+    if (base == nullptr || fs_bitcode == nullptr || fs_size == 0 || bytes == nullptr || length == 0 || length > 4096) {
+        fail("a specialisation needs the program, its fragment function's bitcode and the buffer's bytes");
+        return nullptr;
+    }
+    auto *p = new hakios_metal_program;
+    {
+        std::lock_guard<std::mutex> g(base->lock);
+        p->color_format = base->color_format;
+        p->samples = base->samples;
+        p->blend_enabled = base->blend_enabled;
+        p->vertex_descriptor = base->vertex_descriptor;
+        p->blend_equation = base->blend_equation;
+        p->vs_bitcode = base->vs_bitcode;
+        p->vs_constants = base->vs_constants;
+        p->fetch = base->fetch;
+        p->fetch_described = base->fetch_described;
+        p->shader_blend = base->shader_blend;
+        p->blend_reads_dest = base->blend_reads_dest;
+        p->blend_refusal = base->blend_refusal;
+        for (unsigned i = 0; i < 3; i++) {
+            p->more_blend_equation[i] = base->more_blend_equation[i];
+            p->more_blend_reads_dest[i] = base->more_blend_reads_dest[i];
+            p->more_blend_refusal[i] = base->more_blend_refusal[i];
+        }
+        memcpy(p->name, base->name, sizeof(p->name));
+        memcpy(p->label, base->label, sizeof(p->label));
+    }
+    if (p->vs_bitcode.empty()) {
+        fail("a specialisation of a program without its vertex function's bitcode");
+        p->release();
+        return nullptr;
+    }
+    p->fs_bitcode.assign((const uint8_t *)fs_bitcode, (const uint8_t *)fs_bitcode + fs_size);
+    p->fs_constants.resize(fs_count);
+    for (unsigned i = 0; i < fs_count; i++) {
+        p->fs_constants[i].index = fs_constants[i].index;
+        p->fs_constants[i].bits = fs_constants[i].bits;
+    }
+    p->known_binding = (int)binding;
+    p->known.assign((const uint8_t *)bytes, (const uint8_t *)bytes + length);
+    // both stages (the vertex stage again: the fragment stage is compiled against its varyings, which no cache keeps),
+    // as compileFetch would at the first draw -- here, in the caller's background, and then not again
+    bool blended = p->shader_blend.mask != 0;
+    mali_kernel_binary vs = {}, fs = {};
+    char why[512] = "";
+    uint64_t key = cacheKey(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants, p->fs_bitcode.data(),
+                            p->fs_bitcode.size(), keyedConstants(p, p->fs_constants), p->color_format,
+                            p->fetch_described ? &p->fetch : nullptr, blended ? &p->shader_blend : nullptr);
+    if (!cacheLoad(key, &vs, &fs)) {
+        KnownNow known(p);
+        int r = p->fetch_described ?
+            mali_vertex_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(),
+                                &p->fetch, &vs, why, sizeof(why)) :
+            mali_stage_compile(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants.data(), p->vs_constants.size(), 0,
+                               nullptr, &vs, why, sizeof(why));
+        if (r != 0 ||
+            mali_fragment_compile(p->fs_bitcode.data(), p->fs_bitcode.size(), p->fs_constants.data(), p->fs_constants.size(),
+                                  &vs, blended ? &p->shader_blend : nullptr, &fs, why, sizeof(why)) != 0) {
+            mali_kernel_binary_free(&vs);
+            mali_kernel_binary_free(&fs);
+            fail("the specialised stages: %s", why);
+            p->release();
+            return nullptr;
+        }
+        cacheStore(key, vs, fs);
+    }
+    p->vs = vs;
+    p->fs = fs;
+    p->fetch_compiled = true;           // (compileFetch: nothing left to do)
+    return p;
 }
 
 int
