@@ -577,6 +577,7 @@ public:
 	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
 	unsigned        fSwapFirst, fSwapsWaiting;
 	uint32_t        fSwapPresentedID, fSwapShownID;   /* (SwapWait: the last swap handed over, and the last on the panel) */
+	uint32_t        fSwapScannedID;         /* (fb_swapwait=3: the last swap the panel has begun to read, the one before let go of) */
 	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
 	 * (boot-arg fb_beat=0: at once): frames then follow each other at an even pace whatever
@@ -638,7 +639,9 @@ public:
 	void publishRefresh(void);
 	MiniIOSurface * defaultSurface(void);
 	void present(const uint8_t * swap);
-	void swapWait(uint32_t id);
+	IOReturn swapWait(uint32_t id, uint32_t flags);
+	IOReturn swapPoll(uint32_t id, uint32_t flags);
+	void swapScanned(uint32_t id);
 	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
 	void swapShown(uint32_t id);
 	void settle(const uint8_t * swap, MiniIOSurface ** surfaces);
@@ -1613,15 +1616,78 @@ IOMobileFramebuffer::swapShown(uint32_t id)
 	IOLockUnlock(fSwapLock);
 }
 
-static uint32_t gSwapWaitCalls, gSwapWaitBlocked, gSwapWaitAhead, gSwapWaitTimeouts;
+static uint32_t gSwapWaitCalls, gSwapWaitBlocked, gSwapWaitAhead, gSwapWaitTimeouts, gSwapPolls, gSwapPollsBusy;
 
 void
-IOMobileFramebuffer::swapWait(uint32_t id)
+IOMobileFramebuffer::swapScanned(uint32_t id)
+{
+	IOLockLock(fSwapLock);
+	fSwapScannedID = id;
+	IOLockWakeup(fSwapLock, &fSwapScannedID, false);
+	IOLockUnlock(fSwapLock);
+}
+
+/*
+ * SWAPWAIT AS COREANIMATION READS IT (fb_swapwait=3, 11-11 night, TODO 8g). QuartzCore 20F66: IOMFBDisplay keeps THREE
+ * flip buffers (AppleDisplay's constructor: +864 = 3, 1 only with page_flipping_disabled -- benchmark mode) and POLLS
+ * the swap each went out with: can_update_ with FLAGS 0x80000001 (kIOReturnBusy looked for by name), finish_update with
+ * 0x80000000 for every one, counting those answered 0; a flip buffer whose swap is done gives its surface back to be
+ * drawn into, and whether a frame goes ahead depends on the count (and the "triple buffered" bit can_update_ sets when
+ * one is free). Answered "done" when the switch to it was only set up -- the panel still reading the surface before --
+ * and BLOCKING until then (which a poll must not), it drew into the surface on the panel (8f; the submission gate) with
+ * two surfaces where it would take three. Here: FLAGS bit 31: the low bits a timeout in ms (0: a poll), otherwise up to
+ * 50 ms; done once the panel has begun to read that swap's frame (fSwapScannedID: the surface before it let go of);
+ * kIOReturnBusy if not by then, or for a swap not handed over yet.
+ * RESULT (swap3-trans, the idle cube): the polls answered as meant (54199, half busy) but CoreAnimation STILL USES TWO
+ * SURFACES and draws into the one on the panel each frame -- now sooner, unblocked: the gate held each submission 7.4 ms
+ * instead of 1.7, the same ~110 fps. So the polls do not decide its surfaces' number. Kept as a switch, off.
+ */
+IOReturn
+IOMobileFramebuffer::swapPoll(uint32_t id, uint32_t flags)
+{
+	uint32_t ms = (flags & 0x80000000u) ? (flags & 0x7fffffffu) : 50;
+	bool done;
+
+	if (ms > 1000) {
+		ms = 1000;
+	}
+	IOLockLock(fSwapLock);
+	gSwapWaitCalls++;
+	gSwapPolls += ms == 0;
+	if ((int32_t) (fSwapPresentedID - id) < 0) {
+		gSwapWaitAhead++;
+		gSwapPollsBusy++;
+		IOLockUnlock(fSwapLock);
+		return kIOReturnBusy;
+	}
+	if ((int32_t) (fSwapScannedID - id) < 0 && ms != 0) {
+		AbsoluteTime deadline;
+
+		gSwapWaitBlocked++;
+		clock_interval_to_deadline(ms, kMillisecondScale, &deadline);
+		while ((int32_t) (fSwapScannedID - id) < 0 && (int32_t) (fSwapPresentedID - id) >= 0) {
+			if (IOLockSleepDeadline(fSwapLock, &fSwapScannedID, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) {
+				gSwapWaitTimeouts++;
+				break;
+			}
+		}
+	}
+	done = (int32_t) (fSwapScannedID - id) >= 0;
+	gSwapPollsBusy += !done;
+	IOLockUnlock(fSwapLock);
+	return done ? kIOReturnSuccess : kIOReturnBusy;
+}
+
+IOReturn
+IOMobileFramebuffer::swapWait(uint32_t id, uint32_t flags)
 {
 	AbsoluteTime deadline;
 
+	if (gSwapWaitOn == 3 && id != 0) {
+		return swapPoll(id, flags);
+	}
 	if (!gSwapWaitOn || id == 0) {
-		return;
+		return kIOReturnSuccess;
 	}
 	clock_interval_to_deadline(50, kMillisecondScale, &deadline);
 	IOLockLock(fSwapLock);
@@ -1650,6 +1716,7 @@ IOMobileFramebuffer::swapWait(uint32_t id)
 		}
 	}
 	IOLockUnlock(fSwapLock);
+	return kIOReturnSuccess;
 }
 
 /* SwapEnd: the swap is handed to the thread that puts frames on the panel, as soon as that has no other waiting. */
@@ -1695,8 +1762,9 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
 		    fSwapsWaiting >= swapQueue()) {
 			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
-			fSwapPresentedID = fSwapShownID = swapWord(swap, SWAP_ID);     /* (nobody waits for it: SwapWait) */
+			fSwapPresentedID = fSwapShownID = fSwapScannedID = swapWord(swap, SWAP_ID);     /* (nobody waits for it: SwapWait) */
 			IOLockWakeup(fSwapLock, &fSwapShownID, false);
+			IOLockWakeup(fSwapLock, &fSwapScannedID, false);
 			IOLockUnlock(fSwapLock);
 			return;
 		}
@@ -2016,8 +2084,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				IOLog("MiniIOMobileFramebuffer: zero copy: %u frames scanned out where they were drawn, %u copied; "
 				    "the panel took them %llu us after on average (%llu not within 25 ms)\n", gZCFrames, gZCCopied,
 				    gZCWaits ? waited / 1000 / gZCWaits : 0, gZCWaitLate);
-				IOLog("MiniIOMobileFramebuffer: SwapWait: %u calls, %u waited, %u for a swap not presented yet, %u timed out\n",
-				    gSwapWaitCalls, gSwapWaitBlocked, gSwapWaitAhead, gSwapWaitTimeouts);
+				IOLog("MiniIOMobileFramebuffer: SwapWait: %u calls, %u waited, %u for a swap not presented yet, %u timed out; "
+				    "%u polls, %u answers busy (fb_swapwait=%u)\n", gSwapWaitCalls, gSwapWaitBlocked, gSwapWaitAhead,
+				    gSwapWaitTimeouts, gSwapPolls, gSwapPollsBusy, gSwapWaitOn);
 			}
 			drawn = mach_absolute_time();
 			fSwapsShown++;
@@ -2095,6 +2164,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	fSwapsShown++;
 counted:
 	swapShown(swapWord(swap, SWAP_ID));
+	swapScanned(swapWord(swap, SWAP_ID));   /* (here the panel reads it, the surface before let go of: fb_swapwait=3) */
 	if (gTouchLat) {
 		hakios_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));
@@ -2440,7 +2510,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
 		}
 		if (args->scalarInputCount > 0) {
-			fOwner->swapWait((uint32_t) in[0]);
+			return fOwner->swapWait((uint32_t) in[0], args->scalarInputCount > 1 ? (uint32_t) in[1] : 0);
 		}
 		return kIOReturnSuccess;
 	case kFBMethodSwapSignal:
