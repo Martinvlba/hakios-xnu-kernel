@@ -18,11 +18,14 @@
  *   button NAME [MS]             press a button: home, lock, volup, voldown
  *   read                         print the samples that arrive, forever (to watch the queue)
  *   notify NAME                  post a Darwin notification (com.hakios.unlock: see inject_sb.c)
+ *   brightness LEVEL             the display's brightness, 0 to 1, as Control Center's slider sets it
+ *                                (BackBoardServices' BKSDisplayBrightnessSet)
  *   clock                        how long short sleeps really take (a check of the kernel's timers)
  * Positions are fractions of the screen: 0 0 is the top left corner, 1 1 the bottom right.
  * Example, "swipe up from the bottom edge two minutes after boot":
  *   rwtouch wait 120 swipe 0.5 0.99 0.5 0.4 250
  */
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <mach/mach_time.h>
 #include <notify.h>
@@ -213,6 +216,21 @@ main(int argc, char **argv)
 			drag(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]), atoi(argv[i + 5]),
 			    atoi(argv[i + 6]), grab);
 			i += grab ? 7 : 6;
+		} else if (strcmp(step, "brightness") == 0 && left >= 1) {
+			void *bks = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
+			void (*set)(float, int) = bks ? (void (*)(float, int))dlsym(bks, "BKSDisplayBrightnessSet") : NULL;
+			float (*get)(void) = bks ? (float (*)(void))dlsym(bks, "BKSDisplayBrightnessGetCurrent") : NULL;
+			float level = (float)atof(argv[i + 1]);
+
+			if (set == NULL || get == NULL) {
+				fprintf(stderr, "rwtouch: no BKSDisplayBrightnessSet (%s)\n", dlerror());
+			} else {
+				float before = get();
+				set(level, 1);
+				usleep(300000);
+				printf("rwtouch: brightness %.3f -> %.3f asked; now %.3f\n", before, level, get());
+			}
+			i += 1;
 		} else if (strcmp(step, "notify") == 0 && left >= 1) {
 			uint32_t status = notify_post(argv[i + 1]);
 

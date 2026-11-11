@@ -603,6 +603,305 @@ brightness_fixes(void)
 	method_setImplementation(method, (IMP)wait_for_als_arrival);
 }
 
+/*
+ * Boot-arg cb_watch=1: what CoreBrightness hands its CoreAnimation manager for the display's brightness
+ * (-[CBCAManager displayBrightnessPropertyHandler:], the step before "pushing nits to CA") said, the first 20 times:
+ * it says "Unexpected nits type" on this machine and pushes nothing (TODO 22).
+ */
+/* (marked unavailable in the iOS SDK's header, there in the system's IOKit: CoreBrightness sets its properties so) */
+extern kern_return_t registry_set_property(io_registry_entry_t entry, CFStringRef key, CFTypeRef value)
+    __asm__("_IORegistryEntrySetCFProperty");
+
+static IMP cb_handler_original;
+static unsigned cb_handler_said, cb_bridged_said;
+static bool cb_watching;
+static io_service_t cb_backlight;
+
+/*
+ * THE BRIGHTNESS BRIDGE (always, in backboardd): the nits CoreBrightness hands CoreAnimation for the display ("Nits", the
+ * slider's and auto-brightness's, ramped) go to the kernel's backlight too, as hakios-nits (16.16): the panel's own
+ * level follows them. CoreBrightness's own way to the backlight -- the physical nits, brightness-nits -- stays at a
+ * wake's first value here (its ramp to the hardware never runs: NitsPhysical stays 1; TODO 22), so the kernel takes
+ * the panel's level from these.
+ */
+static void
+cb_bridge(id property)
+{
+	CFTypeRef nits;
+	float value = 0;
+
+	if (property == NULL || CFGetTypeID((CFTypeRef)property) != CFDictionaryGetTypeID() ||
+	    (nits = CFDictionaryGetValue((CFDictionaryRef)property, CFSTR("Nits"))) == NULL ||
+	    CFGetTypeID(nits) != CFNumberGetTypeID() || !CFNumberGetValue((CFNumberRef)nits, kCFNumberFloatType, &value)) {
+		return;
+	}
+	if (cb_backlight == MACH_PORT_NULL) {
+		cb_backlight = IOServiceGetMatchingService(0, IOServiceMatching("AppleARMBacklight"));
+	}
+	if (cb_backlight != MACH_PORT_NULL && value >= 0 && value < 32768) {
+		int32_t fixed = (int32_t)(value * 65536.0f);
+		CFNumberRef number = CFNumberCreate(NULL, kCFNumberSInt32Type, &fixed);
+		kern_return_t kr = number ? registry_set_property(cb_backlight, CFSTR("hakios-nits"), number) : KERN_FAILURE;
+
+		if (number) {
+			CFRelease(number);
+		}
+		if (cb_bridged_said < 12 || kr != KERN_SUCCESS) {
+			cb_bridged_said++;
+			say("hakios: brightness: %.1f nits to the backlight%s\n", value, kr == KERN_SUCCESS ? "" : " (REFUSED)");
+		}
+	}
+}
+
+static void cb_brightness_again(void);
+static id cb_last_brightness;
+static uint64_t cb_again_at[5];         /* the last replays' times (mach_absolute_time) */
+
+/* CoreBrightness's "Brightness 0, 1 nit" while backboardd's slider says more (seen after the boot's freeze and a wake:
+ * the display then dim until the slider was moved, the tester 11-11): the slider's value set again, 0.4 s later -- at
+ * most once in 2 s and five times in 30 s */
+static void
+cb_maybe_again(id property)
+{
+	CFTypeRef nits = property && CFGetTypeID((CFTypeRef)property) == CFDictionaryGetTypeID() ?
+	    CFDictionaryGetValue((CFDictionaryRef)property, CFSTR("Nits")) : NULL;
+	CFTypeRef slider = cb_last_brightness ? CFDictionaryGetValue((CFDictionaryRef)cb_last_brightness, CFSTR("Brightness")) : NULL;
+	float n = 0, b = 0;
+	uint64_t now = mach_absolute_time(), second;
+	mach_timebase_info_data_t tb;
+
+	if (nits == NULL || slider == NULL || CFGetTypeID(nits) != CFNumberGetTypeID() || CFGetTypeID(slider) != CFNumberGetTypeID() ||
+	    !CFNumberGetValue((CFNumberRef)nits, kCFNumberFloatType, &n) || !CFNumberGetValue((CFNumberRef)slider, kCFNumberFloatType, &b) ||
+	    n > 1.5f || b < 0.05f) {
+		return;
+	}
+	mach_timebase_info(&tb);
+	second = 1000000000ull * tb.denom / tb.numer;
+	if (now - cb_again_at[0] < 2 * second || (cb_again_at[4] != 0 && now - cb_again_at[4] < 30 * second)) {
+		return;
+	}
+	memmove(&cb_again_at[1], &cb_again_at[0], 4 * sizeof(cb_again_at[0]));
+	cb_again_at[0] = now;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+		cb_brightness_again();
+	});
+}
+
+static void
+cb_handler_watch(id self, SEL selector, id property)
+{
+	cb_bridge(property);
+	cb_maybe_again(property);
+	if (cb_watching && cb_handler_said < 20) {
+		CFStringRef text = property ? CFCopyDescription((CFTypeRef)property) : NULL;
+		char line[1024] = "(nil)";
+
+		cb_handler_said++;
+		if (text) {
+			CFStringGetCString(text, line, sizeof(line), kCFStringEncodingUTF8);
+			CFRelease(text);
+		}
+		for (char *c = line; *c; c++) {
+			*c = *c == '\n' ? ' ' : *c;
+		}
+		say("hakios: CoreBrightness to CoreAnimation (displayBrightnessPropertyHandler:): %s\n", line);
+	}
+	((void (*)(id, SEL, id))cb_handler_original)(self, selector, property);
+}
+
+static void cb_watch_ca(void);
+
+/* (and what the display container and the display module are given: key and value, the first 40) */
+static IMP cb_container_original, cb_module_original;
+static unsigned cb_set_said;
+
+static void
+cb_say_set(const char *who, id key, id value)
+{
+	CFStringRef k = key ? CFCopyDescription((CFTypeRef)key) : NULL, v = value ? CFCopyDescription((CFTypeRef)value) : NULL;
+	char kl[128] = "(nil)", vl[512] = "(nil)";
+
+	if (cb_set_said++ >= 40) {
+		if (k) CFRelease(k);
+		if (v) CFRelease(v);
+		return;
+	}
+	if (k) {
+		CFStringGetCString(k, kl, sizeof(kl), kCFStringEncodingUTF8);
+		CFRelease(k);
+	}
+	if (v) {
+		CFStringGetCString(v, vl, sizeof(vl), kCFStringEncodingUTF8);
+		CFRelease(v);
+	}
+	for (char *c = vl; *c; c++) {
+		*c = *c == '\n' ? ' ' : *c;
+	}
+	say("hakios: CoreBrightness %s: %s = %s\n", who, kl, vl);
+}
+
+static id cb_container;         /* the display container (and cb_last_brightness, above: the last DisplayBrightness set) */
+
+static BOOL
+cb_container_watch(id self, SEL selector, id value, id key)
+{
+	if (cb_watching) cb_say_set("container", key, value);
+	if (key != NULL && value != NULL && CFGetTypeID((CFTypeRef)key) == CFStringGetTypeID() &&
+	    CFEqual((CFTypeRef)key, CFSTR("DisplayBrightness")) && CFGetTypeID((CFTypeRef)value) == CFDictionaryGetTypeID()) {
+		id old = cb_last_brightness;
+
+		cb_last_brightness = (id)CFRetain((CFTypeRef)value);
+		if (old) {
+			CFRelease((CFTypeRef)old);
+		}
+		if (cb_container == NULL) {
+			cb_container = (id)CFRetain((CFTypeRef)self);
+		}
+	}
+	return ((BOOL (*)(id, SEL, id, id))cb_container_original)(self, selector, value, key);
+}
+
+/* the last DisplayBrightness set again (nudged by 1/10000 first, in case an unchanged one is let pass): CoreBrightness
+ * works out its nits anew and hands them CoreAnimation -- and the bridge -- as for a move of the slider */
+static void
+cb_brightness_again(void)
+{
+	/* (cb_maybe_again's times: a replay by any cause counts) */
+	CFNumberRef number;
+	float level = 0;
+
+	if (cb_container == NULL || cb_last_brightness == NULL ||
+	    (number = CFDictionaryGetValue((CFDictionaryRef)cb_last_brightness, CFSTR("Brightness"))) == NULL ||
+	    CFGetTypeID(number) != CFNumberGetTypeID() || !CFNumberGetValue(number, kCFNumberFloatType, &level)) {
+		return;
+	}
+	for (int k = 0; k < 2; k++) {
+		float v = k == 0 ? (level > 0.5f ? level - 0.0001f : level + 0.0001f) : level;
+		CFNumberRef n = CFNumberCreate(NULL, kCFNumberFloatType, &v);
+		int commit = 0;
+		CFNumberRef c = CFNumberCreate(NULL, kCFNumberIntType, &commit);
+		const void *keys[2] = { CFSTR("Brightness"), CFSTR("Commit") }, *values[2] = { n, c };
+		CFDictionaryRef d = CFDictionaryCreate(NULL, keys, values, 2, &kCFTypeDictionaryKeyCallBacks,
+		    &kCFTypeDictionaryValueCallBacks);
+
+		((BOOL (*)(id, SEL, id, id))objc_msgSend)(cb_container, sel_registerName("setProperty:forKey:"), (id)d,
+		    (id)CFSTR("DisplayBrightness"));
+		CFRelease(d);
+		CFRelease(c);
+		CFRelease(n);
+	}
+	if (cb_bridged_said < 30) {
+		say("hakios: brightness: the slider's %.3f set again (after a factor or the thaw)\n", level);
+	}
+}
+
+/*
+ * (and the bridge after a wake or a boot: CoreBrightness hands CoreAnimation the nits while the backlight's factor is 0
+ * -- 1 nit -- and nothing when the factor comes back to 1, so the panel stayed dim until the slider was moved, the
+ * tester 11-11. When the display module is given a factor, its DisplayBrightness is asked for at once and after the
+ * fade, and its nits bridged.)
+ */
+static __attribute__((unused)) void
+cb_bridge_module(id module, const char *why)
+{
+	id brightness = ((id (*)(id, SEL, id))objc_msgSend)(module, sel_registerName("copyPropertyForKey:"),
+	    (id)CFSTR("DisplayBrightness"));
+
+	if (cb_watching && cb_handler_said < 40) {
+		CFStringRef text = brightness ? CFCopyDescription((CFTypeRef)brightness) : NULL;
+		char line[512] = "(nil)";
+
+		cb_handler_said++;
+		if (text) {
+			CFStringGetCString(text, line, sizeof(line), kCFStringEncodingUTF8);
+			CFRelease(text);
+		}
+		for (char *c = line; *c; c++) {
+			*c = *c == '\n' ? ' ' : *c;
+		}
+		say("hakios: CoreBrightness's DisplayBrightness %s: %s\n", why, line);
+	}
+	cb_bridge(brightness);
+	if (brightness) {
+		CFRelease((CFTypeRef)brightness);
+	}
+}
+
+static BOOL
+cb_module_watch(id self, SEL selector, id value, id key)
+{
+	BOOL result;
+
+	if (cb_watching) cb_say_set("display module", key, value);
+	result = ((BOOL (*)(id, SEL, id, id))cb_module_original)(self, selector, value, key);
+	/* backboardd FREEZES the brightness while it starts (FreezeBrightness, BKSystemApplicationBacklightLockReason): a
+	 * value set again then is let pass, and at the thaw CoreBrightness applies what it had frozen -- 0, 1 nit (bright15).
+	 * So again at the thaw too. */
+	if (key != NULL && value != NULL && CFGetTypeID((CFTypeRef)key) == CFStringGetTypeID() &&
+	    CFEqual((CFTypeRef)key, CFSTR("FreezeBrightness")) && CFGetTypeID((CFTypeRef)value) == CFDictionaryGetTypeID()) {
+		CFTypeRef enable = CFDictionaryGetValue((CFDictionaryRef)value, CFSTR("FreezeBrightnessEnable"));
+		int on = 1;
+
+		if (enable != NULL && CFGetTypeID(enable) == CFBooleanGetTypeID()) {
+			on = CFBooleanGetValue((CFBooleanRef)enable);
+		} else if (enable != NULL && CFGetTypeID(enable) == CFNumberGetTypeID()) {
+			CFNumberGetValue((CFNumberRef)enable, kCFNumberIntType, &on);
+		}
+		if (on == 0) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+				cb_brightness_again();
+			});
+		}
+	}
+	if (key != NULL && CFGetTypeID((CFTypeRef)key) == CFStringGetTypeID() &&
+	    (CFEqual((CFTypeRef)key, CFSTR("DisplayBrightnessFactor")) ||
+	    CFEqual((CFTypeRef)key, CFSTR("DisplayBrightnessFactorWithFade")))) {
+		/* (from the main queue, not here on the module's own queue) -- only a factor that is not 0: at 0 the panel goes
+		 * dark anyway */
+		float factor = 0;
+
+		if (value != NULL && CFGetTypeID((CFTypeRef)value) == CFNumberGetTypeID() &&
+		    CFNumberGetValue((CFNumberRef)value, kCFNumberFloatType, &factor) && factor > 0) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+				cb_brightness_again();
+			});
+		}
+	}
+	return result;
+}
+
+static void
+cb_watch(void)
+{
+	Class container = objc_getClass("CBDisplayContaineriOS"), module = objc_getClass("CBDisplayModuleiOS");
+	Method m1 = container ? class_getInstanceMethod(container, sel_registerName("setPropertyNoQueue:forKey:")) : NULL;
+	Method m2 = module ? class_getInstanceMethod(module, sel_registerName("setProperty:forKey:")) : NULL;
+
+	if (m1 != NULL) {
+		cb_container_original = method_setImplementation(m1, (IMP)cb_container_watch);
+	}
+	if (m2 != NULL) {
+		cb_module_original = method_setImplementation(m2, (IMP)cb_module_watch);
+	}
+	say("hakios: cb_watch: the display container %s, the display module %s\n", m1 ? "watched" : "NOT FOUND",
+	    m2 ? "watched" : "NOT FOUND");
+	cb_watch_ca();
+}
+
+static void
+cb_watch_ca(void)
+{
+	Class cls = objc_getClass("CBCAManager");
+	Method method = cls ? class_getInstanceMethod(cls, sel_registerName("displayBrightnessPropertyHandler:")) : NULL;
+
+	if (method == NULL) {
+		say("hakios: cb_watch: no -[CBCAManager displayBrightnessPropertyHandler:]\n");
+		return;
+	}
+	cb_handler_original = method_setImplementation(method, (IMP)cb_handler_watch);
+	say("hakios: cb_watch: -[CBCAManager displayBrightnessPropertyHandler:] watched\n");
+}
+
 /* ---- backboardd: the touch screen and the buttons ---------------------------------------------- */
 
 /* IOKit's HID event system, the part that has no public header on Darwin (prototypes checked against 20F66) */
@@ -1243,6 +1542,8 @@ hakios_init(void)
 		if (strstr(arguments, "metal_watch=1") != NULL || strstr(arguments, "ca_metallib=") != NULL) {
 			watch_metallib_lookups(arguments);
 		}
+		cb_watching = strstr(arguments, "cb_watch=1") != NULL;
+		cb_watch();     /* (the brightness bridge always; the sayings with cb_watch=1) */
 		opengl_es();
 		window_server_fixes();
 		/*
