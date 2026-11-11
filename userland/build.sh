@@ -558,6 +558,14 @@ for f in ../fw-haptic/cs40l26*.wmfw ../fw-haptic/cs40l26*.bin; do
 	mkdir -p root/fw
 	install -m 0644 "$f" root/fw/
 done
+# ... and the Pixel 8a's speaker amplifiers' DSP firmware: Cirrus's speaker protection for the CS35L41s and their
+# tunings (the phone's /vendor/firmware/cs35l41-dsp1-spk-*.wmfw and [R-]cs35l41-dsp1-spk-*.bin; ../fw-audio, never in
+# git; devices/akita/drivers/audio, amp=3)
+for f in ../fw-audio/cs35l41-dsp1-spk-*.wmfw ../fw-audio/cs35l41-dsp1-spk-*.bin ../fw-audio/R-cs35l41-dsp1-spk-*.bin; do
+	[ -f "$f" ] || continue
+	mkdir -p root/fw
+	install -m 0644 "$f" root/fw/
+done
 # ... and the Pixel 8a's AoC firmware (Google's signed image, the phone's /vendor/firmware/aoc.bin, 29 MB; in ../fw-aoc,
 # never in git): devices/akita/drivers/aoc copies it into the AoC's carveout for the GSA to authenticate (aoc=3). It
 # fills half of a 64 MiB boot image: AOC_FW=0 leaves it out
