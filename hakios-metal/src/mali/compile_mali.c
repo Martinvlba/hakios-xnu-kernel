@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/sysctl.h>
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -492,7 +493,17 @@ lower_shader_blend(nir_shader *s, const struct mali_shader_blend *blend, struct 
 	out->rt_read |= blend->mask;
 }
 
+static /* a word in the boot-args (the phone's; the host's compile has none) */
 static int
+mali_boot_arg(const char *word)
+{
+	char args[1024] = { 0 };
+	size_t size = sizeof(args) - 1;
+
+	return sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, word) != NULL;
+}
+
+int
 compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, struct mali_kernel_binary *out, char *error,
     size_t error_size)
 {
@@ -544,8 +555,30 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 			say(error, error_size, "no memory");
 			goto done;
 		}
-		pan_varying_collect_formats(varyings, s, GPU_ID, true, true);
+		/*
+		 * (11-11) mali_mediump=0: varyings the shader marks low precision kept at 32 bits -- Control Center's tiles showed
+		 * dashed inner outlines and diagonal seams from their corners, as a coordinate carried in 16 bits would draw
+		 * (TODO 8h). mali_varysay=1: each vertex program's layout said (40 at most).
+		 */
+		static int mediump = -1, varysay = -1, said;
+		if (mediump < 0) {
+			mediump = !mali_boot_arg("mali_mediump=0");
+			varysay = mali_boot_arg("mali_varysay=1");
+		}
+		pan_varying_collect_formats(varyings, s, GPU_ID, true, mediump != 0);
 		pan_build_varying_layout_compact(varyings, s, GPU_ID);
+		if (varysay && said < 40) {
+			said++;
+			char line[512];
+			int at = snprintf(line, sizeof(line), "mali varyings of %s:", s->info.name ? s->info.name : "?");
+			for (unsigned i = 0; i < varyings->count && at < (int)sizeof(line) - 40; i++) {
+				const struct pan_varying_slot *v = &varyings->slots[i];
+				at += snprintf(line + at, sizeof(line) - at, " [loc %u %s%u x%u]", (unsigned)v->location,
+				    (v->alu_type & 0x80) ? "f" : "i", (unsigned)(v->alu_type & 0x7f),
+				    (unsigned)v->ncomps);
+			}
+			fprintf(stderr, "%s (mediump lowering %s)\n", line, mediump ? "on" : "off");
+		}
 		inputs.varying_layout = varyings;
 		inputs.trust_varying_flat_highp_types = true;
 	} else if (want == MESA_SHADER_FRAGMENT) {
@@ -596,6 +629,9 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 	util_dynarray_fini(&binary);
 	out->work_regs = info.work_reg_count;
 	out->preload = info.preload;
+	/* (11-11) the compiler's "contains barrier": its helper threads must run to the end (the program descriptor's bit
+	 * 28, as panvk sets it; c_api_mali.cpp sets that bit for every fragment shader now -- TODO 8h) */
+	out->helpers = want == MESA_SHADER_FRAGMENT && info.contains_barrier;
 	out->fau_words = info.fau.count > MALI_KERNEL_RESERVED ? info.fau.count : MALI_KERNEL_RESERVED;
 	pan_fau_foreach_imm(&info.fau, i) {
 		out->consts[i - MALI_KERNEL_RESERVED] = info.fau.words[i].constant;

@@ -331,6 +331,14 @@ inline uint32_t npot(uint32_t v) { uint32_t p = 1; while (p < v) p <<= 1; return
 inline uint32_t log2u(uint32_t v) { uint32_t l = 0; while ((1u << l) < v) l++; return l; }
 }  // namespace
 
+/*
+ * A BUFFER'S SLACK (11-11): a page past what was asked for, filled with a pattern and looked at when the buffer goes --
+ * backboardd died writing 0x750 bytes into the page after one (CA::OGL::MetalBufferPool::write_buffer, TODO 8i): an
+ * overrun lands in the slack now and is said (the length, how far past it), instead of taking the window server down.
+ */
+constexpr uint64_t kBufferSlack = 16384;
+constexpr uint8_t kSlackByte = 0xa5;
+
 struct hakios_metal_buffer {
     hakios_metal_device *device;
     Bo bo;
@@ -338,9 +346,26 @@ struct hakios_metal_buffer {
     std::atomic<int> refs{1};       // its owner's, and each command buffer's that uses it
 
     void retain() { refs.fetch_add(1); }
+    void checkSlack()
+    {
+        auto *p = (const uint8_t *)bo.cpu;
+        if (p == nullptr || bo.size <= length) return;
+        uint64_t last = 0;
+        for (uint64_t i = length; i < bo.size; i++) {
+            if (p[i] != kSlackByte) last = i + 1;
+        }
+        if (last != 0) {
+            static std::atomic<unsigned> said{0};
+            if (said++ < 20) {
+                fprintf(stderr, "hakios-metal: A BUFFER WAS WRITTEN PAST ITS END: %llu bytes long, written to %llu bytes past "
+                    "it (the slack caught it; TODO 8i)\n", (unsigned long long)length, (unsigned long long)(last - length));
+            }
+        }
+    }
     void release()
     {
         if (refs.fetch_sub(1) == 1) {
+            checkSlack();
             device->freeBo(bo);
             delete this;
         }
@@ -401,6 +426,10 @@ struct hakios_metal_kernel {
 // A program: a vertex and a fragment function compiled for the Mali (compile_mali.c), linked by the vertex stage's
 // varying layout; its code and three shader program descriptors (position, varying, fragment) in a BO of the device's
 // the first time it is drawn with.
+namespace {
+bool bootArg(const char *word);         // (a word in the boot-args: defined below)
+}  // namespace
+
 struct hakios_metal_program {
     mali_kernel_binary vs = {}, fs = {};
     std::atomic<int> refs{1};
@@ -431,6 +460,7 @@ struct hakios_metal_program {
     bool more_blend_reads_dest[3] = {};
     std::string more_blend_refusal[3];
     char name[300] = "";
+    char label[128] = "";       // the pipeline descriptor's (hakios_metal_program_set_label: diagnostics only)
 
     void retain() { refs.fetch_add(1); }
     void release()
@@ -462,17 +492,27 @@ struct hakios_metal_program {
         auto *bytes = (uint8_t *)code.cpu;
         memcpy(bytes, vs.code, vs.size);
         memcpy(bytes + fs_at, fs.code, fs.size);
-        auto spd = [&](unsigned slot, unsigned stage, unsigned regs, uint64_t preload, uint64_t va) {
+        auto spd = [&](unsigned slot, unsigned stage, unsigned regs, uint64_t preload, uint64_t va, bool helpers) {
             auto *w = (uint32_t *)(bytes + spd_at + 0x40 * slot);
-            w[0] = 8 | stage << 4 | (regs <= 32 ? 2u : 0u) << 30;
+            // (bit 28, "requires helper threads", fragment only -- 11-11, TODO 8h: SET FOR EVERY FRAGMENT SHADER. Mesa sets
+            // it for barriers alone and lets the compiler end the helper lanes after their last use (VA_FLOW_DISCARD after
+            // the last CLPER / implicit-LOD texture); with CoreAnimation's shaders through our AIR front end that left the
+            // derivatives wrong wherever a triangle covers part of a 2x2 quad -- a light seam along every edge of its
+            // meshes: Control Center's tiles' dashed inner outlines, the diagonals of each quad's split (the round
+            // buttons', the tiles' corner pieces). Kept to the end, they are right; no cost seen (idle cube 109-111 fps
+            // either way). Why the compiler's own end of helpers is too early is not known yet. metal_nohelpers: barriers
+            // only, as Mesa)
+            static const bool no_helpers = bootArg("metal_nohelpers");
+            w[0] = 8 | stage << 4 | (regs <= 32 ? 2u : 0u) << 30 |
+                   ((helpers || (stage == 2 && !no_helpers)) ? 1u << 28 : 0u);
             w[1] = (uint32_t)(preload >> 48);
             w[2] = (uint32_t)va;
             w[3] = (uint32_t)(va >> 32);
             return code.va + spd_at + 0x40 * slot;
         };
-        pos_spd = spd(0, 3, vs.work_regs, vs.preload, code.va);
-        vary_spd = vs.secondary_offset ? spd(1, 3, vs.secondary_work_regs, vs.secondary_preload, code.va + vs.secondary_offset) : 0;
-        frag_spd = spd(2, 2, fs.work_regs, fs.preload, code.va + fs_at);
+        pos_spd = spd(0, 3, vs.work_regs, vs.preload, code.va, false);
+        vary_spd = vs.secondary_offset ? spd(1, 3, vs.secondary_work_regs, vs.secondary_preload, code.va + vs.secondary_offset, false) : 0;
+        frag_spd = spd(2, 2, fs.work_regs, fs.preload, code.va + fs_at, fs.helpers != 0);
         __asm__ volatile("dsb sy" ::: "memory");
         device = d;
         return true;
@@ -1040,7 +1080,12 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     uint64_t srt_at = fs_at + ((dj.fs_fau.size() * 4 + 0x3f) & ~0x3fULL), srt = 0;
 
     memset(area, 0, vs_at);
-    tc[2] = hierarchyMask(dj.width, dj.height, d->tiler_levels) | 1u << 17;    // (sample test off, as in mali_test)
+    // FIRST PROVOKING VERTEX (11-11): a flat varying is the first vertex's in Metal (and Vulkan), the last's in this
+    // GPU's default -- CoreAnimation's quads showed a seam along their diagonals (Control Center's tiles, TODO 8h).
+    // The tiler context's bit 18 and the framebuffer's word 11 bit 14 (Mesa's first_provoking_vertex); metal_lastpv:
+    // the old way
+    static const bool last_pv = bootArg("metal_lastpv");
+    tc[2] = hierarchyMask(dj.width, dj.height, d->tiler_levels) | 1u << 17 | (last_pv ? 0u : 1u << 18);  // (sample test off)
     tc[3] = (dj.width - 1) | (dj.height - 1) << 16;
     *(uint64_t *)&tc[6] = d->heapdesc.va;
     *(uint64_t *)&tc[8] = (d->heapdesc.va + 0x1000) | (0x10000 >> 12);
@@ -1050,8 +1095,8 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     fb[10] = (dj.width - 1) | (dj.height - 1) << 16;
     // 16x16 tiles, targets, 1 KiB a target a tile; four samples: 4 (log2 2), the rotated 4x grid (2), 8x8 tiles -- the
     // same kilobyte a target a tile (64 pixels of four samples)
-    fb[11] = (dj.samples > 1 ? 2u | 2u << 3 : 0u) | 2 << 6 | (dj.samples > 1 ? 6u : 8u) << 9 | 1u << 15 | (dj.rts - 1) << 19 |
-        dj.rts << 24;
+    fb[11] = (dj.samples > 1 ? 2u | 2u << 3 : 0u) | 2 << 6 | (dj.samples > 1 ? 6u : 8u) << 9 | (last_pv ? 0u : 1u << 14) |
+        1u << 15 | (dj.rts - 1) << 19 | dj.rts << 24;
     fb[12] = 1u << 29;                                                          // empty tiles written (the clear)
     *(uint64_t *)&fb[14] = area_va;
     if (dj.zs) {
@@ -1841,9 +1886,12 @@ hakios_metal_buffer_new(hakios_metal_device *d, uint64_t length)
     auto *b = new hakios_metal_buffer;
     b->device = d;
     b->length = length;
-    if (!d->newBo(b->bo, length ? length : 1, BIND_NOEXEC)) {
+    if (!d->newBo(b->bo, (length ? length : 1) + kBufferSlack, BIND_NOEXEC)) {
         delete b;
         return nullptr;
+    }
+    if (b->bo.cpu != nullptr && b->bo.size > length) {
+        memset((uint8_t *)b->bo.cpu + length, kSlackByte, (size_t)(b->bo.size - length));
     }
     return b;
 }
@@ -3414,6 +3462,11 @@ cacheKey(const void *vs, size_t vs_size, const std::vector<mali_constant> &vc, c
     // the compiler's own make-up (the Makefile's MALI_CACHE_BUILD), not this library's build: see there
     fnv(h, HAKIOS_MALI_CACHE_BUILD, sizeof(HAKIOS_MALI_CACHE_BUILD) - 1);
     fnv(h, &sizeof_binary, sizeof(sizeof_binary));
+    {
+        // (and the compile options the boot-args choose: compile_mali.c's mali_mediump=0)
+        static const uint32_t no_mediump = bootArg("mali_mediump=0") ? 1 : 0;
+        fnv(h, &no_mediump, sizeof(no_mediump));
+    }
 #else
     fnvImage(h);
 #endif
@@ -3601,6 +3654,10 @@ hakios_metal_program_new_bitcode(const void *vs_bitcode, size_t vs_size, const v
 
 void hakios_metal_program_free(hakios_metal_program *p) { if (p) p->release(); }
 const char *hakios_metal_program_name(hakios_metal_program *p) { return p ? p->name : ""; }
+void hakios_metal_program_set_label(hakios_metal_program *p, const char *label)
+{
+    if (p != nullptr && label != nullptr) snprintf(p->label, sizeof(p->label), "%s", label);
+}
 
 unsigned
 hakios_metal_program_stage_words(hakios_metal_program *p, unsigned stage)
@@ -4244,6 +4301,33 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     if (vertex_count == 0) {
         return 0;
     }
+    {
+        // (boot-arg metal_skipprog=A,B, 11-11 for TODO 8h: the draws of programs whose names or pipeline labels hold A
+        // or B are not done -- a screenshot without them says which draw makes a mark)
+        static const std::vector<std::string> skip = [] {
+            std::vector<std::string> v;
+            char args[1024] = {};
+            size_t size = sizeof(args) - 1;
+            const char *at;
+            if (sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && (at = strstr(args, "metal_skipprog=")) != nullptr) {
+                std::string w;
+                for (at += strlen("metal_skipprog="); ; at++) {
+                    if (*at == ',' || *at == ' ' || *at == 0) {
+                        if (!w.empty()) v.push_back(w);
+                        w.clear();
+                        if (*at != ',') break;
+                    } else {
+                        w += *at;
+                    }
+                }
+            }
+            for (const auto &w : v) fprintf(stderr, "hakios-metal: draws of programs named *%s* skipped (metal_skipprog)\n", w.c_str());
+            return v;
+        }();
+        for (const auto &w : skip) {
+            if (strstr(p->name, w.c_str()) != nullptr || strstr(p->label, w.c_str()) != nullptr) return 0;
+        }
+    }
     if (!p->upload(d)) {
         return -1;
     }
@@ -4259,9 +4343,9 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
                 mach_timebase_info_data_t tb;
                 mach_timebase_info(&tb);
                 double t = (double)mach_absolute_time() * tb.numer / tb.denom / 1e9;
-                fprintf(stderr, "hakios-metal: first draw of %s at %.3f s: fs push words %u, textures %u, samplers %u, blend "
+                fprintf(stderr, "hakios-metal: first draw of %s [%s] at %.3f s: fs push words %u, textures %u, samplers %u, blend "
                     "in shader 0x%x, written 0x%x, read 0x%x, target %ux%u format %u, samples %u, %u vertices x %u\n",
-                    p->name, t, p->fs.fau_words, fs_texture_count, fs_sampler_count, p->shader_blend.mask, p->fs.rt_written,
+                    p->name, p->label, t, p->fs.fau_words, fs_texture_count, fs_sampler_count, p->shader_blend.mask, p->fs.rt_written,
                     p->fs.rt_read, pass && pass->color0 ? pass->color0->width : 0, pass && pass->color0 ? pass->color0->height : 0, pass && pass->color0 ? pass->color0->format : 0, p->samples,
                     vertex_count, instance_count);
                 for (unsigned i = 0; i < 4; i++) {

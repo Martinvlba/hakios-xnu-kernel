@@ -1250,6 +1250,7 @@ hakios_metal_program* hakios_metal_program_new(hakios_metal_library* vsLibrary, 
 
 void hakios_metal_program_free(hakios_metal_program* p) { delete p; }
 const char* hakios_metal_program_name(hakios_metal_program* p) { return p->program->name.c_str(); }
+void hakios_metal_program_set_label(hakios_metal_program* p, const char* label) { (void)p; (void)label; }
 
 // STAGE 0 is the vertex stage, 1 the fragment stage; another number has no resources
 static const CompiledStage* stageOf(hakios_metal_program* p, unsigned stage) {
