@@ -317,6 +317,10 @@ struct hakios_display_ops {
 	uint64_t (*scanned)(void);
 	/* (optional) until the display reads BASE, at most US microseconds: true if it does -- woken by the switch */
 	bool (*wait_scanned)(uint64_t base, uint32_t us);
+	/* (optional) the panel's brightness, in nits (16.16 fixed point: CoreBrightness's IOMFBBrightnessLevel), and its
+	 * light on or off (backboardd's RequestPowerChange: the screen locked, auto-lock); neither waits */
+	void (*brightness)(uint32_t nits16);
+	void (*power)(bool on);
 };
 const struct hakios_display_ops * hakios_display_ops;
 /*
@@ -666,9 +670,195 @@ public:
 	unsigned        fHelpersBusy, fHelpersStarted;
 	uint32_t *      fHelperBlend[7];
 	void record(MiniIOSurface * s);
+	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
 };
 
 OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
+
+/*
+ * The display's BACKLIGHT for CoreBrightness: a service of its own, of the class CoreBrightness takes for an internal
+ * display's backlight (-[CBDisplayContaineriOS setupInternalModules]: IOObjectConformsTo "AppleARMBacklight", anything
+ * else is an "unsupported service" and no display module is made), attached under the framebuffer.
+ */
+class AppleARMBacklight : public IOService
+{
+	OSDeclareDefaultStructors(AppleARMBacklight);
+
+public:
+	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
+	virtual OSObject * copyProperty(const char * aKey) const APPLE_KEXT_OVERRIDE;
+	using IOService::copyProperty;
+};
+
+OSDefineMetaClassAndStructors(AppleARMBacklight, IOService);
+
+/*
+ * BRIGHTNESS: CoreBrightness (in backboardd) takes for the display's backlight the service whose "backlight-control" is
+ * true (-[CBDisplayContaineriOS findBacklight]: IOPropertyMatch) and of the class AppleARMBacklight (above), and with
+ * "new-backlight-architecture" -- as on the iPhone X, a display without DCP -- sets
+ * its brightness as the property IOMFBBrightnessLevel, nits in 16.16 fixed point (SetIOMFBBrightness, from
+ * SetBLDriverNitsValue; 20F66) and brightness-nits, the same nits, on the backlight itself. Given to the display
+ * driver, where it has a panel to tell (hakios_display_ops->brightness).
+ * Any other property set is said the first time (what else CoreBrightness asks of a backlight).
+ */
+static uint32_t gBrightnessSaid;
+/* fb_swapbright=0: the swaps' brightness said but not given to the panel (its unit unproven yet: nits, as the rest) */
+static TUNABLE(uint32_t, gSwapBrightnessUse, "fb_swapbright", 1);
+static TUNABLE(uint32_t, gPhysicalNits, "fb_physnits", 0);
+
+/*
+ * What CoreBrightness reads of a backlight (DisplayCreateWithID and the rest: its nits, its curve, the restrictions, AAB
+ * and AAP) is, on the iPhone X, the device tree's /backlight node -- properties found from the backlight service up
+ * (IORegistryEntrySearchCFProperty). Our device tree has no such node, and without it CoreBrightness's display
+ * container never gets ready ("[BuiltIn] Modules not ready"): its properties are put on this service instead, copied
+ * from DeviceTree.d22ap's node (iOS 16.5) but for its function- references, phandle and names. The iPhone X's panel
+ * goes from 2 nits (LminProduct, 16.16) to ~674 (LmaxProduct); what it asks is turned into this panel's level by the
+ * display driver. Left out: use-AAP and use-new-AAP-ramp -- ramps through the iPhone's display driver (its device tree's
+ * function-disp_aap_ctrl), which is not here: with them CoreBrightness set a wake's first value and never the rest.
+ */
+static const struct { const char * name; unsigned length; const char * bytes; } gBacklightProperties[] = {
+	{ "DBVMax", 4, "\xff\x07\x00\x00" },
+	{ "DBVMin", 4, "\x8b\x00\x00\x00" },
+	{ "LmaxProduct", 4, "\x41\x07\xa2\x02" },
+	{ "LmidProduct", 4, "\x00\x00\x9b\x00" },
+	{ "LminProduct", 4, "\x00\x00\x02\x00" },
+	{ "aab-cap-e", 8, "\x00\x00\x1e\x00\xe8\x03\x88\x13" },
+	{ "aab-cap-l", 8, "\x32\x00\x2c\x01\x26\x02\xff\xff" },
+	{ "aab-constraint-emax", 4, "\x88\x13\x00\x00" },
+	{ "aab-constraint-lmax", 4, "\xa3\x02\x00\x00" },
+	{ "backlight-id", 4, "\xff\xff\xff\xff" },
+	{ "backlight-marketing-table", 404, "\x00\x00\x02\x00\xac\xbc\x02\x00\x02\x8b\x03\x00\xc6\x6b\x04\x00\x83\x60\x05\x00\x3d\x6a\x06\x00\x3d\x8a\x07\x00\xca\xc1\x08\x00\xeb\x11\x0a\x00\xe7\x7b\x0b\x00\xc4\x00\x0d\x00\x0c\xa2\x0e\x00\xc4\x60\x10\x00\x35\x3e\x12\x00\x22\x3b\x14\x00\x51\x58\x16\x00\x87\x96\x18\x00\x45\xf6\x1a\x00\x93\x78\x1d\x00\xb2\x1d\x20\x00\x66\xe6\x22\x00\xb0\xd2\x25\x00\x0c\xe2\x28\x00\x7a\x14\x2c\x00\xba\x69\x2f\x00\xca\xe1\x32\x00\x28\x7c\x36\x00\x0a\x37\x3a\x00\x20\x10\x3e\x00\x1e\x05\x42\x00\xf7\x13\x46\x00\x5e\x3a\x4a\x00\x45\x76\x4e\x00\xa1\xc5\x52\x00\x6c\x27\x57\x00\xdb\x99\x5b\x00\x22\x1b\x60\x00\x3d\xaa\x64\x00\x60\x45\x69\x00\xe3\xe5\x6d\x00\x89\x81\x72\x00\x0e\x0d\x77\x00\x70\x7d\x7b\x00\xef\xc7\x7f\x00\x89\xe1\x83\x00\x37\xc9\x87\x00\xa3\x90\x8b\x00\x49\x4c\x8f\x00\xdf\x0f\x93\x00\xdf\xef\x96\x00\x00\x00\x9b\x00\x20\x50\x9f\x00\xb2\xdd\xa3\x00\x8f\xa2\xa8\x00\xce\x97\xad\x00\xc8\xb6\xb2\x00\xd4\xf8\xb7\x00\x10\x58\xbd\x00\xbc\xd4\xc2\x00\xeb\x71\xc8\x00\xf1\x32\xce\x00\x64\x1b\xd4\x00\x56\x2e\xda\x00\x1a\x6f\xe0\x00\x00\xe0\xe6\x00\x0c\x82\xed\x00\x04\x56\xf4\x00\x70\x5d\xfb\x00\x93\x98\x02\x01\x37\x09\x0a\x01\x62\xb0\x11\x01\x20\x90\x19\x01\x3d\xaa\x21\x01\x89\x01\x2a\x01\x8d\x97\x32\x01\x56\x6e\x3b\x01\x72\x88\x44\x01\xef\xe7\x4d\x01\x5c\x8f\x57\x01\x06\x81\x61\x01\x7c\xbf\x6b\x01\x4f\x4d\x76\x01\x8b\x2c\x81\x01\x00\x60\x8c\x01\x43\xeb\x97\x01\xa3\xd0\xa3\x01\xb6\x13\xb0\x01\x4b\xb7\xbc\x01\x35\xbe\xc9\x01\x49\x2c\xd7\x01\xa1\x05\xe5\x01\xdd\x77\xf5\x01\xc1\x6e\x06\x02\x51\xef\x17\x02\xac\xfd\x29\x02\x8a\x9e\x3c\x02\x39\xd7\x4f\x02\x8f\xab\x63\x02\xda\x20\x78\x02\x3b\x3b\x8d\x02\x41\x07\xa2\x02" },
+	{ "backlight-update-policy", 4, "\x04\x00\x00\x00" },
+	{ "blr-cct-warning", 4, "\x8c\x0a\x00\x00" },
+	{ "display-backlight-calibration", 4, "\x00\x00\x00\x00" },
+	{ "gs-b-min", 4, "\x84\x03\x00\x00" },
+	{ "gs-i-nominal", 4, "\xe0\x01\x00\x00" },
+	{ "gs-i-threshold", 4, "\xe8\x03\x00\x00" },
+	{ "gs-slope", 4, "\xf4\x01\x00\x00" },
+	{ "max-nit-value", 4, "\xee\x02\x00\x00" },
+	{ "max-restriction-factors", 12, "\x72\x01\x2f\x03\x2f\x03\x2f\x03\x2f\x03\xe8\x03" },
+	{ "max-restriction-fall-time", 4, "\x10\x27\x00\x00" },
+	{ "max-restriction-rise-time", 4, "\x88\x13\x00\x00" },
+	{ "max-restriction-thresholds", 12, "\x01\x00\x1e\x00\x64\x00\xf4\x01\xe8\x03\x88\x13" },
+	{ "min-restriction-factors", 12, "\xe8\x03\xe8\x03\xb8\x0b\xb8\x0b\x70\x17\x70\x17" },
+	{ "min-restriction-fall-time", 4, "\x10\x27\x00\x00" },
+	{ "min-restriction-rise-time", 4, "\x88\x13\x00\x00" },
+	{ "min-restriction-thresholds", 12, "\x01\x00\x1e\x00\x64\x00\xf4\x01\xe8\x03\x88\x13" },
+	{ "multi-point-restriction", 4, "\x01\x00\x00\x00" },
+	{ "override-boot-brightness", 4, "\xe4\x02\x00\x00" },
+	{ "panel-gamma", 4, "\x98\x08\x00\x00" },
+	{ "pre-strobe-nit", 4, "\xa2\x02\x00\x00" },
+	{ "restriction-pivoting-l", 4, "\x64\x00\x00\x00" },
+	{ "restriction-pivoting-l-2", 4, "\x1e\x00\x00\x00" },
+	{ "truetone-strength", 12, "\x00\x00\x0e\x01\x0e\x01\xc8\x00\xc8\x00\xc8\x00" },
+	{ "use-AAB-architecture", 4, "\x01\x00\x00\x00" },
+	{ "use-Nits2DACTable", 4, "\x01\x00\x00\x00" },
+};
+
+/* (what is asked of this service and not there: said once each, the first 60 -- what else CoreBrightness wants) */
+OSObject *
+AppleARMBacklight::copyProperty(const char * aKey) const
+{
+	OSObject * value = IOService::copyProperty(aKey);
+	static char said[60][48];
+	static volatile SInt32 saidCount;
+
+	if (value == NULL && aKey != NULL && saidCount < 60 && hakios_display_ops != NULL &&
+	    hakios_display_ops->brightness != NULL) {
+		for (SInt32 i = 0; i < saidCount && i < 60; i++) {
+			if (strncmp(said[i], aKey, sizeof(said[i]) - 1) == 0) {
+				return NULL;
+			}
+		}
+		SInt32 slot = OSIncrementAtomic(&saidCount);
+		if (slot < 60) {
+			strlcpy(said[slot], aKey, sizeof(said[slot]));
+			IOLog("MiniIOMobileFramebuffer: property %s asked for, not there\n", aKey);
+		}
+	}
+	return value;
+}
+
+static IOReturn brightnessProperties(IOService * service, OSObject * properties);
+
+/* (CoreBrightness sets the ramp's nits on the framebuffer, IOMFBBrightnessLevel, and others on the backlight) */
+IOReturn
+IOMobileFramebuffer::setProperties(OSObject * properties)
+{
+	return brightnessProperties(this, properties);
+}
+
+IOReturn
+AppleARMBacklight::setProperties(OSObject * properties)
+{
+	return brightnessProperties(this, properties);
+}
+
+/*
+ * Each property set is also KEPT, as the iPhone's drivers keep them: CoreBrightness reads some back -- its DisplayBrightness
+ * (NitsPhysical) before it pushes nits to CoreAnimation (-[CBCAManager displayBrightnessPropertyHandler:]); without it
+ * "Unexpected nits type" and no ramp ever reached the display (11-11). (A dictionary of at most 64 keys.)
+ */
+static IOReturn
+brightnessProperties(IOService * service, OSObject * properties)
+{
+	OSDictionary * dict = OSDynamicCast(OSDictionary, properties);
+	OSCollectionIterator * keys;
+	OSSymbol * key;
+	static OSSet * said;
+
+	if (dict == NULL) {
+		return kIOReturnBadArgument;
+	}
+	if (dict->getCount() > 64) {
+		return kIOReturnBadArgument;
+	}
+	keys = OSCollectionIterator::withCollection(dict);
+	if (keys == NULL) {
+		return kIOReturnNoMemory;
+	}
+	while ((key = OSDynamicCast(OSSymbol, keys->getNextObject())) != NULL) {
+		OSObject * value = dict->getObject(key);
+		OSNumber * number = OSDynamicCast(OSNumber, value);
+
+		if (value != NULL) {
+			service->setProperty(key, value);
+		}
+		/* (the same nits two ways: brightness-nits on the backlight -- SetBLDriverNitsValue -- and IOMFBBrightnessLevel on
+		 * the framebuffer it finds besides, which it does not here) */
+		/* hakios-nits: the nits CoreBrightness hands CoreAnimation, from backboardd (userland/src/inject.c, cb_bridge) --
+		 * what the panel's level follows; the physical ones above only with fb_physnits=1 (they stay at a wake's 1 nit) */
+		bool bridged = key->isEqualTo("hakios-nits");
+		if ((bridged || key->isEqualTo("brightness-nits") || key->isEqualTo("IOMFBBrightnessLevel")) && number != NULL) {
+			if (gBrightnessSaid < 40) {
+				gBrightnessSaid++;
+				IOLog("MiniIOMobileFramebuffer: %s %#x (%u.%02u nits)%s\n", key->getCStringNoCopy(), number->unsigned32BitValue(),
+				    number->unsigned32BitValue() >> 16, (number->unsigned32BitValue() & 0xffff) * 100 >> 16,
+				    bridged || gPhysicalNits ? "" : " (not used)");
+			}
+			if ((bridged || gPhysicalNits) && hakios_display_ops != NULL && hakios_display_ops->brightness != NULL) {
+				hakios_display_ops->brightness(number->unsigned32BitValue());
+			}
+			continue;
+		}
+		if (said == NULL) {
+			said = OSSet::withCapacity(8);
+		}
+		if (said != NULL && !said->containsObject(key)) {
+			OSSerialize * text = OSSerialize::withCapacity(256);
+
+			said->setObject(key);
+			if (text != NULL && value != NULL) {
+				value->serialize(text);
+			}
+			IOLog("MiniIOMobileFramebuffer: property %s set (%.300s): taken, not used\n", key->getCStringNoCopy(),
+			    text != NULL ? text->text() : "");
+			OSSafeReleaseNULL(text);
+		}
+	}
+	keys->release();
+	return kIOReturnSuccess;
+}
 
 static void
 setNumber(OSDictionary * dict, const char * key, uint64_t value)
@@ -958,11 +1148,49 @@ IOMobileFramebuffer::start(IOService * provider)
 	}
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+	AppleARMBacklight * backlight = NULL;
+	if (hakios_display_ops != NULL && hakios_display_ops->brightness != NULL &&
+	    (backlight = OSTypeAlloc(AppleARMBacklight)) != NULL && !backlight->init()) {
+		OSSafeReleaseNULL(backlight);
+	}
+	if (backlight != NULL) {
+		backlight->setProperty("backlight-control", kOSBooleanTrue);    /* (CoreBrightness's backlight: setProperties) */
+		for (unsigned i = 0; i < sizeof(gBacklightProperties) / sizeof(gBacklightProperties[0]); i++) {
+			backlight->setProperty(gBacklightProperties[i].name, (void *) gBacklightProperties[i].bytes,
+			    gBacklightProperties[i].length);
+		}
+		/* DisplayCreateWithID gives up on a backlight without IODisplayParameters' brightness (its min, max and value,
+		 * 32-bit numbers); "new-backlight-architecture" true makes it set nits (SetBLDriverNitsValue: IOMFBBrightnessLevel)
+		 * rather than the old parameter: so nits here too, 16.16, the iPhone X's range (LminProduct to LmaxProduct) */
+		OSDictionary * parameters = OSDictionary::withCapacity(1), * brightness = OSDictionary::withCapacity(3);
+		OSNumber * min = OSNumber::withNumber(0x00020000ULL, 32), * max = OSNumber::withNumber(0x02a20741ULL, 32);
+		OSNumber * value = OSNumber::withNumber(0x009b0000ULL, 32);
+		if (parameters != NULL && brightness != NULL && min != NULL && max != NULL && value != NULL) {
+			brightness->setObject("min", min);
+			brightness->setObject("max", max);
+			brightness->setObject("value", value);
+			parameters->setObject("brightness", brightness);
+			backlight->setProperty("IODisplayParameters", parameters);
+		}
+		OSSafeReleaseNULL(parameters);
+		OSSafeReleaseNULL(brightness);
+		OSSafeReleaseNULL(min);
+		OSSafeReleaseNULL(max);
+		OSSafeReleaseNULL(value);
+		backlight->setProperty("new-backlight-architecture", kOSBooleanTrue);
+	}
 	/* for who draws with the GPU (userland/src/eagl.c): a frame need not be waited for before it is handed over */
 	setProperty("HakiosWaitsForGPU", kOSBooleanTrue);
 	publishModes();
 	setName("disp0");
 	registerService();
+	if (backlight != NULL) {
+		backlight->setName("backlight");
+		if (backlight->attach(this)) {
+			backlight->registerService();
+		}
+		backlight->release();
+	}
 	return true;
 }
 
@@ -2430,6 +2658,57 @@ IOMobileFramebufferUserClient::vsync(void)
 	IOLockUnlock(fLock);
 }
 
+/*
+ * BRIGHTNESS IN THE SWAP: past boot, CoreBrightness's ramps reach the display with the frames -- CoreAnimation sets them
+ * on the swap it is building (IOMobileFramebufferSwapSetBrightness; without DCP, as on the iPhone X: a flag and a double
+ * in the framebuffer object's swap request, which is the object from +24 -- 20F66's legacy swap functions, the flag at
+ * +767 and the value at +772 of the object). Four such pairs: brightness, its limit and two more (said, not used).
+ * The doubles turned into 16.16 by integer means (no floating point in the kernel).
+ */
+#define SWAP_BRIGHTNESS_SET     0x2e7           /* bytes: brightness, limit, (two more) */
+#define SWAP_BRIGHTNESS         0x2ec           /* doubles: brightness 0x2ec, limit 0x2f4, 0x2fc, 0x304 */
+
+static uint32_t
+doubleTo16_16(uint64_t bits)
+{
+	int exponent = (int) ((bits >> 52) & 0x7ff) - 1023;
+	uint64_t mantissa = (bits & ((1ULL << 52) - 1)) | (1ULL << 52);
+
+	if ((bits >> 63) != 0 || ((bits >> 52) & 0x7ff) == 0) {
+		return 0;                       /* (negative, zero, tiny) */
+	}
+	if (exponent >= 16) {
+		return 0xffffffffu;             /* (65536 or more) */
+	}
+	/* value * 65536 = mantissa * 2^(exponent - 52 + 16) */
+	return exponent - 36 >= 0 ? (uint32_t) (mantissa << (exponent - 36)) : (uint32_t) (mantissa >> (36 - exponent));
+}
+
+static uint32_t gSwapBrightnessSaid;
+
+static void
+swapBrightness(const uint8_t * swap)
+{
+	uint64_t v[4];
+
+	if (swap[SWAP_BRIGHTNESS_SET] == 0 && swap[SWAP_BRIGHTNESS_SET + 1] == 0 && swap[SWAP_BRIGHTNESS_SET + 2] == 0 &&
+	    swap[SWAP_BRIGHTNESS_SET + 3] == 0) {
+		return;
+	}
+	memcpy(v, swap + SWAP_BRIGHTNESS, sizeof(v));
+	if (gSwapBrightnessSaid < 60) {
+		gSwapBrightnessSaid++;
+		IOLog("MiniIOMobileFramebuffer: swap %u brightness: set %u %u %u %u, values %#x %#x %#x %#x (16.16)\n",
+		    *(const uint32_t *) (swap + SWAP_ID), swap[SWAP_BRIGHTNESS_SET], swap[SWAP_BRIGHTNESS_SET + 1],
+		    swap[SWAP_BRIGHTNESS_SET + 2], swap[SWAP_BRIGHTNESS_SET + 3], doubleTo16_16(v[0]), doubleTo16_16(v[1]),
+		    doubleTo16_16(v[2]), doubleTo16_16(v[3]));
+	}
+	if (swap[SWAP_BRIGHTNESS_SET] != 0 && hakios_display_ops != NULL && hakios_display_ops->brightness != NULL &&
+	    gSwapBrightnessUse) {
+		hakios_display_ops->brightness(doubleTo16_16(v[0]));
+	}
+}
+
 IOReturn
 IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
     IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
@@ -2501,6 +2780,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			IOLog("MiniIOMobileFramebuffer: swap request of %u bytes, expected %u\n", args->structureInputSize, SWAP_SIZE);
 			return kIOReturnBadArgument;
 		}
+		swapBrightness((const uint8_t *) args->structureInput);
 		fOwner->present((const uint8_t *) args->structureInput);
 		return kIOReturnSuccess;
 
@@ -2513,10 +2793,22 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			return fOwner->swapWait((uint32_t) in[0], args->scalarInputCount > 1 ? (uint32_t) in[1] : 0);
 		}
 		return kIOReturnSuccess;
+	case kFBMethodRequestPowerChange:               /* in: 0 the display off, else on (backboardd: lock, wake, auto-lock) */
+		if (args->scalarInputCount > 0) {
+			char who[32] = "?";
+
+			proc_selfname(who, sizeof(who));
+			IOLog("MiniIOMobileFramebuffer: %s[%d]: the display %s (RequestPowerChange %llu)\n", who, proc_selfpid(),
+			    in[0] != 0 ? "on" : "off", in[0]);
+			if (hakios_display_ops != NULL && hakios_display_ops->power != NULL) {
+				hakios_display_ops->power(in[0] != 0);
+			}
+		}
+		return kIOReturnSuccess;
+
 	case kFBMethodSwapSignal:
 	case kFBMethodSwapCancel:
 	case kFBMethodSwapCancelAll:
-	case kFBMethodRequestPowerChange:
 	case kFBMethodChangeFrameInfo:
 		return kIOReturnSuccess;
 
