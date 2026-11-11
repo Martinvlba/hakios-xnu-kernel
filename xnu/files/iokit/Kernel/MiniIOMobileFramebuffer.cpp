@@ -1832,7 +1832,9 @@ IOMobileFramebuffer::reportFrameTimes(void)
  * not for one never handed over -- one frame in flight with two surfaces: 69 fps. fb_swapwait=1 for it; by default the
  * GPU service holds a command buffer for the surface on the panel instead (kHakiosSurfaceBusy), SwapWait at once.
  */
-static TUNABLE(uint32_t, gSwapWaitOn, "fb_swapwait", 2);   /* (2: until the switch to it is set up, not done -- see show()) */
+static TUNABLE(uint32_t, gSwapWaitOn, "fb_swapwait", 4);   /* (4 since 11-11: polls done once RETIRED -- see swapPoll --,
+                                                             * CoreAnimation then triple buffers; 2: until the switch to it is
+                                                             * set up, not done -- see show()) */
 
 void
 IOMobileFramebuffer::swapShown(uint32_t id)
@@ -1901,6 +1903,16 @@ IOMobileFramebuffer::swapPoll(uint32_t id, uint32_t flags)
 		}
 	}
 	done = (int32_t) (fSwapScannedID - id) >= 0;
+	/*
+	 * fb_swapwait=4 (11-11, TODO 8g): a POLL (bit 31) answers done only once the swap is RETIRED -- a later one is being
+	 * read, so its surfaces are no longer the panel's -- as IOMFB's "swap complete" means: CoreAnimation lets a flip
+	 * buffer's surface go when its swap is done, and with "done once shown" it drew the next frame but one into the
+	 * surface the panel still read (the GPU's submission gate then held it, ~3 ms a frame in the tester's use). Done
+	 * later, it finds no surface free and makes a THIRD (allocate_buffer has no cap) -- triple buffering.
+	 */
+	if (gSwapWaitOn == 4 && (flags & 0x80000000u)) {
+		done = (int32_t) (fSwapScannedID - id) > 0;
+	}
 	gSwapPollsBusy += !done;
 	IOLockUnlock(fSwapLock);
 	return done ? kIOReturnSuccess : kIOReturnBusy;
@@ -1911,7 +1923,7 @@ IOMobileFramebuffer::swapWait(uint32_t id, uint32_t flags)
 {
 	AbsoluteTime deadline;
 
-	if (gSwapWaitOn == 3 && id != 0) {
+	if ((gSwapWaitOn == 3 || gSwapWaitOn == 4) && id != 0) {
 		return swapPoll(id, flags);
 	}
 	if (!gSwapWaitOn || id == 0) {

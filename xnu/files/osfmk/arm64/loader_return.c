@@ -567,6 +567,11 @@ static uint32_t hv_wdt_enabled;
  * that a healthy kernel runs as long as it likes and a hung one is still restarted.
  */
 static vm_offset_t samsung_wdt;
+/*
+ * boot-arg wdt_starve=N (a test, 11-11, TODO 32): the Samsung watchdog fed for N seconds of uptime only -- a hung kernel's
+ * view: the phone should restart about the watchdog's time (~150 s) after.
+ */
+static uint32_t wdt_starve_s;
 
 #define MEMORY_REPORT_BEATS     6               /* a line about memory every so many heartbeats */
 
@@ -621,7 +626,20 @@ hv_wdt_pet(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 	uint64_t deadline;
 
 	if (samsung_wdt != 0) {
-		*(volatile uint32_t *)(samsung_wdt + 8) = *(volatile uint32_t *)(samsung_wdt + 4);
+		uint64_t up_ns;
+
+		absolutetime_to_nanoseconds(mach_absolute_time(), &up_ns);
+		if (wdt_starve_s == 0 || up_ns < (uint64_t)wdt_starve_s * NSEC_PER_SEC) {
+			*(volatile uint32_t *)(samsung_wdt + 8) = *(volatile uint32_t *)(samsung_wdt + 4);
+		} else {
+			static bool said;
+			if (!said) {
+				said = true;
+				printf("watchdog: wdt_starve=%u: no longer fed (WTCON 0x%x, WTDAT %u, WTCNT %u)\n", wdt_starve_s,
+				    *(volatile uint32_t *)samsung_wdt, *(volatile uint32_t *)(samsung_wdt + 4),
+				    *(volatile uint32_t *)(samsung_wdt + 8));
+			}
+		}
 	}
 	if (hv_wdt_enabled) {
 		register uint64_t x0 __asm__("x0") = VIRT_WDT_PET;
@@ -649,6 +667,7 @@ hv_wdt_pet_init(void)
 	unsigned int size;
 
 	PE_parse_boot_argn("hv_wdt_pet", &hv_wdt_enabled, sizeof(hv_wdt_enabled));
+	PE_parse_boot_argn("wdt_starve", &wdt_starve_s, sizeof(wdt_starve_s));
 	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
 	    SecureDTGetProperty(chosen, "watchdog-samsung", &prop, &size) == kSuccess && size == sizeof(uint64_t)) {
 		samsung_wdt = ml_io_map(*(uint64_t const *)prop, PAGE_SIZE);
