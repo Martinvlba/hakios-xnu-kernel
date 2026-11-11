@@ -1,0 +1,5 @@
+# The widgets page (Today view: a swipe right from the first home page) held 40 s, for a screenshot over USB
+# (devices/akita/tools/usbmux-shot.py) -- the widgets' corners (TODO 8/8h: diagonal marks at the Weather widget's corners,
+# a dark line at its right edge). RC_JOBS=rc.jobs.todayshot.
+/redwood/bin/rwtouch wait 50
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 40 button home wait 2
