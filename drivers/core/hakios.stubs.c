@@ -175,13 +175,13 @@ void hakios_mic_dsp_down(void) {}
 void hakios_mic_quiesce(void) {}
 #endif
 
-#ifndef HAKIOS_HAPTIC
+#if !defined(HAKIOS_HAPTIC) && !defined(HAKIOS_AKITA_HAPTIC)
 void hakios_haptic_init(void) {}
 void hakios_haptic_quiesce(void) {}
 void hakios_haptic_pretend(__unused uint32_t peak) {}
 #endif
 
-#ifndef HAKIOS_TORCH
+#if !defined(HAKIOS_TORCH) && !defined(HAKIOS_AKITA_TORCH)
 void hakios_torch_init(void) {}
 void hakios_torch_quiesce(void) {}
 #endif
