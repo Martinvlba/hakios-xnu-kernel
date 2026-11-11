@@ -15,10 +15,14 @@ driver SPEAKER
 	file    bsd/dev/hakios.speaker.c
 	help    the two speaker amplifiers on I2C, and their watch of temperature and battery
 
+driver GUARD
+	file    bsd/dev/hakios.guard.c
+	help    the speakers' guard: a high-pass filter, three averages of the power and a peak limiter on the samples, in place
+	help    of a DSP's speaker protection (redwood's SOUND; the Pixel 8a's AoC sound, aocsound=1)
+
 driver SOUND
 	file    bsd/dev/hakios.sound.c
-	file    bsd/dev/hakios.guard.c
-	requires ADSP SPEAKER
+	requires ADSP SPEAKER GUARD
 	help    the speakers playing (sound=N): what the DSP's services are told, the feeder, and the speakers' guard
 	help    that limits what the amplifiers get
 
