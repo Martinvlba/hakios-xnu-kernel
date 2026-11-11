@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Mali shader cache handed to the host (TODO 21, 11-11): cache_send serves it on the phone's 127.0.0.1:31415 for
+# 240 s; devices/akita/tools/usbmux-pull-cache.py fetches it into userland/hakios-metal-cache-mali, the next image's
+# seed. The home screen first, so that its pipelines are in the cache too. RC_JOBS=rc.jobs.cachesend.
+/redwood/bin/rwtouch wait 45
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 3 swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2 button home wait 2
+/redwood/bin/cache_send 240

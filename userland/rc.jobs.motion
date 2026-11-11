@@ -1,0 +1,19 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Everyday motion for the frame statistics (the kernel's "from one frame to the next", the GPU's gate and wait lines;
+# TODO 8g, the tester 11-11: "when the UI moves it all seems slightly sluggish"): pages swiped both ways, Settings
+# opened, scrolled and closed, Control Center, Spotlight, the widgets page and the App Library -- twice, at a finger's
+# pace. RC_JOBS=rc.jobs.motion.
+/redwood/bin/rwtouch wait 55
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 250 wait 1.5 swipe 0.15 0.5 0.85 0.5 250 wait 1.5
+/redwood/bin/rwtouch tap 0.37 0.80 wait 2.5 swipe 0.5 0.8 0.5 0.3 300 wait 1.5 swipe 0.5 0.3 0.5 0.8 300 wait 1.5 button home wait 2
+/redwood/bin/rwtouch swipe 0.95 0.005 0.95 0.55 300 wait 2 button home wait 2
+/redwood/bin/rwtouch swipe 0.5 0.45 0.5 0.75 250 wait 2 button home wait 2
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.5 0.8 0.5 0.3 300 wait 1.5 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 250 wait 1.5 swipe 0.15 0.5 0.85 0.5 250 wait 1.5
+/redwood/bin/rwtouch tap 0.37 0.80 wait 2.5 swipe 0.5 0.8 0.5 0.3 300 wait 1.5 swipe 0.5 0.3 0.5 0.8 300 wait 1.5 button home wait 2
+/redwood/bin/rwtouch swipe 0.95 0.005 0.95 0.55 300 wait 2 button home wait 2
+/redwood/bin/rwtouch swipe 0.5 0.45 0.5 0.75 250 wait 2 button home wait 2
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.5 0.8 0.5 0.3 300 wait 1.5 button home wait 2
+/redwood/bin/rwtouch wait 10

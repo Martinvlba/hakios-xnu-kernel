@@ -4,7 +4,10 @@
  * Mali-G715), linked with the host Mesa build (tools/mesa/pan/mk-pan-host.sh). For trying a shader's function
  * constants without booting the phone: CoreAnimation's generic uber shaders specialised per pipeline.
  *
- *   mali_stage_host LIB.metallib VERTEX FRAGMENT "VS-CONSTANTS" "FS-CONSTANTS"
+ *   mali_stage_host LIB.metallib VERTEX FRAGMENT "VS-CONSTANTS" "FS-CONSTANTS" [BINDING:HEX]
+ *
+ * BINDING:HEX (11-11): the fragment stage specialised for [[buffer(BINDING)]] holding the bytes HEX (two digits a
+ * byte), as hakios_metal_program_specialize compiles it (compile_mali.c's mali_compile_known).
  *
  * CONSTANTS: "index=bits index=bits ..." as the plug-in prints them ("fragment constants not 0: 4=1 6=2 58=1541"); a
  * vector constant's component i at bit i * its width (58=1541: uchar3 5, 6, 0). Prints each stage's outcome, its
@@ -115,11 +118,28 @@ main(int argc, char **argv)
 		return 2;
 	}
 	printf("vertex %s (%zu bytes of AIR, %u constants): %zu bytes of code in %.2f s\n", argv[2], vs_size, vn, vs.size, now() - t0);
+	static uint8_t known_bytes[4096];
+	struct mali_known_buffer known = { 0, known_bytes, 0 };
+	if (argc > 6 && strchr(argv[6], ':') != NULL) {
+		const char *hex = strchr(argv[6], ':') + 1;
+
+		known.binding = (unsigned)strtoul(argv[6], NULL, 10);
+		while (hex[0] && hex[1] && known.length < sizeof(known_bytes)) {
+			unsigned v;
+
+			if (sscanf(hex, "%2x", &v) != 1) break;
+			known_bytes[known.length++] = (uint8_t)v;
+			hex += 2;
+		}
+		mali_compile_known(&known);
+		printf("fragment specialised for %zu bytes of buffer %u\n", known.length, known.binding);
+	}
 	t0 = now();
 	if (mali_stage_compile(fb, fs_size, fc, fn, 1, &vs, &fs, why, sizeof(why)) != 0) {
 		printf("fragment %s (%zu bytes of AIR, %u constants): REFUSED in %.2f s: %s\n", argv[3], fs_size, fn, now() - t0, why);
 		return 2;
 	}
-	printf("fragment %s (%zu bytes of AIR, %u constants): %zu bytes of code in %.2f s\n", argv[3], fs_size, fn, fs.size, now() - t0);
+	printf("fragment %s (%zu bytes of AIR, %u constants): %zu bytes of code in %.2f s; %u registers, %u bytes spilled a thread\n",
+	    argv[3], fs_size, fn, fs.size, now() - t0, fs.work_regs, fs.tls_size);
 	return 0;
 }

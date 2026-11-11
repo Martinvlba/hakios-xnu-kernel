@@ -24,7 +24,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
 #include <sys/sysctl.h>
+#endif
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -445,6 +447,67 @@ lower_f2b1(nir_builder *b, nir_alu_instr *alu, void *data)
 /* the blend mali_fragment_compile asks for (this thread's compile only) */
 static __thread const struct mali_shader_blend *blend_now;
 
+/* the buffer whose bytes this thread's fragment compiles fold in (mali_compile_known) */
+static __thread const struct mali_known_buffer *known_now;
+
+void
+mali_compile_known(const struct mali_known_buffer *known)
+{
+	known_now = known;
+}
+
+/* a load of the known buffer at a constant offset, inside its bytes: those bytes */
+static bool
+fold_known_load(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+	const struct mali_known_buffer *k = data;
+
+	if ((in->intrinsic != nir_intrinsic_load_ubo && in->intrinsic != nir_intrinsic_load_ssbo) ||
+	    !nir_src_is_const(in->src[0]) || nir_src_as_uint(in->src[0]) != k->binding || !nir_src_is_const(in->src[1])) {
+		return false;
+	}
+	unsigned bits = in->def.bit_size, n = in->def.num_components;
+	uint64_t at = nir_src_as_uint(in->src[1]);
+	if ((bits != 8 && bits != 16 && bits != 32 && bits != 64) || at + (uint64_t)n * (bits / 8) > k->length) {
+		return false;
+	}
+	nir_const_value v[NIR_MAX_VEC_COMPONENTS];
+	memset(v, 0, sizeof(v));
+	for (unsigned c = 0; c < n; c++) {
+		uint64_t word = 0;
+
+		memcpy(&word, k->bytes + at + c * (bits / 8), bits / 8);
+		v[c] = nir_const_value_for_raw_uint(word, bits);
+	}
+	b->cursor = nir_before_instr(&in->instr);
+	nir_def_replace(&in->def, nir_build_imm(b, n, bits, v));
+	return true;
+}
+
+/* the known buffer's loads folded, and what they decide with them: branches taken or not, loops of a known count
+ * unrolled (their loads then at constant offsets too), the rest dead -- until nothing changes */
+static void
+fold_known(nir_shader *s, const struct mali_known_buffer *k)
+{
+	bool progress;
+	unsigned round = 0;
+
+	do {
+		progress = false;
+		NIR_PASS(progress, s, nir_shader_intrinsics_pass, fold_known_load, nir_metadata_control_flow, (void *)k);
+		NIR_PASS(progress, s, nir_lower_vars_to_ssa);
+		NIR_PASS(progress, s, nir_opt_copy_prop);
+		NIR_PASS(progress, s, nir_opt_constant_folding);
+		NIR_PASS(progress, s, nir_opt_algebraic);
+		NIR_PASS(progress, s, nir_opt_dead_cf);
+		NIR_PASS(progress, s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
+		NIR_PASS(progress, s, nir_opt_loop_unroll);
+		NIR_PASS(progress, s, nir_opt_cse);
+		NIR_PASS(progress, s, nir_opt_dce);
+	} while (progress && ++round < 32);
+	nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
+}
+
 /* Metal's MTLBlendFactor as gallium's (nir_lower_blend's) */
 static enum pipe_blendfactor
 pipe_factor(unsigned metal)
@@ -493,17 +556,22 @@ lower_shader_blend(nir_shader *s, const struct mali_shader_blend *blend, struct 
 	out->rt_read |= blend->mask;
 }
 
-static /* a word in the boot-args (the phone's; the host's compile has none) */
+/* a word in the boot-args (the phone's; the host's compile has none) */
 static int
 mali_boot_arg(const char *word)
 {
+#ifdef __APPLE__
 	char args[1024] = { 0 };
 	size_t size = sizeof(args) - 1;
 
 	return sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, word) != NULL;
+#else
+	(void)word;
+	return 0;               /* (the host's compile: tools/mesa/pan/mali_stage_host) */
+#endif
 }
 
-int
+static int
 compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, struct mali_kernel_binary *out, char *error,
     size_t error_size)
 {
@@ -514,6 +582,9 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 	const char *why = NULL;
 	int result = -1;
 
+	if (want == MESA_SHADER_FRAGMENT && known_now != NULL) {
+		fold_known(s, known_now);
+	}
 	if (want == MESA_SHADER_FRAGMENT) {
 		out->rt_read = (unsigned) ((s->info.outputs_read >> FRAG_RESULT_DATA0) & 0xff);
 		nir_foreach_shader_out_variable(var, s) {

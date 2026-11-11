@@ -195,6 +195,16 @@ if [ -d hakios-metal-cache ] && [ -n "$(ls hakios-metal-cache 2>/dev/null)" ]; t
 	cp -r hakios-metal-cache root/share/
 	echo "build.sh: $(ls hakios-metal-cache | wc -l | tr -d ' ') compiled Metal stages seeded into /redwood/share/hakios-metal-cache"
 fi
+# ... and the Mali back end's (the Pixel 8a; TODO 21, 11-11): the programs devices/akita/tools/usbmux-pull-cache.py
+# fetched from a running phone (userland/hakios-metal-cache-mali, ignored by git) -> /redwood/share/hakios-metal-cache-mali,
+# which hakios-metal's c_api_mali.cpp reads before the phone's own cache. A rebuilt compiler (compile_mali.c, Mesa)
+# files its programs under other names: fetch again after one. MALI_SEED=0: none.
+rm -rf root/share/hakios-metal-cache-mali
+if [ "${MALI_SEED:-1}" != 0 ] && [ -d hakios-metal-cache-mali ] && [ -n "$(ls hakios-metal-cache-mali 2>/dev/null)" ]; then
+	mkdir -p root/share/hakios-metal-cache-mali
+	cp hakios-metal-cache-mali/*.prog root/share/hakios-metal-cache-mali/
+	echo "build.sh: $(ls hakios-metal-cache-mali/*.prog | wc -l | tr -d ' ') compiled Mali programs ($(du -sh hakios-metal-cache-mali | cut -f1)) seeded into /redwood/share/hakios-metal-cache-mali"
+fi
 if [ -d $DARWIN/rootfs/usr/lib ]; then
 	if [ -z "$PREBUILT" ]; then
 		# ordinary dynamically linked programs of our own, built against the Darwin SDK
@@ -202,6 +212,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -framework CoreFoundation -o obj/svc_test src/svc_test.c
 		$DYN -Wno-four-char-constants -framework CoreFoundation -framework IOSurface -o obj/surf_test src/surf_test.c
 		$DYN -o obj/rwtouch src/rwtouch.c
+		# (the Mali shader cache to the host over USB, for the next image's seed: devices/akita/tools/usbmux-pull-cache.py)
+		$DYN -o obj/cache_send src/cache_send.c
 		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c
 		$DYN -framework CoreFoundation -lMobileGestalt -o obj/mg_test src/mg_test.c
 		$DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/torch_test src/torch_test.c
@@ -395,6 +407,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/
+	[ -f obj/cache_send ] && cp obj/cache_send root/bin/
 	[ -f obj/camera_test ] && cp obj/camera_test root/bin/
 	[ -f obj/camera_avtest ] && cp obj/camera_avtest root/bin/
 	[ -f obj/record_test ] && cp obj/record_test root/bin/
@@ -545,6 +558,13 @@ for f in ../fw-haptic/cs40l26*.wmfw ../fw-haptic/cs40l26*.bin; do
 	mkdir -p root/fw
 	install -m 0644 "$f" root/fw/
 done
+# ... and the Pixel 8a's AoC firmware (Google's signed image, the phone's /vendor/firmware/aoc.bin, 29 MB; in ../fw-aoc,
+# never in git): devices/akita/drivers/aoc copies it into the AoC's carveout for the GSA to authenticate (aoc=3). It
+# fills half of a 64 MiB boot image: AOC_FW=0 leaves it out
+if [ "${AOC_FW:-1}" != 0 ] && [ -f ../fw-aoc/aoc.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-aoc/aoc.bin root/fw/
+fi
 # ... and the cameras' register tables (drivers/camera/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
 # hakios_<maker>_<sensor>_<camera>.bin, in ../fw-camera (the vendor's: neither they nor the tables are in the
