@@ -1,0 +1,5 @@
+# Control Center pulled down from the top right corner and held open 40 s, for a screenshot over USB
+# (devices/akita/tools/usbmux-shot.py) -- its tiles' dashed inner outlines and corner diagonals (TODO 8h, the tester's
+# screenshot of 11-10 22:17). RC_JOBS=rc.jobs.ccshot.
+/redwood/bin/rwtouch wait 50
+/redwood/bin/rwtouch swipe 0.95 0.005 0.95 0.55 300 wait 40 button home wait 2
