@@ -538,6 +538,13 @@ if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
 fi
+# ... or, for the Pixel 8a's CS40L26, Cirrus's RAM firmware and its tunings, the phone's /vendor/firmware/cs40l26* (the
+# firmware, the wavetable, -svc and -dvl; devices/akita/drivers/haptic, haptic=3) -- the vendor's, never in git
+for f in ../fw-haptic/cs40l26*.wmfw ../fw-haptic/cs40l26*.bin; do
+	[ -f "$f" ] || continue
+	mkdir -p root/fw
+	install -m 0644 "$f" root/fw/
+done
 # ... and the cameras' register tables (drivers/camera/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
 # hakios_<maker>_<sensor>_<camera>.bin, in ../fw-camera (the vendor's: neither they nor the tables are in the

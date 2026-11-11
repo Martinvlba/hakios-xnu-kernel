@@ -984,9 +984,20 @@ actuator_write(const int16_t *samples, UInt32 frames)
 
 		peak = v > peak ? v : peak;
 	}
-	if (haptic == -1) {
-		haptic = open("/dev/hakios-haptic", O_WRONLY | O_NONBLOCK);
-		haptic = haptic >= 0 ? haptic : -2;
+	if (haptic < 0) {
+		/* (tried again at most once a second: a kernel may make the node after Darwin's first haptic -- the Pixel
+		 * 8a's, its motor's firmware loaded first) */
+		static uint64_t tried;
+		uint64_t now = mach_absolute_time(), second = 1000000000ull;
+		mach_timebase_info_data_t tb;
+
+		mach_timebase_info(&tb);
+		second = second * tb.denom / tb.numer;
+		if (haptic == -1 || now - tried >= second) {
+			tried = now;
+			haptic = open("/dev/hakios-haptic", O_WRONLY | O_NONBLOCK);
+			haptic = haptic >= 0 ? haptic : -2;
+		}
 	}
 	if (haptic >= 0) {
 		(void)write(haptic, samples, (size_t)frames * 2);
