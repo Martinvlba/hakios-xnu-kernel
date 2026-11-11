@@ -3433,6 +3433,9 @@ hm_compile_queue(void)
 							  (unsigned)[c destinationAlphaBlendFactor], (unsigned)[c writeMask]);
 		}
 	}
+	if ([descriptor label] != nil) {
+		hakios_metal_program_set_label(program, [[descriptor label] UTF8String]);  /* (diagnostics: metal_skipprog, metal_progsay) */
+	}
 	{
 		NSString *fetches = hm_vertex_descriptor_fetch([descriptor vertexDescriptor]);
 
