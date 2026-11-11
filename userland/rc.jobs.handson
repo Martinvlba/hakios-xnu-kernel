@@ -1,0 +1,3 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Nothing: the tester's hands (touch_jumps=1, TODO 61). RC_JOBS=rc.jobs.handson.
+/redwood/bin/rwtouch wait 1

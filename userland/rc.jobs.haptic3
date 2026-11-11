@@ -1,0 +1,10 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's vibration motor for Darwin (haptic=5: the CS40L26's RAM firmware is loaded ~50 s into the boot, so
+# this waits first): the system's haptic feedbacks -- peek (1519), pop (1520), "nope" (1521) -- and the ringer's
+# vibration (4095) as a program plays them; CoreHaptics' tap, vibration and taps; a long press on an icon (its menu),
+# dismissed. The kernel's "akita haptic:" lines and the plug-in's "the actuator plays" say what came. RC_JOBS=rc.jobs.haptic3.
+/redwood/bin/rwtouch wait 60
+/redwood/bin/sound_test springboard route
+/redwood/bin/sound_test system 1519 wait 2 system 1520 wait 2 system 1521 wait 2 system 4095 wait 3
+/redwood/bin/sound_test haptic wait 3
+/redwood/bin/rwtouch hold 0.385 0.475 1200 wait 4 tap 0.5 0.2 wait 3
