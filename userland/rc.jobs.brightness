@@ -1,0 +1,22 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Brightness, the flashlight and the panel's power (TODO 22, 23, 38): Control Center opened (each "wait 7" a moment for a
+# screenshot from the host); its brightness slider dragged -- held first, or it does not take the drag -- all the way
+# down, all the way up, then to the middle (the kernel's log: CoreBrightness's nits and the panel's level); the
+# flashlight's button (bottom row, left, where Control Center puts it with a flash: torch=3) tapped on and, 4 s later,
+# off; closed; then the side button pressed to lock (the panel dark) and again to wake, twice. RC_JOBS=rc.jobs.brightness.
+/redwood/bin/rwtouch wait 50
+/redwood/bin/rwtouch swipe 0.95 0.005 0.95 0.55 300 wait 1
+/redwood/bin/rwtouch wait 7
+/redwood/bin/rwtouch drag 0.547 0.45 0.547 0.62 1200 300 400 wait 4
+/redwood/bin/rwtouch drag 0.547 0.50 0.547 0.30 1200 300 400 wait 4
+/redwood/bin/rwtouch drag 0.547 0.40 0.547 0.48 800 300 400 wait 3
+/redwood/bin/rwtouch tap 0.133 0.598 wait 1
+/redwood/bin/rwtouch wait 7
+/redwood/bin/rwtouch tap 0.133 0.598 wait 3
+/redwood/bin/rwtouch button home wait 4
+/redwood/bin/mg_test camera-flash
+/redwood/bin/torch_test level 0.5 wait 3 state off state
+/redwood/bin/rwtouch button lock 80 wait 12
+/redwood/bin/rwtouch button lock 80 wait 8
+/redwood/bin/rwtouch button lock 80 wait 40
+/redwood/bin/rwtouch button lock 80 wait 6

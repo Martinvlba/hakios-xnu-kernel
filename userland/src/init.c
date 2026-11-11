@@ -901,6 +901,41 @@ empty_tree(const char *path, int depth)
 	close(fd);
 }
 
+/*
+ * MobileGestalt keeps its answers in a cache on the data volume, and on a kept volume an answer stays what it was the
+ * first time it was asked: the loader's flash (/product/camera "flash", with torch=N) came and the flashlight did not
+ * (camera-flash false from the cache, AVFlashlight hasFlashlight NO, no button in Control Center; 11-11). What of the
+ * device tree changes with the boot-arguments is written down here (hakios.gestalt: "torch" or not); when it is not what
+ * it was, the cache goes, and MobileGestalt asks the device tree again.
+ */
+static void
+forget_gestalt_if_changed(void)
+{
+	static const char *const cache = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache"
+	    "/Library/Caches/com.apple.MobileGestalt.plist";
+	static const char *const note = "/private/var/db/hakios.gestalt";
+	const char *torch = boot_arg("torch");
+	const char *now = torch != NULL && torch[0] >= '1' && torch[0] <= '9' ? "torch\n" : "-\n";
+	char was[16] = "";
+	int fd = open(note, O_RDONLY, 0);
+
+	if (fd >= 0) {
+		ssize_t n = read(fd, was, sizeof(was) - 1);
+		was[n > 0 ? n : 0] = 0;
+		close(fd);
+	}
+	if (strcmp(was, now) == 0) {
+		return;
+	}
+	printf("  MobileGestalt's cache: the device tree's flash %s -> %s: %s\n", was[0] == 't' ? "yes" : was[0] ? "no" :
+	    "(not noted)", now[0] == 't' ? "yes" : "no", unlink(cache) == 0 ? "the cache removed" : strerror(errno));
+	fd = open(note, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd >= 0) {
+		(void)write(fd, now, strlen(now));
+		close(fd);
+	}
+}
+
 static void
 mount_writable(void)
 {
@@ -921,6 +956,7 @@ mount_writable(void)
 		}
 		ok = 1;
 		check(ok, "mount the data volume on /private/var");
+		forget_gestalt_if_changed();
 	} else {
 		ok = mount("ramfs", "/private/var", 0, NULL) == 0;
 		if (!ok) {

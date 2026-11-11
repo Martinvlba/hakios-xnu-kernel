@@ -48,6 +48,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 static void
@@ -139,7 +140,12 @@ shared_vendor(id self, SEL selector)
 static void
 flashlight_set(uint32_t level)
 {
-	ssize_t written = write(torch, &level, sizeof(level));
+	ssize_t written;
+
+	if (torch < 0) {
+		torch = open("/dev/hakios-torch", O_WRONLY);    /* (a kernel that makes it after this program started) */
+	}
+	written = torch >= 0 ? write(torch, &level, sizeof(level)) : -1;
 
 	if (written != (ssize_t)sizeof(level) || torch_said < 40) {
 		torch_said++;
@@ -548,9 +554,20 @@ hakios_media_init(void)
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	torch = open("/dev/hakios-torch", O_WRONLY);
 	camera = access("/dev/hakios-camera", F_OK) == 0;
-	if (torch >= 0) {
-		flashlight_classes();
-		say("hakios: mediaserverd: the kernel has a flashlight (/dev/hakios-torch)\n");
+	{
+		/* the flashlight also when its node is not there yet: the loader's flash comes with torch=N, and a kernel may
+		 * make the node after mediaserverd starts (the Pixel 8a's, its bus brought up first: 2 s late, 11-11) --
+		 * flashlight_set() opens it then */
+		char arguments[1024] = "";
+		size_t size = sizeof(arguments) - 1;
+		const char *t = sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 ? strstr(arguments, "torch=") : NULL;
+		bool asked = t != NULL && (t == arguments || t[-1] == ' ') && t[6] >= '1' && t[6] <= '9';
+
+		if (torch >= 0 || asked) {
+			flashlight_classes();
+			say("hakios: mediaserverd: the kernel has a flashlight (/dev/hakios-torch%s)\n", torch >= 0 ? "" :
+			    ", not there yet: opened when first used");
+		}
 	}
 	if (camera) {
 		say("hakios: mediaserverd: the kernel has a camera (/dev/hakios-camera)\n");
