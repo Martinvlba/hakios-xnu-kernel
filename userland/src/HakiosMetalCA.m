@@ -95,6 +95,8 @@
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <signal.h>
+#include <sys/ucontext.h>
 #include <execinfo.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
@@ -2215,8 +2217,99 @@ hm_boot_arg_set(const char *what)
 	return sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, what) != NULL;
 }
 
+/* WHERE A PROCESS DIED (11-13): this system has no crash reporter -- launchd says "exited due to SIGSEGV" and that is
+ * all (the tester's Weather, twice, as its radar map came up). Every process that loads this plug-in gets a handler for
+ * the fatal signals that says on the console which one, the address it faulted on, and the frames as image + offset
+ * (the frame chain from the faulting thread's own registers; this plug-in's by `atos -o userland/obj/HakiosMetal`, the
+ * system's by the shared cache's symbols), then lets the signal do what it does. A process with a handler of its own
+ * keeps it. */
+static struct sigaction hm_crash_before[32];
+
+static void
+hm_crash_frame(char *line, size_t size, size_t *at, uintptr_t pc)
+{
+	Dl_info info;
+
+	if (*at + 96 > size) {
+		return;
+	}
+	if (pc != 0 && dladdr((void *)pc, &info) != 0 && info.dli_fname != NULL) {
+		const char *base = strrchr(info.dli_fname, '/');
+
+		*at += (size_t)snprintf(line + *at, size - *at, " %s+%#lx", base != NULL ? base + 1 : info.dli_fname,
+					(unsigned long)(pc - (uintptr_t)info.dli_fbase));
+	} else {
+		*at += (size_t)snprintf(line + *at, size - *at, " %#lx", (unsigned long)pc);
+	}
+}
+
+static void
+hm_crash(int sig, siginfo_t *info, void *context)
+{
+	static volatile int said;
+	ucontext_t *uc = (ucontext_t *)context;
+	char line[1000];
+	size_t at = 0;
+
+	if (__sync_fetch_and_add(&said, 1) == 0 && uc != NULL && uc->uc_mcontext != NULL) {
+		uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc, lr = (uintptr_t)uc->uc_mcontext->__ss.__lr;
+		uintptr_t fp = (uintptr_t)uc->uc_mcontext->__ss.__fp, sp = (uintptr_t)uc->uc_mcontext->__ss.__sp;
+		char name[64] = "";
+
+		pthread_getname_np(pthread_self(), name, sizeof(name));
+		at = (size_t)snprintf(line, sizeof(line), "CRASH: signal %d (code %d) at address %p, thread \"%s\"; frames:", sig,
+				      info != NULL ? info->si_code : 0, info != NULL ? info->si_addr : NULL, name);
+		hm_crash_frame(line, sizeof(line), &at, pc);
+		hm_crash_frame(line, sizeof(line), &at, lr);
+		/* the frame records: [fp] the caller's fp, [fp + 8] its return address -- as long as they go up the stack */
+		for (int i = 0; i < 28 && fp != 0 && (fp & 7) == 0 && fp >= sp && fp - sp < (64u << 20); i++) {
+			uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
+
+			if (ret != lr || i != 0) {
+				hm_crash_frame(line, sizeof(line), &at, ret);
+			}
+			if (next <= fp) {
+				break;
+			}
+			fp = next;
+		}
+		hm_print("%s\n", line);
+	}
+	/* as it was before: the default (the instruction faults again and the process dies of it) or the one there was */
+	if (sig >= 0 && sig < 32) {
+		sigaction(sig, &hm_crash_before[sig], NULL);
+	}
+	if (sig == SIGABRT || (info != NULL && info->si_code <= 0)) {
+		raise(sig);             /* (sent, not faulted: it does not come again by itself) */
+	}
+}
+
+static void
+hm_crash_install(void)
+{
+	static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP };
+	static dispatch_once_t once;
+
+	dispatch_once(&once, ^{
+		for (unsigned i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+			struct sigaction now, ours;
+
+			if (sigaction(signals[i], NULL, &now) != 0 || now.sa_handler != SIG_DFL) {
+				continue;       /* (the process has its own) */
+			}
+			memset(&ours, 0, sizeof(ours));
+			ours.sa_sigaction = hm_crash;
+			ours.sa_flags = SA_SIGINFO;
+			sigemptyset(&ours.sa_mask);
+			hm_crash_before[signals[i]] = now;
+			sigaction(signals[i], &ours, NULL);
+		}
+	});
+}
+
 - (instancetype)initWithAcceleratorPort:(io_service_t)port
 {
+	hm_crash_install();
 	/* (hakios) the window server alone is shown the device: every other client of this image's Metal (SpringBoard
 	 * through SiriUICore, mediaserverd, ...) finds pipeline libraries made for Apple's GPUs with no default.metallib
 	 * beside them and aborts, while without a device it takes the road it takes today. Boot-arg metal_all=1: all. */
