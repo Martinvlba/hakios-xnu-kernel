@@ -1,0 +1,6 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Something to hear, after a kernel tone (aocplay=S at the AoC's start, ~47 s in, holds the AoC for S seconds: Darwin's
+# sound played meanwhile is lost): SpringBoard up, 40 s, then a tone of three seconds (1000 Hz left, 440 Hz right), the
+# lock sound, a keyboard click and a fanfare -- twice, 10 s apart.
+/redwood/bin/sound_test springboard wait 40 tone 3 wait 3 system 1100 wait 3 system 1104 wait 3 file /System/Library/Audio/UISounds/New/Fanfare.caf wait 10 tone 3 wait 3 system 1100 wait 3 system 1104 wait 3 file /System/Library/Audio/UISounds/New/Fanfare.caf
+/bin/ps -A
