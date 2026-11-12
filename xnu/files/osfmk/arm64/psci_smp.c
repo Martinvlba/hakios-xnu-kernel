@@ -136,6 +136,7 @@ psci_smp_init(void)
 		printf("psci: the other cores start at EL2: through the loader's trampoline at 0x%llx\n",
 		    psci_smp_el2_trampoline);
 	}
+	psci_idle_init();
 }
 
 /* A processor other than the boot processor says how far it has come. */
@@ -397,6 +398,202 @@ psci_smp_stop_here(void)
 		for (;;) {
 			__builtin_arm_wfi();
 		}
+	}
+}
+
+/*
+ * IDLE IN A POWER-DOWN STATE (11-12, devices/akita TODO 27; boot-arg cpuidle=1, off by default). A core with nothing
+ * to do waits in WFI, clock-gated but powered. The firmware offers more (the Pixel 8a's device tree: one state,
+ * "c2", arm,psci-suspend-param 0x10000 -- the core powered down, its registers lost; back in ~0.2 ms, worth it from
+ * ~2-3.5 ms): PSCI CPU_SUSPEND with an entry point. Such a core wakes through the reset vector like a core just
+ * started (the loader's EL2 trampoline first, as CPU_ON's), finds its cpu data, and XNU's own way back from a
+ * non-retention idle takes it on: cpu_machine_idle_init() set its reset handler to resume_idle_cpu, so
+ * arm_init_idle_cpu() -> cpu_idle_exit(TRUE) -> Idle_load_context(), back where the idle thread was
+ * (psci_idle_resumed() in between: the GIC's CPU interface and the core's timer set again).
+ * The core's own timer stops in that state (local-timer-stop): it would not wake for its next deadline. So it goes
+ * only when a platform driver has given a wake that keeps running (psci_idle_set_wake: the Pixel's MCT, armed for the
+ * deadline), and only when the deadline is further than the state is worth (cpuidle_us=, 3000).
+ * cpuidle_cpus=MASK: which cores (default every one but the boot processor).
+ */
+#define PSCI_CPU_SUSPEND        0xC4000001u
+
+static uint32_t psci_idle_on;
+static uint32_t psci_idle_state = 0x10000;
+static uint32_t psci_idle_cpus = ~1u;
+static uint64_t psci_idle_min_abs, psci_idle_margin_abs, psci_idle_max_abs;
+static psci_idle_arm_t psci_idle_arm;
+static psci_idle_disarm_t psci_idle_disarm;
+static struct {
+	uint64_t tries, downs, back, refused;
+} __attribute__((aligned(64))) psci_idle_stat[MAX_CPUS];
+/* cpuidle_probe=1 (11-12: 0x10000 refused, -2): after 50 refusals in a row the next of these, the first one taken kept */
+static const uint32_t psci_idle_candidates[] = { 0x10000, 0x10001, 0x10002, 0x10003, 0x1010022, 0x0 };
+static uint32_t psci_idle_probe, psci_idle_candidate;
+static volatile uint32_t psci_idle_taken = ~0u;  /* the state the firmware took first (~0: none yet) */
+static int64_t psci_idle_last_error;           /* the firmware's last refusal (11-12: every call refused at first) */
+static uint32_t psci_idle_refusals_in_a_row;   /* ... and after 1000 in a row it is not asked again (WFI as before) */
+
+extern int setPop(uint64_t time);
+extern void gic_v3_irq_cpu_resume(void);
+
+void
+psci_idle_init(void)
+{
+	uint32_t us = 3000;
+
+	PE_parse_boot_argn("cpuidle", &psci_idle_on, sizeof(psci_idle_on));
+	PE_parse_boot_argn("cpuidle_state", &psci_idle_state, sizeof(psci_idle_state));
+	PE_parse_boot_argn("cpuidle_cpus", &psci_idle_cpus, sizeof(psci_idle_cpus));
+	PE_parse_boot_argn("cpuidle_us", &us, sizeof(us));
+	PE_parse_boot_argn("cpuidle_probe", &psci_idle_probe, sizeof(psci_idle_probe));
+	if (psci_idle_probe) {
+		psci_idle_state = psci_idle_candidates[0];
+	}
+	nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &psci_idle_min_abs);
+	nanoseconds_to_absolutetime(300 * NSEC_PER_USEC, &psci_idle_margin_abs);      /* (woken this early: exit ~0.2 ms) */
+	nanoseconds_to_absolutetime(1 * NSEC_PER_SEC, &psci_idle_max_abs);            /* (no deadline: wake within 1 s) */
+	if (psci_idle_on) {
+		/* PSCI_VERSION, and PSCI_FEATURES(CPU_SUSPEND): bit 1 the extended power-state format (power down = bit 30),
+		 * bit 0 OS-initiated mode -- 11-12: 0x10000 (the device tree's) refused as an invalid parameter */
+		int64_t version = psci_call(0x84000000u, 0, 0, 0);
+		int64_t features = psci_call(0x8400000Au, PSCI_CPU_SUSPEND, 0, 0);
+
+		printf("psci: cpuidle=%u: idle cores (mask 0x%x) power down (state 0x%x) when nothing is due for %u us -- once a "
+		    "platform wake is given; PSCI %lld.%lld, CPU_SUSPEND features 0x%llx (%s power states%s)\n", psci_idle_on,
+		    psci_idle_cpus, psci_idle_state, us, version >> 16, version & 0xffff, features, features < 0 ? "?" :
+		    (features & 2) ? "extended" : "original", (features >= 0 && (features & 1)) ? ", OS-initiated mode offered" : "");
+	}
+}
+
+void
+psci_idle_set_wake(psci_idle_arm_t arm, psci_idle_disarm_t disarm)
+{
+	psci_idle_disarm = disarm;
+	os_atomic_store(&psci_idle_arm, arm, release);
+}
+
+bool
+psci_idle_wanted(void)
+{
+	return psci_idle_on != 0;
+}
+
+/*
+ * From cpu_idle(), interrupts off, instead of its WFI: true when the wait was done here (the firmware came back without
+ * powering down: an interrupt was pending, or it refused), false for a WFI. A core that did power down does not come
+ * back here at all, but through psci_idle_resumed().
+ */
+bool
+psci_idle_enter(cpu_data_t *cdp)
+{
+	psci_idle_arm_t arm = os_atomic_load(&psci_idle_arm, acquire);
+	int cpu = cdp->cpu_number;
+	uint64_t now, deadline = cdp->rtcPop, entry, context;
+	int64_t status;
+
+	if (arm == NULL || cpu >= MAX_CPUS || !(psci_idle_cpus & (1u << cpu)) || os_atomic_load(&psci_smp_stopping, relaxed) ||
+	    psci_idle_refusals_in_a_row >= 1000) {
+		return false;
+	}
+	now = mach_absolute_time();
+	if (deadline <= now || deadline - now < psci_idle_min_abs) {
+		return false;
+	}
+	if (deadline - now > psci_idle_max_abs) {
+		deadline = now + psci_idle_max_abs;
+	}
+	if (!arm(cpu, deadline - psci_idle_margin_abs)) {
+		return false;
+	}
+	psci_idle_stat[cpu].tries++;
+	entry = ml_static_vtop((vm_offset_t)&LowResetVectorBase);
+	context = 0;
+	if (psci_smp_el2_trampoline != 0) {
+		context = entry;
+		entry = psci_smp_el2_trampoline;
+	}
+	__builtin_arm_dsb(DSB_SY);
+	if (psci_smp_el2_trampoline != 0 && cpu != master_cpu) {
+		/*
+		 * By HVC to the loader's EL2 stub, which makes the SMC from EL2 (xnuloader loader_el2_secondary_sync): the Pixel
+		 * 8a's firmware refuses CPU_SUSPEND from EL1 (11-12: every state -2; on Android pKVM calls it, at EL2).
+		 */
+		register uint64_t x0 __asm__("x0") = PSCI_CPU_SUSPEND;
+		register uint64_t x1 __asm__("x1") = psci_idle_state;
+		register uint64_t x2 __asm__("x2") = entry;
+		register uint64_t x3 __asm__("x3") = context;
+
+		__asm__ volatile ("hvc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
+                    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		status = (int64_t)x0;
+	} else {
+		status = psci_call(PSCI_CPU_SUSPEND, psci_idle_state, entry, context);
+	}
+	if (psci_idle_disarm != NULL) {
+		psci_idle_disarm(cpu);
+	}
+	if (status != 0) {
+		psci_idle_stat[cpu].refused++;
+		psci_idle_last_error = status;
+		if (++psci_idle_refusals_in_a_row >= 50 && psci_idle_probe && psci_idle_taken == ~0u &&
+		    psci_idle_candidate + 1 < sizeof(psci_idle_candidates) / sizeof(psci_idle_candidates[0])) {
+			psci_idle_state = psci_idle_candidates[++psci_idle_candidate];
+			psci_idle_refusals_in_a_row = 0;
+		}
+		return false;           /* (refused: the WFI after all -- never a loop of calls) */
+	}
+	if (psci_idle_taken == ~0u) {
+		psci_idle_taken = psci_idle_state;
+	}
+	psci_idle_refusals_in_a_row = 0;
+	psci_idle_stat[cpu].back++;
+	return true;
+}
+
+/* A core that powered down is back, through the reset vector (arm_init_idle_cpu(), interrupts still off). */
+void
+psci_idle_resumed(void)
+{
+	cpu_data_t *cdp = getCpuDatap();
+	int cpu = cdp->cpu_number;
+
+	gic_v3_irq_cpu_resume();
+	if (psci_idle_taken == ~0u) {
+		psci_idle_taken = psci_idle_state;
+	}
+	if (psci_idle_disarm != NULL) {
+		psci_idle_disarm(cpu);
+	}
+	if (cpu < MAX_CPUS) {
+		psci_idle_stat[cpu].downs++;
+	}
+	setPop(cdp->rtcPop);                    /* (its timer's comparator was lost with the rest) */
+}
+
+/* the totals of every core: attempts, times it powered down, came back at once, refused */
+int64_t
+psci_idle_error(void)
+{
+	return psci_idle_last_error;
+}
+
+/* the state asked for now, and the one the firmware first took (~0: none) */
+uint32_t
+psci_idle_states(uint32_t *taken)
+{
+	*taken = psci_idle_taken;
+	return psci_idle_state;
+}
+
+void
+psci_idle_totals(uint64_t *tries, uint64_t *downs, uint64_t *back, uint64_t *refused)
+{
+	*tries = *downs = *back = *refused = 0;
+	for (int i = 0; i < MAX_CPUS; i++) {
+		*tries += psci_idle_stat[i].tries;
+		*downs += psci_idle_stat[i].downs;
+		*back += psci_idle_stat[i].back;
+		*refused += psci_idle_stat[i].refused;
 	}
 }
 

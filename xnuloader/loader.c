@@ -1293,10 +1293,31 @@ __asm__ (
         "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
         "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
         "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        "  b loader_el2_secondary_sync\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
         "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
         "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
         "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
-        "  b loader_el2_secondary_off\n  .balign 0x80\n  b loader_el2_secondary_off\n  .balign 0x80\n"
+        /*
+         * A synchronous exception from the kernel at EL1 (11-12, devices/akita TODO 27): an HVC with PSCI CPU_SUSPEND in
+         * x0 is made here at EL2 as the SMC it stands for, and the answer taken back -- the Pixel 8a's firmware refuses
+         * CPU_SUSPEND from EL1 (every power state -2: on Android only pKVM, at EL2, calls it); a core that powers down
+         * comes back at the entry point it gave, this file's EL2 trampoline. Any other HVC: NOT_SUPPORTED (-1); anything
+         * else still switches the core off.
+         */
+        "loader_el2_secondary_sync:\n"
+        "  mrs x9, esr_el2\n"
+        "  lsr x9, x9, #26\n"
+        "  cmp x9, #0x16\n"                    /* EC 0x16: HVC from AArch64 */
+        "  b.ne loader_el2_secondary_off\n"
+        "  mov x9, #0x0001\n"
+        "  movk x9, #0xc400, lsl #16\n"         /* PSCI CPU_SUSPEND (SMC64) */
+        "  cmp x0, x9\n"
+        "  b.ne 3f\n"
+        "  smc #0\n"
+        "  eret\n"
+        "3:\n"
+        "  mov x0, #-1\n"
+        "  eret\n"
         "loader_el2_secondary_off:\n"
         "  mov x0, #0x0002\n"
         "  movk x0, #0x8400, lsl #16\n"          /* PSCI CPU_OFF */

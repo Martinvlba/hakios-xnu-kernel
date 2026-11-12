@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..d52f5e7069d4 100644
+index 44274016a4cf..b9190a6e1fd4 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,71 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,72 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -184,6 +184,7 @@ index 44274016a4cf..d52f5e7069d4 100644
 +bsd/dev/hakios.akita_dvfs.c              optional hakios_akita_dvfs
 +bsd/dev/hakios.akita_rtc.c               optional hakios_akita_rtc
 +bsd/dev/hakios.akita_power.c             optional hakios_akita_power
++bsd/dev/hakios.akita_mct.c               optional hakios_akita_mct
 +bsd/dev/hakios.akita_trusty.c            optional hakios_akita_trusty
 +bsd/dev/hakios.akita_usb.c               optional hakios_akita_usb
 +bsd/dev/hakios.akita_usbmux.c            optional hakios_akita_usb
@@ -194,7 +195,7 @@ index 44274016a4cf..d52f5e7069d4 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +220,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +221,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -247,7 +248,7 @@ index 44274016a4cf..d52f5e7069d4 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +472,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +473,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -255,7 +256,7 @@ index 44274016a4cf..d52f5e7069d4 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +495,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +496,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -2247,7 +2248,7 @@ index 0316792a3f42..b9c195b09cd1 100644
  # Assume LTO scaling by default, unless it is being explicitly passed on the command-line
  LARGE_BUILD_FOOTPRINT := $(if $(BUILD_LTO),$(BUILD_LTO),1)
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index e26a1d70f470..f91095c98d26 100644
+index e26a1d70f470..7d802986ba8c 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -73,6 +73,9 @@
@@ -2406,6 +2407,15 @@ index e26a1d70f470..f91095c98d26 100644
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs();
+@@ -823,5 +856,8 @@ arm_init_idle_cpu(
+ 
+ 	fiq_context_init(FALSE);
+ 
++#if defined(GENERIC_PSCI_SMP)
++	psci_idle_resumed();            /* (back from a power-down idle state: the GIC's CPU interface, the timer) */
++#endif
+ 	cpu_idle_exit(TRUE);
+ }
 diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
 index 39daaf8db949..64ceb1a5f201 100644
 --- a/osfmk/arm/model_dep.c
@@ -2530,10 +2540,20 @@ index b9549da357b4..cca31ea32502 100644
  #else
  #define __USES_V_CRYPTO_INTRINSICS 0
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index 94e91306b143..0ec1323086b7 100644
+index 94e91306b143..934a593af5bf 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
-@@ -568,7 +568,12 @@ cpu_idle(void)
+@@ -47,6 +47,9 @@
+ #include <arm/machine_cpu.h>
+ #include <arm/rtclock.h>
+ #include <arm64/proc_reg.h>
++#if defined(GENERIC_PSCI_SMP)
++#include <arm64/psci_smp.h>
++#endif
+ #include <mach/processor_info.h>
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+@@ -568,7 +571,12 @@ cpu_idle(void)
  #endif /* MONOTONIC */
  
  	if (wfi) {
@@ -2547,6 +2567,18 @@ index 94e91306b143..0ec1323086b7 100644
  		platform_cache_idle_enter();
  #endif
  
+@@ -587,6 +595,11 @@ cpu_idle(void)
+ 		__builtin_arm_dsb(DSB_SY);
+ #if HAS_RETENTION_STATE
+ 		arm64_retention_wfi();
++#elif defined(GENERIC_PSCI_SMP)
++		/* (cpuidle=1: a power-down state instead, when nothing is due for a while -- psci_smp.c) */
++		if (!psci_idle_enter(cpu_data_ptr)) {
++			__builtin_arm_wfi();
++		}
+ #else
+ 		__builtin_arm_wfi();
+ #endif
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
 index e76e7e70ab9c..3f8e9a343373 100644
 --- a/osfmk/arm64/machine_routines.c
