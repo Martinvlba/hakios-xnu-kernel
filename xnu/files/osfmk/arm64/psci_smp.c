@@ -431,10 +431,18 @@ static const uint32_t psci_idle_candidates[] = { 0x10000, 0x10001, 0x10002, 0x10
 static uint32_t psci_idle_probe, psci_idle_candidate;
 static volatile uint32_t psci_idle_taken = ~0u;  /* the state the firmware took first (~0: none yet) */
 static int64_t psci_idle_last_error;           /* the firmware's last refusal (11-12: every call refused at first) */
-static uint32_t psci_idle_refusals_in_a_row;   /* ... and after 1000 in a row it is not asked again (WFI as before) */
+static uint32_t psci_idle_refusals_in_a_row;   /* ... and after 1000 in a row it is not asked for a second (WFI meanwhile) */
+static uint64_t psci_idle_ask_again_abs;       /* (11-12 evening: once permitted, the firmware still cancels a call while an
+                                                * SGI is pending at the core's redistributor or its secure timer runs --
+                                                * Android counts those "rejected" -- so a run of refusals is no reason to
+                                                * stop for good) */
+static struct {
+	uint32_t pending, enabled;                 /* the core's SGIs/PPIs right after its last refusal */
+} psci_idle_refusal[MAX_CPUS];
 
 extern int setPop(uint64_t time);
 extern void gic_v3_irq_cpu_resume(void);
+extern void gic_v3_irq_cpu_sgi_ppi(uint32_t *pending, uint32_t *enabled);
 
 void
 psci_idle_init(void)
@@ -491,11 +499,20 @@ psci_idle_enter(cpu_data_t *cdp)
 	uint64_t now, deadline = cdp->rtcPop, entry, context;
 	int64_t status;
 
-	if (arm == NULL || cpu >= MAX_CPUS || !(psci_idle_cpus & (1u << cpu)) || os_atomic_load(&psci_smp_stopping, relaxed) ||
-	    psci_idle_refusals_in_a_row >= 1000) {
+	if (arm == NULL || cpu >= MAX_CPUS || !(psci_idle_cpus & (1u << cpu)) || os_atomic_load(&psci_smp_stopping, relaxed)) {
 		return false;
 	}
 	now = mach_absolute_time();
+	if (psci_idle_refusals_in_a_row >= 1000) {
+		if (psci_idle_ask_again_abs == 0) {
+			psci_idle_ask_again_abs = now + psci_idle_max_abs;
+		}
+		if (now < psci_idle_ask_again_abs) {
+			return false;
+		}
+		psci_idle_ask_again_abs = 0;
+		psci_idle_refusals_in_a_row = 0;
+	}
 	if (deadline <= now || deadline - now < psci_idle_min_abs) {
 		return false;
 	}
@@ -535,6 +552,7 @@ psci_idle_enter(cpu_data_t *cdp)
 	if (status != 0) {
 		psci_idle_stat[cpu].refused++;
 		psci_idle_last_error = status;
+		gic_v3_irq_cpu_sgi_ppi(&psci_idle_refusal[cpu].pending, &psci_idle_refusal[cpu].enabled);
 		if (++psci_idle_refusals_in_a_row >= 50 && psci_idle_probe && psci_idle_taken == ~0u &&
 		    psci_idle_candidate + 1 < sizeof(psci_idle_candidates) / sizeof(psci_idle_candidates[0])) {
 			psci_idle_state = psci_idle_candidates[++psci_idle_candidate];
@@ -575,6 +593,16 @@ int64_t
 psci_idle_error(void)
 {
 	return psci_idle_last_error;
+}
+
+/* one core's counts, and its pending and enabled SGIs/PPIs as found after its last refusal */
+void
+psci_idle_core(int cpu, uint64_t *downs, uint64_t *refused, uint32_t *pending, uint32_t *enabled)
+{
+	*downs = psci_idle_stat[cpu].downs;
+	*refused = psci_idle_stat[cpu].refused;
+	*pending = psci_idle_refusal[cpu].pending;
+	*enabled = psci_idle_refusal[cpu].enabled;
 }
 
 /* the state asked for now, and the one the firmware first took (~0: none) */
