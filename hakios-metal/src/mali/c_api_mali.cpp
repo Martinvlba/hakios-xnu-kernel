@@ -705,11 +705,13 @@ const MaliFormat kFormats[] = {
 // BGRA8, BGR5A1 and B5G6R5 all have blue first, hence the swizzle.
 constexpr uint32_t kRtFloat = 1u << 30;       // (not the descriptor's: a float target, see below)
 constexpr uint32_t kRtRaw = 1u << 29;         // (not the descriptor's: a raw 32-bit target, R32Float)
+constexpr uint32_t kRtWide = 1u << 28;        // (not the descriptor's: 8 bytes a pixel in the tile buffer, RGBA16Float)
+constexpr uint32_t kRtOurs = kRtFloat | kRtRaw | kRtWide;
 bool
 rtFormat(unsigned f, uint32_t &rt1)
 {
     uint32_t wb;
-    bool bgra, srgb = f == 71 || f == 81, flt = false, raw = false;
+    bool bgra, srgb = f == 71 || f == 81, flt = false, raw = false, wide = false;
     switch (f) {
     case 70: case 71: wb = 19; bgra = false; break;     // R8G8B8A8
     case 80: case 81: wb = 19; bgra = true; break;
@@ -729,19 +731,26 @@ rtFormat(unsigned f, uint32_t &rt1)
     // own -- raw, 32 bits as they are (internal RAW32, written back as RAW32; Mesa's get_rt_formats for a format that
     // is not blendable). Opaque writes only: the fixed-function blend does not know such a target.
     case 55: wb = 3; bgra = false; raw = true; break;
+    // RGBA16Float (11-13: HDR and wide-colour content): the tile buffer's RGBA16F (internal format 18, written back as
+    // the float colour format 19), EIGHT bytes a pixel -- two of the tile's kilobytes (rtKilobytes: the targets after it
+    // start further on, the framebuffer's allocation counts it), its clear two words (rtClearHigh)
+    case 115: wb = 19; bgra = false; flt = true; wide = true; break;
     default: return false;
     }
     uint32_t swizzle = bgra ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
-    rt1 = wb << 3 | 2u << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16 | (flt ? kRtFloat : 0u) | (raw ? kRtRaw : 0u);
+    rt1 = wb << 3 | 2u << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16 | (flt ? kRtFloat : 0u) | (raw ? kRtRaw : 0u) |
+        (wide ? kRtWide : 0u);
     return true;
 }
 // the render target's internal format (word 0, bits 26..), the blend descriptor's memory format, and a clear colour
 // as the tile buffer holds it, for a target whose word 1 is RT1
-inline uint32_t rtInternal(uint32_t rt1) { return (rt1 & kRtRaw) ? 34 : (rt1 & kRtFloat) ? (rt1 >> 3) & 31 : 1; }
+inline uint32_t rtInternal(uint32_t rt1) { return (rt1 & kRtRaw) ? 34 : (rt1 & kRtWide) ? 18 : (rt1 & kRtFloat) ? (rt1 >> 3) & 31 : 1; }
+inline uint32_t rtKilobytes(uint32_t rt1) { return (rt1 & kRtWide) ? 2 : 1; }   // of the tile buffer, a 16x16 tile (or 8x8 of 4 samples)
 inline uint32_t
 rtBlend(uint32_t rt1)
 {
     if (rt1 & kRtRaw) return 167u << 12 | 16;                   // R32F, as a texture of it is named
+    if (rt1 & kRtWide) return 223u << 12;                       // RGBA16F
     return !(rt1 & kRtFloat) ? 237u << 12 : ((rt1 >> 3) & 31) == 16 ? 199u << 12 : 207u << 12;
 }
 inline uint32_t
@@ -766,11 +775,21 @@ rtClear(uint32_t rt1, const double *k)
         memcpy(&bits, &f, 4);
         return bits;
     }
+    if (rt1 & kRtWide) {
+        return halfOf(k[0]) | halfOf(k[1]) << 16;               // (red, green; blue and alpha: rtClearHigh)
+    }
     if (rt1 & kRtFloat) {
         uint32_t r = halfOf(k[0]);
         return ((rt1 >> 3) & 31) == 16 ? r | r << 16 : r | halfOf(k[1]) << 16;
     }
     return unorm8(k[0]) | unorm8(k[1]) << 8 | unorm8(k[2]) << 16 | (uint32_t)unorm8(k[3]) << 24;
+}
+// the clear's second word (the render target's clear is four words: a pixel of 8 bytes twice, one of 4 or less four
+// times)
+inline uint32_t
+rtClearHigh(uint32_t rt1, const double *k)
+{
+    return (rt1 & kRtWide) ? halfOf(k[2]) | halfOf(k[3]) << 16 : rtClear(rt1, k);
 }
 bool drawable(unsigned f) { uint32_t w; return rtFormat(f, w); }
 
@@ -859,6 +878,7 @@ struct DrawJob {
     unsigned width, height, row_bytes;
     uint32_t rt1;                                       // the render target's word 1: write, format, block, swizzle
     uint32_t clear;                                     // (R8G8B8A8 in the tile buffer) and whether to write back
+    uint32_t clear_high = 0;                            // (a wide target's second word: rtClearHigh)
     bool write;
     uint32_t blend[4];
     unsigned mode, count, instances, vertex_start;
@@ -904,6 +924,7 @@ struct DrawJob {
         uint64_t va;
         unsigned row_bytes;
         uint32_t rt1, clear, blend[4];
+        uint32_t clear_high = 0;
         bool write, load;
         bool missing;                                   // written by the fragment function, absent from the pass
         bool untouched;                                 // this draw neither writes nor reads it (kept in, loaded and stored)
@@ -1208,8 +1229,11 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     fb[10] = (dj.width - 1) | (dj.height - 1) << 16;
     // 16x16 tiles, targets, 1 KiB a target a tile; four samples: 4 (log2 2), the rotated 4x grid (2), 8x8 tiles -- the
     // same kilobyte a target a tile (64 pixels of four samples)
+    // (the colour buffer's allocation: each target's kilobytes of the tile -- one, or two for 8 bytes a pixel)
+    uint32_t tile_kb = rtKilobytes(dj.rt1);
+    for (unsigned i = 1; i < dj.rts; i++) tile_kb += rtKilobytes(dj.more[i - 1].rt1);
     fb[11] = (dj.samples > 1 ? 2u | 2u << 3 : 0u) | 2 << 6 | (dj.samples > 1 ? 6u : 8u) << 9 | (last_pv ? 0u : 1u << 14) |
-        1u << 15 | (dj.rts - 1) << 19 | dj.rts << 24;
+        1u << 15 | (dj.rts - 1) << 19 | tile_kb << 24;
     fb[12] = 1u << 29;                                                          // empty tiles written (the clear)
     *(uint64_t *)&fb[14] = area_va;
     if (dj.zs) {
@@ -1241,23 +1265,27 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         }
     }
     rt[0] = rtInternal(dj.rt1) << 26;                                          // internal format (R8G8B8A8, or a float one)
-    rt[1] = (dj.rt1 & ~(kRtFloat | kRtRaw)) | (dj.write ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);   // clean tiles written too
+    rt[1] = (dj.rt1 & ~kRtOurs) | (dj.write ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);   // clean tiles written too
     // (multisample: written back layered, a plane a sample, rt[11] apart)
     *(uint64_t *)&rt[8] = dj.target_va;
     rt[10] = dj.row_bytes;
     rt[11] = dj.row_bytes * dj.height;
-    rt[12] = rt[13] = rt[14] = rt[15] = dj.clear;
+    rt[12] = rt[14] = dj.clear;
+    rt[13] = rt[15] = (dj.rt1 & kRtWide) ? dj.clear_high : dj.clear;
     memcpy(bl, dj.blend, 16);
+    uint32_t tile_at = rtKilobytes(dj.rt1) * 1024;      // where the next target's part of the tile buffer starts
     for (unsigned i = 1; i < dj.rts; i++) {
         // target i: its kilobyte of the tile buffer (internal buffer offset, 16-byte units), its own clear and memory
         const DrawJob::More &m = dj.more[i - 1];
         auto *r = rt + 16 * i;
-        r[0] = rtInternal(m.rt1) << 26 | (1024 * i / 16) << 4;
-        r[1] = (m.rt1 & ~(kRtFloat | kRtRaw)) | (m.write && !m.elide ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);
+        r[0] = rtInternal(m.rt1) << 26 | (tile_at / 16) << 4;
+        tile_at += rtKilobytes(m.rt1) * 1024;
+        r[1] = (m.rt1 & ~kRtOurs) | (m.write && !m.elide ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);
         *(uint64_t *)&r[8] = m.va;
         r[10] = m.row_bytes;
         r[11] = m.row_bytes * dj.height;
-        r[12] = r[13] = r[14] = r[15] = m.clear;
+        r[12] = r[14] = m.clear;
+        r[13] = r[15] = (m.rt1 & kRtWide) ? m.clear_high : m.clear;
         memcpy(bl + 4 * i, m.blend, 16);
     }
     memcpy(area + vs_at, dj.vs_fau.data(), dj.vs_fau.size() * 4);
@@ -4850,6 +4878,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.write = pass->store_action == 1;
     if (pass->load_action == 2) {
         dj.clear = rtClear(dj.rt1, pass->clear_color);
+        dj.clear_high = rtClearHigh(dj.rt1, pass->clear_color);
     }
     if (loads) {
         // Load: the preload draw first (emitDraw), target n its texture n, over the whole target
@@ -4952,6 +4981,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         m.write = a.store_action == 1;
         m.load = a.load_action == 1;
         m.clear = a.load_action == 2 ? rtClear(m.rt1, a.clear_color) : 0;
+        m.clear_high = a.load_action == 2 ? rtClearHigh(m.rt1, a.clear_color) : 0;
         m.texture = a.texture;
         if (!(p->fs.rt_written & 1u << i)) {
             // not written by this draw: in the pass only to keep the pass whole, exactly as it is -- loaded and stored
@@ -5886,6 +5916,7 @@ hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass
         dj.rt1 = rt1Of(t);
         dj.write = c[at].store == 1;
         dj.clear = rtClear(dj.rt1, c[at].color);
+        dj.clear_high = rtClearHigh(dj.rt1, c[at].color);
         dj.blend[0] = 1u << 9;
         dj.blend[1] = 0x132 | 0x132 << 12 | 0xfu << 28;
         dj.blend[2] = 1 | 3 << 3;
@@ -5902,6 +5933,7 @@ hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass
             m.row_bytes = u->stride;
             m.rt1 = rt1Of(u);
             m.clear = rtClear(m.rt1, c[at + i].color);
+            m.clear_high = rtClearHigh(m.rt1, c[at + i].color);
             m.write = c[at + i].store == 1;
             m.texture = u;
             m.blend[0] = 1u << 9;
