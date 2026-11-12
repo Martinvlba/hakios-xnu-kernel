@@ -331,6 +331,8 @@ void hakios_metal_program_set_blend(hakios_metal_program *program, int enabled, 
  * -1 for any other count */
 int hakios_metal_program_set_samples(hakios_metal_program *program, unsigned samples);
 /* ...the same for colour attachment INDEX (0 to 7; 0 is the call above): -1 past 7 */
+/* colour attachment INDEX's MTLPixelFormat (the pipeline descriptor's): told for every attachment the pipeline has */
+void hakios_metal_program_set_attachment_format(hakios_metal_program *program, unsigned index, unsigned pixel_format);
 int hakios_metal_program_set_blend_at(hakios_metal_program *program, unsigned index, int enabled, unsigned rgb_op, unsigned alpha_op,
     unsigned src_rgb, unsigned dst_rgb, unsigned src_alpha, unsigned dst_alpha, unsigned write_mask);
 

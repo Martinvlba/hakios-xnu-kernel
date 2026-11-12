@@ -1061,6 +1061,60 @@ float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_pr
 	return ok;
 }
 
+/* 7b''. a raw 32-bit float colour attachment (R32Float 55; 11-12 night: WebKit's paths): cleared to 0.25, then the flat
+ * draw's red (0x20/255) loaded over it */
+static int
+raw_float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 55, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	static float px[64 * 64];
+	struct hakios_metal_render_pass pass;
+	unsigned cleared = 0, drawn = 0;
+	int st1 = -1, st2 = -1;
+	hakios_metal_cb *cb;
+
+	if (t == NULL) {
+		printf("mali_draw_test: an R32Float colour attachment: no texture: %s: FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = 0.25;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_clear(cb, &pass) == 0) {
+		hakios_metal_cb_commit(cb, NULL, NULL);
+		hakios_metal_cb_wait(cb);
+		st1 = hakios_metal_cb_status(cb);
+		hakios_metal_texture_read(t, 0, 0, 64, 64, px, 64 * 4);
+		for (unsigned i = 0; i < 4096; i++) cleared += px[i] == 0.25f;
+	} else {
+		printf("mali_draw_test: an R32Float colour attachment: the clear refused: %s\n", hakios_metal_error());
+	}
+	hakios_metal_cb_free(cb);
+	pass.load_action = 1;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) == 0) {
+		hakios_metal_cb_commit(cb, NULL, NULL);
+		hakios_metal_cb_wait(cb);
+		st2 = hakios_metal_cb_status(cb);
+		hakios_metal_texture_read(t, 0, 0, 64, 64, px, 64 * 4);
+		for (unsigned i = 0; i < 4096; i++) {
+			float r = px[i] - 32.0f / 255.0f;
+			drawn += r > -0.004f && r < 0.004f;
+		}
+	} else {
+		printf("mali_draw_test: an R32Float colour attachment: the draw refused: %s\n", hakios_metal_error());
+	}
+	hakios_metal_cb_free(cb);
+	printf("mali_draw_test: an R32Float colour attachment: the clear status %d, %u of 4096 cleared; the draw status %d, %u of 4096 "
+	    "drawn (pixel 0 %d/100000): %s\n", st1, cleared, st2, drawn, (int)(px[0] * 100000.0f),
+	    st1 == HAKIOS_METAL_COMPLETED && st2 == HAKIOS_METAL_COMPLETED && cleared == 4096 && drawn == 4096 ? "WORK" : "FAILED");
+	hakios_metal_texture_free(t);
+	return st1 == HAKIOS_METAL_COMPLETED && st2 == HAKIOS_METAL_COMPLETED && cleared == 4096 && drawn == 4096;
+}
+
 /* 7c. layered textures (11-12): a 2D array of 3 layers with 3 levels and a cube -- each layer and face written and read
  * back alone; a draw into layer 1 leaves layers 0 and 2 as they were; a view of layer 2 reads layer 2 */
 static int
@@ -1335,6 +1389,7 @@ main(int argc, char **argv)
 	right = half_texture_test(d, q) && right;
 	right = narrow_target_test(d, q, flat) && right;
 	right = float_target_test(d, q, flat) && right;
+	right = raw_float_target_test(d, q, flat) && right;
 	right = layered_test(d, q, flat) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;

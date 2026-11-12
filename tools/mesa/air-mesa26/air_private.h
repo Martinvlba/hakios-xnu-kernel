@@ -104,6 +104,11 @@ struct air_ctx {
     */
    struct hash_table *fns;
    nir_deref_instr *ret_deref;
+   /* a callee that returns a struct or array (11-12): an out-parameter for each scalar or vector in it, in the type's
+    * order -- ret_derefs[0 .. num_ret_derefs - 1], ret_type the aggregate's; ret_deref is then the first of them */
+   nir_deref_instr **ret_derefs;
+   unsigned num_ret_derefs;
+   const struct air_type *ret_type;
 
    /* What each module global resolves to, decided once (plan_globals) and
     * turned into a value in whichever function needs it (materialise_globals).

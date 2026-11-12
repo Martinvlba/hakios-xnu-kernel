@@ -110,7 +110,9 @@ void mali_compile_known(const struct mali_known_buffer *known);
 /* a fragment function with the blend of the targets in BLEND->MASK done in the shader (Metal's numbers: MTLBlendOperation,
  * MTLBlendFactor, MTLColorWriteMask), from the tile buffer's pixel (framebuffer fetch); otherwise mali_stage_compile's */
 struct mali_blend_rt { unsigned rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask; };
-struct mali_shader_blend { unsigned mask; struct mali_blend_rt rt[4]; };
+/* format[n]: colour attachment n's MTLPixelFormat when it is not an 8-bit one (R16Float 25, R32Float 55, RG16Float 65;
+ * 0: RGBA8 in the tile buffer) -- what a framebuffer fetch's conversion and the blend computed in the shader go by */
+struct mali_shader_blend { unsigned mask; struct mali_blend_rt rt[4]; unsigned format[4]; };
 int mali_fragment_compile(const void *bitcode, size_t size, const struct mali_constant *constants, unsigned count,
     const struct mali_kernel_binary *vertex, const struct mali_shader_blend *blend, struct mali_kernel_binary *out, char *error,
     size_t error_size);
