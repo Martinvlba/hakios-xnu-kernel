@@ -740,6 +740,10 @@ rtFormat(unsigned f, uint32_t &rt1)
     // the float colour format 19), EIGHT bytes a pixel -- two of the tile's kilobytes (rtKilobytes: the targets after it
     // start further on, the framebuffer's allocation counts it), its clear two words (rtClearHigh)
     case 115: wb = 19; bgra = false; flt = true; wide = true; break;
+    // RG11B10Float (11-13; not run on the phone yet): the tile buffer's RG11F_B10F (internal format 20, the float
+    // colour format 20 -- Mesa's BFMT_FLOAT(R11G11B10_FLOAT, RG11F_B10F) for this architecture), four bytes a pixel
+    // like the rest; the blend's memory format the texture's (89), its clear the packed word (rtClear)
+    case 92: wb = 20; bgra = false; flt = true; break;
     default: return false;
     }
     uint32_t swizzle = bgra ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
@@ -756,6 +760,7 @@ rtBlend(uint32_t rt1)
 {
     if (rt1 & kRtRaw) return 167u << 12 | 16;                   // R32F, as a texture of it is named
     if (rt1 & kRtWide) return 223u << 12;                       // RGBA16F
+    if ((rt1 & kRtFloat) && ((rt1 >> 3) & 31) == 20) return 89u << 12;      // R11F_G11F_B10F
     return !(rt1 & kRtFloat) ? 237u << 12 : ((rt1 >> 3) & 31) == 16 ? 199u << 12 : 207u << 12;
 }
 inline uint32_t
@@ -782,6 +787,13 @@ rtClear(uint32_t rt1, const double *k)
     }
     if (rt1 & kRtWide) {
         return halfOf(k[0]) | halfOf(k[1]) << 16;               // (red, green; blue and alpha: rtClearHigh)
+    }
+    if ((rt1 & kRtFloat) && ((rt1 >> 3) & 31) == 20) {
+        // RG11B10Float: red and green 5 bits of exponent and 6 of mantissa, blue 5 and 5, no sign (a half without its
+        // sign and its low mantissa bits; a negative value is 0)
+        uint32_t h[3];
+        for (int i = 0; i < 3; i++) h[i] = k[i] > 0 ? halfOf(k[i]) & 0x7fff : 0;
+        return h[0] >> 4 | (h[1] >> 4) << 11 | (h[2] >> 5) << 22;
     }
     if (rt1 & kRtFloat) {
         uint32_t r = halfOf(k[0]);
@@ -4233,7 +4245,7 @@ rawBlend(hakios_metal_program *p, unsigned i)
     // for nothing
     const unsigned f = p->rt_format[i];
     static const bool told_always = bootArg("metal_rtfmt=1");   // (a test: every float attachment's format told)
-    p->shader_blend.format[i] = f == 55 || ((told_always || (p->shader_blend.mask & 1u << i)) && (f == 25 || f == 65 || f == 115)) ? f : 0;
+    p->shader_blend.format[i] = f == 55 || ((told_always || (p->shader_blend.mask & 1u << i)) && (f == 25 || f == 65 || f == 115 || f == 92)) ? f : 0;
     if (f != 55 || !p->rt_blend_on[i]) {
         return;
     }
@@ -6151,10 +6163,35 @@ blitDraw(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned fl, hakios_me
 }
 }  // namespace
 
+// (11-13) A copy between LAYERS -- a 2D array's slices, a cube's faces: FROM_LAYER and TO_LAYER, each layer_stride further
+// on in its texture's memory. Served where the copy is one of bytes (one size, one pixel size; a compressed format block
+// for block); a copy that has to be drawn (scaled, or big and into RGBA8/BGRA8 from another size) is refused for a layer
+// other than the first, by name.
+static int
+blitLayers(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned from_layer, unsigned sx, unsigned sy,
+    unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned to_layer, unsigned dx, unsigned dy,
+    unsigned dw, unsigned dh, int linear);
+
 int
 hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned sx, unsigned sy,
     unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned dx, unsigned dy, unsigned dw, unsigned dh,
     int linear)
+{
+    return blitLayers(cb, from, from_level, 0, sx, sy, sw, sh, to, to_level, 0, dx, dy, dw, dh, linear);
+}
+
+int
+hakios_metal_cb_blit_layer(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned from_layer,
+    unsigned sx, unsigned sy, unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned to_layer,
+    unsigned dx, unsigned dy)
+{
+    return blitLayers(cb, from, from_level, from_layer, sx, sy, sw, sh, to, to_level, to_layer, dx, dy, sw, sh, 0);
+}
+
+static int
+blitLayers(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned from_layer, unsigned sx, unsigned sy,
+    unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned to_layer, unsigned dx, unsigned dy,
+    unsigned dw, unsigned dh, int linear)
 {
     { hakios_metal_texture *rt_ = (from); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     const char *why = nullptr;
@@ -6162,6 +6199,10 @@ hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned f
         markBusy(cb, cb->queue->device, to);    // (a copy into a surface: the display waits for it too, as for a draw)
     }
     if (cb == nullptr || from == nullptr || to == nullptr) why = "a texture copy without its two textures";
+    else if (from_layer >= (from->layers > 1 ? from->layers : 1u) || to_layer >= (to->layers > 1 ? to->layers : 1u))
+        why = "a texture copy of a layer the texture has not got";
+    else if ((from_layer != 0 || to_layer != 0) && (from->samples > 1 || to->samples > 1))
+        why = "a copy between layers of multisample textures";
     else if (from->samples > 1 && to->samples == 1) {
         // a resolve: pixel for pixel, a colour format into an RGBA8/BGRA8 one
         if (from_level != 0 || sw != dw || sh != dh) why = "a multisample resolve other than pixel for pixel";
@@ -6208,9 +6249,10 @@ hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned f
         sx /= from->bw; dx /= from->bw; sw = (sw + from->bw - 1) / from->bw;
         sy /= from->bh; dy /= from->bh; sh = (sh + from->bh - 1) / from->bh;
     }
-    if (same && from->bytes == to->bytes && (blocks || !drawable(to->format) || sh <= 16)) {
+    if (same && from->bytes == to->bytes && (blocks || !drawable(to->format) || sh <= 16 || from_layer != 0 || to_layer != 0)) {
         // A BYTE COPY: one compute blit for rows that follow each other in both, else one a row
-        uint64_t src = from->gpu() + from->levelOffset(from_level), dst = to->gpu() + to->levelOffset(to_level);
+        uint64_t src = from->gpu() + from->layer_stride * from_layer + from->levelOffset(from_level);
+        uint64_t dst = to->gpu() + to->layer_stride * to_layer + to->levelOffset(to_level);
         uint32_t ss = from->levelStride(from_level), ds = to->levelStride(to_level), row = sw * from->bytes;
         bool whole = sx == 0 && dx == 0 && ss == ds && row == ss;
         unsigned jobs = whole ? 1 : sh;
@@ -6237,6 +6279,13 @@ hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned f
         to->retain();
         cb->held_textures.push_back(to);
         return 0;
+    }
+    if (from_layer != 0 || to_layer != 0) {
+        fail("a texture copy from layer %u into layer %u that is not one of bytes (%ux%u of MTLPixelFormat %u into %ux%u of %u: "
+            "scaled, or between pixel sizes, is drawn, and a draw takes the first layer only)", from_layer, to_layer,
+            sw, sh, from->format, dw, dh, to->format);
+        hakios_metal_cb_fail(cb, gError.c_str());
+        return -1;
     }
     if (!drawable(to->format) || (same && from->bytes != to->bytes)) {
         fail("a %s texture copy from MTLPixelFormat %u into %u (into RGBA8/BGRA8 only on the Mali yet)", same ? "" : "scaled",

@@ -848,6 +848,15 @@ int hakios_metal_cb_fill(hakios_metal_cb* cb, hakios_metal_buffer* b, uint64_t o
     return 0;
 }
 
+int hakios_metal_cb_blit_layer(hakios_metal_cb* cb, hakios_metal_texture* from, unsigned fromLevel, unsigned fromLayer, unsigned sx,
+                               unsigned sy, unsigned sw, unsigned sh, hakios_metal_texture* to, unsigned toLevel, unsigned toLayer,
+                               unsigned dx, unsigned dy) {
+    if (fromLayer != 0 || toLayer != 0) {
+        return fail("a texture copy between layers (the Adreno core copies the first layer only)");
+    }
+    return hakios_metal_cb_blit(cb, from, fromLevel, sx, sy, sw, sh, to, toLevel, dx, dy, sw, sh, 0);
+}
+
 int hakios_metal_cb_blit(hakios_metal_cb* cb, hakios_metal_texture* from, unsigned fromLevel, unsigned sx, unsigned sy, unsigned sw, unsigned sh,
                          hakios_metal_texture* to, unsigned toLevel, unsigned dx, unsigned dy, unsigned dw, unsigned dh, int linear) {
     syncAll(cb);
