@@ -108,7 +108,8 @@ MALI_CACHE_BUILD = $(shell cat src/mali/compile_mali.c src/mali/compile_mali.h $
 	$$(cat $(MALI_MESA)/archives 2>/dev/null) 2>/dev/null | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-24)
 
 out/ios-mali/libhakios-metal.a: src/mali/c_api_mali.cpp src/mali/blit_shaders.h src/mali/compile_mali.c src/mali/compile_mali.h \
-		include/hakios-metal/hakios_metal.h $(MALI_MESA)/cflags $(MALI_MESA)/archives
+		include/hakios-metal/hakios_metal.h $(MALI_MESA)/cflags $(MALI_MESA)/archives \
+		$(shell cat $(MALI_MESA)/archives 2>/dev/null)
 	@mkdir -p out/ios-mali/obj
 	$(IOS_CXX) $(IOS_CXXFLAGS) -Iinclude $(if $(strip $(MALI_CACHE_BUILD)),-DHAKIOS_MALI_CACHE_BUILD='"$(MALI_CACHE_BUILD)"') \
 		-c src/mali/c_api_mali.cpp -o out/ios-mali/obj/c_api_mali.o

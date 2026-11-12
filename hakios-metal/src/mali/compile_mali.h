@@ -5,7 +5,8 @@
  *
  * What the code expects of the dispatch (src/mali/c_api_mali.cpp), its push constants (FAU, 32-bit words):
  *
- *   words 2n, 2n+1    [[buffer(n)]]'s address (offset included), n < MALI_KERNEL_BUFFERS
+ *   words 2s, 2s+1    the address (offset included) of the buffer whose resource says slot s (its index n when
+ *                     n < MALI_KERNEL_BUFFERS)
  *   words 32..34      the threadgroup's size (threads_per_threadgroup)
  *   words 35..37      the grid's size in threadgroups (threadgroups_per_grid)
  *   words 38..40      the grid's size in threads (a thread past it returns at once)
@@ -49,6 +50,9 @@ struct mali_kernel_resource {
 	unsigned read, write;
 	unsigned inline_sampler;        /* a sampler the function declares (constexpr sampler): bound by the driver */
 	uint64_t sampler_state;         /* ... its state word (AIR's __air_sampler_state) */
+	unsigned slot;                  /* a buffer's: the push constants' words 2 slot, 2 slot + 1 hold its address -- its
+	                                 * index when that is under MALI_KERNEL_BUFFERS, else a slot the function's other
+	                                 * buffers leave free (11-12: Metal's [[buffer(16)]] .. [[buffer(30)]]) */
 };
 
 struct mali_kernel_binary {

@@ -130,6 +130,17 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
       r = nir_fsin(&c->b, a[0]);
    } else if (!strcmp(op, "fast_cos") || !strcmp(op, "cos")) {
       r = nir_fcos(&c->b, a[0]);
+   } else if (!strcmp(op, "fast_sinpi") || !strcmp(op, "sinpi")) {
+      /* sin(pi x), cos(pi x), tan(pi x): the argument brought into one period first (x - 2 round(x / 2), in
+       * [-1, 1]) so that large x keep their phase (mediaserverd's sparserendering_precalcLUTs: air.cospi.f16) */
+      nir_def *t = nir_fsub(&c->b, a[0], nir_fmul_imm(&c->b, nir_fround_even(&c->b, nir_fmul_imm(&c->b, a[0], 0.5)), 2.0));
+      r = nir_fsin(&c->b, nir_fmul_imm(&c->b, t, M_PI));
+   } else if (!strcmp(op, "fast_cospi") || !strcmp(op, "cospi")) {
+      nir_def *t = nir_fsub(&c->b, a[0], nir_fmul_imm(&c->b, nir_fround_even(&c->b, nir_fmul_imm(&c->b, a[0], 0.5)), 2.0));
+      r = nir_fcos(&c->b, nir_fmul_imm(&c->b, t, M_PI));
+   } else if (!strcmp(op, "fast_tanpi") || !strcmp(op, "tanpi")) {
+      nir_def *t = nir_fmul_imm(&c->b, nir_fsub(&c->b, a[0], nir_fround_even(&c->b, a[0])), M_PI);
+      r = nir_fdiv(&c->b, nir_fsin(&c->b, t), nir_fcos(&c->b, t));
    } else if (!strcmp(op, "fast_tan") || !strcmp(op, "tan")) {
       r = nir_fdiv(&c->b, nir_fsin(&c->b, a[0]), nir_fcos(&c->b, a[0]));
    } else if (!strcmp(op, "fast_atan2") || !strcmp(op, "atan2")) {
@@ -219,6 +230,25 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
    } else if (!strcmp(op, "fast_fmax") || !strcmp(op, "fmax") || !strcmp(op, "max")) {
       r = is_float ? nir_fmax(&c->b, a[0], a[1])
                    : (is_signed ? nir_imax(&c->b, a[0], a[1]) : nir_umax(&c->b, a[0], a[1]));
+   } else if (!strcmp(op, "fast_fmin3") || !strcmp(op, "fmin3") || !strcmp(op, "min3") ||
+              !strcmp(op, "fast_fmax3") || !strcmp(op, "fmax3") || !strcmp(op, "max3") ||
+              !strcmp(op, "fast_fmedian3") || !strcmp(op, "fmedian3") || !strcmp(op, "median3")) {
+      /* of three (11-12: the widgets' uber_fragment, air.fmax3.f16): the two-operand ones of this build composed */
+      const bool lo = strstr(op, "min3") != NULL, mid = strstr(op, "median3") != NULL;
+#define AIR_MIN2(x, y) (is_float ? nir_fmin(&c->b, x, y) : is_signed ? nir_imin(&c->b, x, y) : nir_umin(&c->b, x, y))
+#define AIR_MAX2(x, y) (is_float ? nir_fmax(&c->b, x, y) : is_signed ? nir_imax(&c->b, x, y) : nir_umax(&c->b, x, y))
+      if (!a[2]) {
+         AIR_B_SET_EXACT(c->b, was_exact);
+         return air_error(c, "intrinsic: %s without three operands", op);
+      }
+      if (mid)
+         r = AIR_MAX2(AIR_MIN2(a[0], a[1]), AIR_MIN2(AIR_MAX2(a[0], a[1]), a[2]));
+      else if (lo)
+         r = AIR_MIN2(AIR_MIN2(a[0], a[1]), a[2]);
+      else
+         r = AIR_MAX2(AIR_MAX2(a[0], a[1]), a[2]);
+#undef AIR_MIN2
+#undef AIR_MAX2
    } else if (!strcmp(op, "fast_clamp") || !strcmp(op, "clamp")) {
       if (is_float)
          r = nir_fmin(&c->b, nir_fmax(&c->b, a[0], a[1]), a[2]);
@@ -278,6 +308,12 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
                    nir_fabs(&c->b, nir_ddy(&c->b, a[0])));
    } else if (!strcmp(op, "get_simd_width") || !strcmp(op, "get_thread_execution_width")) {
       r = nir_load_subgroup_size(&c->b);
+   } else if (!strcmp(op, "is_uniform")) {
+      /* air.is_uniform.<type>(x): asks whether x is the same in every thread of the SIMD group, so that a kernel can
+       * take a shorter road (MetalPerformanceShaders' cnnConvArray_*, which mediaserverd asserts on when it does
+       * not compile). "No" is always a right answer -- the general road is taken. (11-12: read from its use, not
+       * from a specification) */
+      r = nir_imm_zero(&c->b, air_nir_components(in->base.type), air_nir_bit_size(c, in->base.type));
    } else if (!strcmp(op, "all")) {
       r = nir_ball(&c->b, a[0]);
    } else if (!strcmp(op, "any")) {
@@ -396,7 +432,7 @@ atomic_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n
    if (shared) {
       r = nir_shared_atomic(&c->b, v->bit_size, off, v, .atomic_op = aop);
    } else if (p.class == AIR_PTR_SSBO) {
-      r = nir_ssbo_atomic(&c->b, v->bit_size, nir_imm_int(&c->b, p.binding), off, v,
+      r = nir_ssbo_atomic(&c->b, v->bit_size, ptr_binding(c, p), off, v,
                           .atomic_op = aop);
    } else {
       return air_error(c, "intrinsic: an atomic on a pointer that is not a buffer");
@@ -442,6 +478,18 @@ llvm_op(struct air_ctx *c, const struct air_inst *in, const char *name)
 {
    if (!strncmp(name, "llvm.lifetime.", 14))
       return true; /* scope markers: nothing to emit */
+   if (!strcmp(name, "llvm.assume") || !strncmp(name, "llvm.assume.", 12))
+      return true; /* the optimiser's promise about a value: nothing to emit (MPS's cnnConvArray kernels) */
+   if (!strncmp(name, "llvm.fmuladd.", 13) || !strncmp(name, "llvm.fma.", 9)) {
+      /* a * b + c, fused or not as the target likes (widgets' primitive_gradient_fragment: llvm.fmuladd.f16) */
+      nir_def *x = air_get_ssa(c, in->operands[1]);
+      nir_def *y = air_get_ssa(c, in->operands[2]);
+      nir_def *z = air_get_ssa(c, in->operands[3]);
+      if (!x || !y || !z)
+         return false;
+      air_set(c, &in->base, air_val_ssa(c, nir_fadd(&c->b, nir_fmul(&c->b, x, y), z)));
+      return true;
+   }
    if (!strncmp(name, "llvm.memcpy.", 12)) {
       /* a copy between two of our pointers, of a constant length */
       struct air_val *dst = air_get(c, in->operands[1]);
@@ -456,8 +504,16 @@ llvm_op(struct air_ctx *c, const struct air_inst *in, const char *name)
       /* in 4-byte pieces, which is what every memcpy in the corpus is a
        * multiple of (they copy float vectors out of constant buffers)
        */
-      if (bytes % 4)
-         return air_error(c, "intrinsic: memcpy of %u bytes", (unsigned)bytes);
+      for (uint64_t off = bytes & ~3ull; off < bytes; off++) {
+         /* (the last bytes of a length that is not whole words, one at a time) */
+         struct air_ptr s = air_ptr_add(c, src->ptr, nir_imm_int(&c->b, off));
+         struct air_ptr d = air_ptr_add(c, dst->ptr, nir_imm_int(&c->b, off));
+         static const struct air_type u8 = { .kind = AIR_TYPE_INT, .bits = 8 };
+         nir_def *v = air_load_ptr(c, s, &u8, 1);
+         if (!v || !air_store_ptr(c, d, v, 1))
+            return false;
+      }
+      bytes &= ~3ull;
       for (uint64_t off = 0; off < bytes; off += 4) {
          struct air_ptr s = air_ptr_add(c, src->ptr, nir_imm_int(&c->b, off));
          struct air_ptr d = air_ptr_add(c, dst->ptr, nir_imm_int(&c->b, off));
@@ -476,12 +532,19 @@ llvm_op(struct air_ctx *c, const struct air_inst *in, const char *name)
       if (dst->kind != AIR_VAL_PTR)
          return air_error(c, "intrinsic: memset of something that is not a pointer");
       uint64_t bytes;
-      if (!air_const_uint(in->operands[3], &bytes) || bytes % 4)
-         return air_error(c, "intrinsic: memset of a length that is not a multiple of 4");
+      if (!air_const_uint(in->operands[3], &bytes))
+         return air_error(c, "intrinsic: memset of a run-time length");
       if (!nir_src_is_const(nir_src_for_ssa(byte)))
          return air_error(c, "intrinsic: memset of a run-time byte");
       uint32_t b = nir_src_as_uint(nir_src_for_ssa(byte)) & 0xff;
       uint32_t word = b | b << 8 | b << 16 | b << 24;
+      for (uint64_t off = bytes & ~3ull; off < bytes; off++) {
+         /* (the last bytes of a length that is not whole words: MPS's kernelComputeStage1) */
+         struct air_ptr d = air_ptr_add(c, dst->ptr, nir_imm_int(&c->b, off));
+         if (!air_store_ptr(c, d, nir_imm_intN_t(&c->b, b, 8), 1))
+            return false;
+      }
+      bytes &= ~3ull;
       for (uint64_t off = 0; off < bytes; off += 4) {
          struct air_ptr d = air_ptr_add(c, dst->ptr, nir_imm_int(&c->b, off));
          if (!air_store_ptr(c, d, nir_imm_int(&c->b, word), 4))
@@ -525,6 +588,19 @@ llvm_op(struct air_ctx *c, const struct air_inst *in, const char *name)
  * No module in the corpus reads it (every extractvalue of a texture result
  * takes field 0), so it is produced as zero rather than invented.
  */
+
+/* COORD with LAYER as one more component */
+static nir_def *
+nir_vec_with_layer(nir_builder *b, nir_def *coord, nir_def *layer)
+{
+   nir_def *comps[4];
+   unsigned n = coord->num_components;
+
+   for (unsigned i = 0; i < n; i++)
+      comps[i] = nir_channel(b, coord, i);
+   comps[n] = layer;
+   return nir_vec(b, comps, n + 1);
+}
 
 struct air_tex_name {
    const char *op;        /* "sample", "gather", "read", "write", "get", "lod" */
@@ -869,8 +945,17 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
 
    if (!strcmp(t.op, "write")) {
       nir_def *coord = air_get_ssa(c, in->operands[arg++]);
+      if (!coord)
+         return false;
+      if (t.is_array && coord->num_components + 1 == ncoord) {
+         /* an array's layer is an operand of its own after the coordinate (below) */
+         nir_def *layer = air_get_ssa(c, in->operands[arg++]);
+         if (!layer)
+            return false;
+         coord = nir_vec_with_layer(&c->b, nir_u2u32(&c->b, coord), nir_u2u32(&c->b, layer));
+      }
       nir_def *value = air_get_ssa(c, in->operands[arg++]);
-      if (!coord || !value)
+      if (!value)
          return false;
       uint64_t lod;
       if (!tex_flag(c, in, arg, &lod))
@@ -894,6 +979,22 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
    nir_def *coord = air_get_ssa(c, in->operands[arg++]);
    if (!coord)
       return false;
+   bool coord_is_float = air_type_is_float(air_type_scalar(in->operands[arg - 1]->type));
+   if (t.is_array && coord->num_components + 1 == ncoord) {
+      /* AN ARRAY'S LAYER: Metal's compiler passes it as an i32 operand of its own after the coordinate
+       * (air.sample_texture_2d_array(texture, sampler, <2 x float>, i32 layer, ...), read_ and write_ alike); NIR
+       * has it as the coordinate's last component, a float beside float coordinates (mediaserverd's
+       * colorCubeFragment2D: "a 2-component coordinate, wanting 3") */
+      nir_def *layer = air_get_ssa(c, in->operands[arg++]);
+      if (!layer)
+         return false;
+      layer = nir_u2u32(&c->b, layer);
+      if (coord_is_float)
+         layer = nir_u2fN(&c->b, layer, coord->bit_size);
+      else
+         coord = nir_u2u32(&c->b, coord);
+      coord = nir_vec_with_layer(&c->b, coord, layer);
+   }
    if (coord->num_components != ncoord)
       return air_error(c, "intrinsic: air.%s with a %u-component coordinate, wanting %u",
                        n->part[0], coord->num_components, ncoord);
@@ -915,10 +1016,7 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
    nir_tex_src srcs[6];
    unsigned nsrc = 0;
    srcs[nsrc++] = (nir_tex_src){ .src_type = nir_tex_src_coord,
-                                 .src = nir_src_for_ssa(
-                                    air_type_is_float(air_type_scalar(
-                                       in->operands[arg - 1]->type))
-                                       ? coord : nir_u2u32(&c->b, coord)) };
+                                 .src = nir_src_for_ssa(coord_is_float ? coord : nir_u2u32(&c->b, coord)) };
 
    nir_texop op;
    if (!strcmp(t.op, "sample")) {
@@ -1074,6 +1172,20 @@ air_translate_call(struct air_ctx *c, const struct air_inst *in, const char *nam
       return fc_defined_op(c, in);
    if (n.num >= 2 && !strcmp(n.part[0], "wg") && !strcmp(n.part[1], "barrier"))
       return barrier_op(c, in);
+   /* air.simdgroup.barrier(flags, scope): the threads of one SIMD group wait for each other. The threadgroup's
+    * barrier makes every thread of the threadgroup wait, the SIMD group's among them -- stronger, and right as long
+    * as every thread of the threadgroup comes to it (MPS's cnnConvArray kernels: straight-line, or loops of one
+    * count for all). (11-12: not a narrower barrier of the Mali's; none is known) */
+   if (n.num >= 2 && !strcmp(n.part[0], "simdgroup") && !strcmp(n.part[1], "barrier"))
+      return barrier_op(c, in);
+   if (n.num >= 1 && !strcmp(n.part[0], "discard_fragment")) {
+      /* Metal's discard_fragment(): the fragment writes nothing from here on, the function runs on (its
+       * derivatives stay defined) -- NIR's demote (the widgets' mask_color_fragment and mask_accumulate_fragment) */
+      if (c->nir->info.stage != MESA_SHADER_FRAGMENT)
+         return air_error(c, "intrinsic: air.discard_fragment outside a fragment function");
+      nir_demote(&c->b);
+      return true;
+   }
    if (!strcmp(n.part[0], "atomic"))
       return atomic_op(c, in, &n);
 

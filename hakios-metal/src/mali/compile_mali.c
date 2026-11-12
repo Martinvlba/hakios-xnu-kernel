@@ -65,11 +65,33 @@ push_words(nir_builder *b, unsigned word, unsigned count, unsigned bit_size)
 	return bit_size == 32 ? v : nir_u2uN(b, v, bit_size);
 }
 
+/* [[buffer(n)]]'s slot in the push constants, for this thread's compile (compile_stage sets it; the driver's own
+ * shaders use indices under MALI_KERNEL_BUFFERS, which stand for themselves) */
+static __thread uint8_t slot_of[32];
+static __thread bool slots_set;
+static __thread uint32_t buffers_used;         /* bit n: [[buffer(n)]] is one of the function's */
+
 static nir_def *
 buffer_address(nir_builder *b, nir_def *index, nir_def *offset)
 {
-	nir_def *base = nir_load_push_constant(b, 1, 64, nir_imul_imm(b, index, 8), .base = 0);
+	if (slots_set && nir_src_is_const(nir_src_for_ssa(index)) && nir_src_as_uint(nir_src_for_ssa(index)) < 32) {
+		index = nir_imm_int(b, slot_of[nir_src_as_uint(nir_src_for_ssa(index))]);
+	}
+	nir_def *base;
 
+	if (slots_set && !nir_src_is_const(nir_src_for_ssa(index))) {
+		/* A BUFFER CHOSEN WHILE THE SHADER RUNS (the front end's binding_def: a phi or select between two
+		 * buffers, MPS's cnnConvArray kernels): its address chosen among the function's buffers' */
+		base = nir_imm_int64(b, 0);
+		for (unsigned n = 0; n < 31; n++) {
+			if (buffers_used & 1u << n) {
+				base = nir_bcsel(b, nir_ieq_imm(b, index, n),
+				    nir_load_push_constant(b, 1, 64, nir_imm_int(b, slot_of[n] * 8), .base = 0), base);
+			}
+		}
+	} else {
+		base = nir_load_push_constant(b, 1, 64, nir_imul_imm(b, index, 8), .base = 0);
+	}
 	return nir_iadd(b, base, nir_u2u64(b, offset));
 }
 
@@ -378,8 +400,8 @@ lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
 		return false;
 	}
 	unsigned format = st->fetch->attributes[slot].format, buffer = st->fetch->attributes[slot].buffer;
-	if (buffer >= MALI_KERNEL_BUFFERS || buffer >= MALI_VERTEX_SLOTS) {
-		st->why = "a vertex attribute from a buffer past 15";
+	if (buffer >= MALI_VERTEX_SLOTS) {
+		st->why = "a vertex attribute from a buffer past 30";
 		return false;
 	}
 	unsigned stride = st->fetch->layouts[buffer].stride, step = st->fetch->layouts[buffer].step_function;
@@ -404,9 +426,80 @@ lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
 			v = nir_swizzle(b, v, (unsigned[]){ 2, 1, 0, 3 }, 4);
 		}
 		break;
-	default:
-		st->why = "a vertex attribute format other than float, half and normalized uchar4 (not on the Mali yet)";
-		return false;
+	default: {
+		/* THE REST OF MTLVertexFormat (11-12: VectorKit's map draws -- shorts, bytes, ints, 10:10:10:2): the
+		 * components loaded at their size, then as the shader's variable wants them -- an integer variable takes
+		 * them widened, a float one takes integers converted and normalized ones scaled (signed: -1 at the least
+		 * two values, as Metal) */
+		static const struct { uint8_t format, kind, bits, n; } kinds[] = {   /* kind: 0 uint, 1 int, 2 unorm, 3 snorm */
+			{ 1, 0, 8, 2 }, { 2, 0, 8, 3 }, { 3, 0, 8, 4 }, { 4, 1, 8, 2 }, { 5, 1, 8, 3 }, { 6, 1, 8, 4 },
+			{ 7, 2, 8, 2 }, { 8, 2, 8, 3 }, { 10, 3, 8, 2 }, { 11, 3, 8, 3 }, { 12, 3, 8, 4 },
+			{ 13, 0, 16, 2 }, { 14, 0, 16, 3 }, { 15, 0, 16, 4 }, { 16, 1, 16, 2 }, { 17, 1, 16, 3 }, { 18, 1, 16, 4 },
+			{ 19, 2, 16, 2 }, { 20, 2, 16, 3 }, { 21, 2, 16, 4 }, { 22, 3, 16, 2 }, { 23, 3, 16, 3 }, { 24, 3, 16, 4 },
+			{ 32, 1, 32, 1 }, { 33, 1, 32, 2 }, { 34, 1, 32, 3 }, { 35, 1, 32, 4 },
+			{ 36, 0, 32, 1 }, { 37, 0, 32, 2 }, { 38, 0, 32, 3 }, { 39, 0, 32, 4 },
+			{ 45, 0, 8, 1 }, { 46, 1, 8, 1 }, { 47, 2, 8, 1 }, { 48, 3, 8, 1 },
+			{ 49, 0, 16, 1 }, { 50, 1, 16, 1 }, { 51, 2, 16, 1 }, { 52, 3, 16, 1 },
+		};
+		const bool to_int = glsl_base_type_is_integer(glsl_get_base_type(glsl_without_array(var->type)));
+		unsigned kind = ~0u, vbits = 0, n = 0;
+
+		for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+			if (kinds[i].format == format) {
+				kind = kinds[i].kind;
+				vbits = kinds[i].bits;
+				n = kinds[i].n;
+			}
+		}
+		if (format == 40 || format == 41) {
+			/* Int1010102Normalized, UInt1010102Normalized: x in the low ten bits, w the top two */
+			nir_def *word = nir_load_global(b, 1, 32, addr, .align_mul = 4), *p[4];
+
+			for (unsigned i = 0; i < 4; i++) {
+				unsigned width = i == 3 ? 2 : 10;
+				nir_def *field = format == 41 ? nir_ubitfield_extract_imm(b, word, i * 10, width) :
+				    nir_ibitfield_extract(b, word, nir_imm_int(b, i * 10), nir_imm_int(b, width));
+
+				p[i] = to_int ? field : format == 41 ? nir_fdiv_imm(b, nir_u2f32(b, field), (double)((1u << width) - 1)) :
+				    nir_fmax(b, nir_fdiv_imm(b, nir_i2f32(b, field), (double)((1u << (width - 1)) - 1)), nir_imm_float(b, -1.0f));
+			}
+			v = nir_vec(b, p, 4);
+		} else if (kind == ~0u) {
+			st->why = "a vertex attribute of an MTLVertexFormat this build does not know";
+			return false;
+		} else {
+			v = nir_load_global(b, n, vbits, addr, .align_mul = vbits / 8);
+			if (to_int) {
+				v = (kind & 1) ? nir_i2i32(b, v) : nir_u2u32(b, v);
+			} else if (kind == 0) {
+				v = nir_u2f32(b, v);
+			} else if (kind == 1) {
+				v = nir_i2f32(b, v);
+			} else if (kind == 2) {
+				v = nir_fdiv_imm(b, nir_u2f32(b, v), (double)((1ull << vbits) - 1));
+			} else {
+				v = nir_fmax(b, nir_fdiv_imm(b, nir_i2f32(b, v), (double)((1ull << (vbits - 1)) - 1)), nir_imm_floatN_t(b, -1.0, 32));
+			}
+		}
+		if (to_int) {
+			/* an integer variable: the missing components (0, 0, 0, 1) as integers, at the variable's size */
+			unsigned want = in->def.num_components;
+			nir_def *c[4];
+
+			for (unsigned i = 0; i < want; i++) {
+				c[i] = i < v->num_components ? nir_channel(b, v, i) : nir_imm_int(b, i == 3 ? 1 : 0);
+			}
+			v = nir_vec(b, c, want);
+			if (in->def.bit_size != 32) {
+				v = nir_u2uN(b, v, in->def.bit_size);
+			}
+			nir_def_rewrite_uses(&in->def, v);
+			nir_instr_remove(&in->instr);
+			st->buffers |= 1u << buffer;
+			return true;
+		}
+		break;
+	}
 	}
 	unsigned want = in->def.num_components, bits = in->def.bit_size;
 	nir_def *c[4];
@@ -827,6 +920,49 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 	}
 	out->stage = want == MESA_SHADER_COMPUTE ? 0 : want == MESA_SHADER_VERTEX ? 1 : 2;
 	snprintf(out->name, sizeof(out->name), "%s", air_info.entry_point);
+	/* THE BUFFERS' SLOTS (11-12): the push constants hold MALI_KERNEL_BUFFERS addresses; Metal numbers buffers to 30
+	 * (MPS's kernels use [[buffer(30)]], vertex buffers sit high by convention). An index under the count is its own
+	 * slot; one past it takes a slot none of the function's buffers (nor its vertex descriptor's) has. */
+	{
+		uint32_t used = 0, low = 0;
+
+		for (unsigned i = 0; i < air_info.num_resources; i++) {
+			const struct air_resource *r = &air_info.resources[i];
+
+			if ((r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER) && r->index < 31) {
+				used |= 1u << r->index;
+			}
+		}
+		if (want == MESA_SHADER_VERTEX && fetch != NULL) {
+			for (unsigned a = 0; a < MALI_VERTEX_SLOTS; a++) {
+				if (fetch->attributes[a].format != 0 && fetch->attributes[a].buffer < 31) {
+					used |= 1u << fetch->attributes[a].buffer;
+				}
+			}
+		}
+		low = used & ((1u << MALI_KERNEL_BUFFERS) - 1);
+		for (unsigned n = 0; n < 32; n++) {
+			slot_of[n] = n < MALI_KERNEL_BUFFERS ? n : 0xff;
+		}
+		for (unsigned n = MALI_KERNEL_BUFFERS; n < 31; n++) {
+			if (!(used & 1u << n)) {
+				continue;
+			}
+			for (int k = MALI_KERNEL_BUFFERS - 1; k >= 0; k--) {
+				if (!(low & 1u << k)) {
+					slot_of[n] = (uint8_t)k;
+					low |= 1u << k;
+					break;
+				}
+			}
+			if (slot_of[n] == 0xff) {
+				say(error, error_size, "%s: more than %u buffers (with [[buffer(%u)]])", out->name, MALI_KERNEL_BUFFERS, n);
+				goto done;
+			}
+		}
+		buffers_used = used;
+		slots_set = true;
+	}
 	for (unsigned i = 0; i < air_info.num_resources; i++) {
 		const struct air_resource *r = &air_info.resources[i];
 
@@ -840,14 +976,13 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 			    r->index, MALI_KERNEL_TEXTURES - 1);
 			goto done;
 		}
-		if ((r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER) &&
-		    r->index >= MALI_KERNEL_BUFFERS) {
-			say(error, error_size, "%s: [[buffer(%u)]] (the Mali build binds buffers 0 to %u)", out->name, r->index,
-			    MALI_KERNEL_BUFFERS - 1);
+		if ((r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER) && r->index >= 31) {
+			say(error, error_size, "%s: [[buffer(%u)]] (Metal's buffers are 0 to 30)", out->name, r->index);
 			goto done;
 		}
 		out->resources[out->num_resources++] = (struct mali_kernel_resource){ r->kind, r->index, r->size, r->read, r->write,
-		    r->inline_sampler ? 1u : 0u, r->sampler_state };
+		    r->inline_sampler ? 1u : 0u, r->sampler_state,
+		    r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER ? slot_of[r->index] : 0u };
 	}
 	out->threadgroup_bytes = air_info.threadgroup_bytes;
 	out->threadgroup_arg_base = air_info.has_threadgroup_arg ? air_info.threadgroup_arg_base : ~0u;
@@ -865,7 +1000,7 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 		}
 		NIR_PASS(_, s, nir_remove_dead_variables, nir_var_shader_in, NULL);
 		s->info.inputs_read = 0;
-		for (unsigned n = 0; n < MALI_KERNEL_BUFFERS; n++) {
+		for (unsigned n = 0; n < MALI_VERTEX_SLOTS; n++) {
 			if (!(st.buffers & 1u << n)) {
 				continue;
 			}
@@ -873,7 +1008,8 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 				say(error, error_size, "%s: more than %u resources", out->name, MALI_KERNEL_MAX_RESOURCES);
 				goto done;
 			}
-			out->resources[out->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_DEVICE_BUFFER, n, 0, 1, 0 };
+			out->resources[out->num_resources++] = (struct mali_kernel_resource){ AIR_RESOURCE_DEVICE_BUFFER, n, 0, 1, 0, 0, 0,
+			    slot_of[n] };
 		}
 	}
 	result = compile_nir(s, want, vs_varyings, out, error, error_size);
