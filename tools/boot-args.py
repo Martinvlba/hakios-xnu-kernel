@@ -99,16 +99,27 @@ SET_BY = {
 }
 
 
-def tracked(root):
+def tracked(root, devices=False):
+    """The files git tracks, relative to root; with devices, also those of the device repositories checked out under
+    devices/ (their own git repositories, not this one's: devices/akita/drivers/... and the like)."""
     out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout
-    return [p.decode() for p in out.split(b"\0") if p]
+    files = [p.decode() for p in out.split(b"\0") if p]
+    if devices and os.path.isdir(os.path.join(root, "devices")):
+        for name in sorted(os.listdir(os.path.join(root, "devices"))):
+            repo = os.path.join(root, "devices", name)
+            if not os.path.exists(os.path.join(repo, ".git")):
+                continue
+            out = subprocess.run(["git", "ls-files", "-z"], cwd=repo, capture_output=True, check=True).stdout
+            files += ["devices/%s/%s" % (name, p.decode()) for p in out.split(b"\0") if p]
+    return files
 
 
-def scan(root, keep=None):
+def scan(root, keep=None, devices=False):
     """{name: {"kernel": {files}, "loader": {files}, "user": {files}, "str": {files}}} found in the tracked source.
-    `keep`, if given, is filled with {file name: text} of every source file read (the descriptions are taken from it)."""
+    `keep`, if given, is filled with {file name: text} of every source file read (the descriptions are taken from it).
+    devices: the device repositories' drivers too (devices/NAME/drivers/: kernel code); the generated lists leave them out."""
     found = collections.defaultdict(lambda: {"kernel": set(), "loader": set(), "user": set(), "str": set()})
-    for f in tracked(root):
+    for f in tracked(root, devices):
         if not f.endswith((".c", ".cpp", ".m", ".h", ".patch")):
             continue
         try:
@@ -122,7 +133,7 @@ def scan(root, keep=None):
             text = "\n".join(l[1:] for l in text.splitlines() if l.startswith("+") and not l.startswith("+++"))
             base = "(patch)"
         # the kernel's side: where the drivers are kept (xnu/files/ until they moved to drivers/<subsystem>/) and the Linux layer
-        if f.startswith(("xnu/", "drivers/", "wifi/lx/src/")):
+        if f.startswith(("xnu/", "drivers/", "wifi/lx/src/")) or re.match(r"devices/[^/]+/drivers/", f):
             for m in KERNEL.finditer(text):
                 found[m.group(1)]["kernel"].add(base)
             for m in STRING.finditer(text):

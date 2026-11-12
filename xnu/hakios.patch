@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..0d78b140a9e9 100644
+index 44274016a4cf..d52f5e7069d4 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,61 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,71 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -138,8 +138,8 @@ index 44274016a4cf..0d78b140a9e9 100644
 +bsd/dev/hakios.apfs_check.c              optional apfs
 +bsd/dev/hakios.adsp.c                    optional hakios_adsp
 +bsd/dev/hakios.speaker.c                 optional hakios_speaker
++bsd/dev/hakios.guard.c                   optional hakios_guard
 +bsd/dev/hakios.sound.c                   optional hakios_sound
-+bsd/dev/hakios.guard.c                   optional hakios_sound
 +bsd/dev/hakios.mic.c                     optional hakios_mic
 +bsd/dev/hakios.virtio_sound.c            optional hakios_virtio_sound
 +bsd/dev/hakios.bt.c                      optional hakios_bt
@@ -165,11 +165,17 @@ index 44274016a4cf..0d78b140a9e9 100644
 +bsd/dev/hakios.ufs.c                     optional hakios_ufs
 +bsd/dev/hakios.ufshc.c                   optional hakios_ufs
 +bsd/dev/hakios.virtio_blk.c              optional hakios_virtio_blk
++bsd/dev/hakios.sta.c                     optional hakios_wifi_station
++bsd/dev/hakios.apple80211.c              optional hakios_wifi_station
 +bsd/dev/hakios.wifi.c                    optional hakios_wifi
 +bsd/dev/hakios.wlfw.c                    optional hakios_wifi
 +bsd/dev/hakios.lx.c                      optional hakios_wifi
-+bsd/dev/hakios.sta.c                     optional hakios_wifi
-+bsd/dev/hakios.apple80211.c              optional hakios_wifi
++bsd/dev/hakios.akita_aoc.c               optional hakios_akita_aoc
++bsd/dev/hakios.akita_amp.c               optional hakios_akita_amp
++bsd/dev/hakios.akita_torch.c             optional hakios_akita_torch
++bsd/dev/hakios.akita_display.c           optional hakios_akita_display
++bsd/dev/hakios.akita_mali.c              optional hakios_akita_mali
++bsd/dev/hakios.akita_haptic.c            optional hakios_akita_haptic
 +bsd/dev/hakios.akita_keys.c              optional hakios_akita_keys
 +bsd/dev/hakios.akita_touch.c             optional hakios_akita_touch
 +bsd/dev/hakios.akita_battery.c           optional hakios_akita_battery
@@ -178,13 +184,17 @@ index 44274016a4cf..0d78b140a9e9 100644
 +bsd/dev/hakios.akita_dvfs.c              optional hakios_akita_dvfs
 +bsd/dev/hakios.akita_rtc.c               optional hakios_akita_rtc
 +bsd/dev/hakios.akita_power.c             optional hakios_akita_power
++bsd/dev/hakios.akita_trusty.c            optional hakios_akita_trusty
 +bsd/dev/hakios.akita_usb.c               optional hakios_akita_usb
 +bsd/dev/hakios.akita_usbmux.c            optional hakios_akita_usb
++bsd/dev/hakios.akita_ptp.c               optional hakios_akita_usb
++bsd/dev/hakios.akita_pcie.c              optional hakios_akita_wifi
++bsd/dev/hakios.akita_bcm.c               optional hakios_akita_wifi
 +# end of the HakiOS drivers
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +210,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +220,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -237,7 +247,7 @@ index 44274016a4cf..0d78b140a9e9 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +462,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +472,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -245,7 +255,7 @@ index 44274016a4cf..0d78b140a9e9 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +485,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +495,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -1044,6 +1054,24 @@ index ae4a5f33df1e..986b517dfd18 100644
  	struct uthread *uth;
  
  	target_act = (thread_t)port_name_to_thread(uap->thread_port,
+diff --git a/bsd/kern/kern_sysctl.c b/bsd/kern/kern_sysctl.c
+index 9ba4ffbfef03..a441fc538a76 100644
+--- a/bsd/kern/kern_sysctl.c
++++ b/bsd/kern/kern_sysctl.c
+@@ -2164,10 +2164,10 @@ sysctl_sysctl_bootargs
+ (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+ {
+ 	int error;
+-	char buf[BOOT_LINE_LENGTH];
++	char buf[1024];         /* HakiOS: the command line and the kernel's built-in arguments (pexpert/arm/pe_bootargs.c) */
+ 
+-	strlcpy(buf, PE_boot_args(), BOOT_LINE_LENGTH);
+-	error = sysctl_io_string(req, buf, BOOT_LINE_LENGTH, 0, NULL);
++	strlcpy(buf, PE_boot_args(), sizeof(buf));
++	error = sysctl_io_string(req, buf, sizeof(buf), 0, NULL);
+ 	return error;
+ }
+ 
 diff --git a/bsd/kern/kpi_socket.c b/bsd/kern/kpi_socket.c
 index 003cfb074a99..c597065f24f1 100644
 --- a/bsd/kern/kpi_socket.c
@@ -2017,10 +2045,10 @@ index 83259ebf9835..8864e5c7cc41 100644
  DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
  endif
 diff --git a/iokit/conf/files b/iokit/conf/files
-index 5fb0a52062e0..6a237306ae02 100644
+index 5fb0a52062e0..7c59afb92c0e 100644
 --- a/iokit/conf/files
 +++ b/iokit/conf/files
-@@ -79,6 +79,18 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+@@ -79,6 +79,19 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
  iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
  
  iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
@@ -2031,7 +2059,8 @@ index 5fb0a52062e0..6a237306ae02 100644
 +iokit/Kernel/hakios.stubs.cpp            optional iokitcpp
 +iokit/Kernel/hakios.gpu.cpp              optional hakios_adreno iokitcpp
 +iokit/Kernel/hakios.battery.cpp          optional hakios_battery iokitcpp
-+iokit/Kernel/hakios.wlan.cpp             optional hakios_wifi iokitcpp
++iokit/Kernel/hakios.wlan.cpp             optional hakios_wifi_station iokitcpp
++iokit/Kernel/hakios.akita_gpu.cpp        optional hakios_akita_mali iokitcpp
 +iokit/Kernel/hakios.akita_usbmux_iokit.cpp optional hakios_akita_usb iokitcpp
 +# end of the HakiOS drivers
 +iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
@@ -3457,6 +3486,125 @@ index 8b46efb05c86..e161ca426b1a 100644
  extern kern_return_t
  kern_work_interval_set_workload_id(mach_port_name_t port_name,
      struct kern_work_interval_workload_id_args *workload_id_args);
+diff --git a/pexpert/arm/pe_bootargs.c b/pexpert/arm/pe_bootargs.c
+index c6b87b081d2f..a3b0b71e5619 100644
+--- a/pexpert/arm/pe_bootargs.c
++++ b/pexpert/arm/pe_bootargs.c
+@@ -3,10 +3,113 @@
+  */
+ #include <pexpert/pexpert.h>
+ #include <pexpert/boot.h>
++#include <string.h>
++
++/*
++ * HakiOS: arguments built into the kernel (CONFIG_DEFAULTS of the device's configuration; tools/hakios-config.py kernel
++ * writes them to bsd/dev/hakios.drivers.h as HAKIOS_DEFAULT_BOOTARGS). Each holds unless the command line names it: the
++ * command line always wins, x=0 turns a default off. The line every reader sees -- PE_parse_boot_argn, sysctl
++ * kern.bootargs (user space), the panic log -- is the command line followed by the defaults it does not name, made
++ * once, the first time it is asked for (early in arm_init, one CPU). So what works on a device needs no room on a
++ * command line the loader can hand over only ~490 characters of.
++ */
++#if __has_include("../../bsd/dev/hakios.drivers.h")
++#include "../../bsd/dev/hakios.drivers.h"
++#endif
++
++#if defined(HAKIOS_DEFAULT_BOOTARGS)
++#define HAKIOS_LINE_LENGTH      1024            /* user space's readers take up to 1023 characters */
++static char hakios_line[HAKIOS_LINE_LENGTH];
++static int hakios_line_made;
++
++static int
++hakios_sep(char c)
++{
++	return c == ' ' || c == '\t' || c == '\0';
++}
++
++/* Whether LINE has an argument called NAME (NAME_LEN characters): "name", "name=...", "-name" */
++static int
++hakios_line_names(const char *line, const char *name, size_t name_len)
++{
++	const char *p = line;
++
++	for (;;) {
++		while (*p != '\0' && hakios_sep(*p)) {
++			p++;
++		}
++		if (*p == '\0') {
++			return 0;
++		}
++		const char *word = p;
++		if (*word == '-') {
++			word++;
++		}
++		const char *end = word;
++		while (!hakios_sep(*end) && *end != '=') {
++			end++;
++		}
++		if ((size_t)(end - word) == name_len && strncmp(word, name, name_len) == 0) {
++			return 1;
++		}
++		p = end;
++		while (!hakios_sep(*p)) {
++			p++;
++		}
++	}
++}
++
++static void
++hakios_make_line(const char *command_line)
++{
++	const char *d = HAKIOS_DEFAULT_BOOTARGS;
++	size_t len = strlcpy(hakios_line, command_line, sizeof(hakios_line));
++
++	if (len >= sizeof(hakios_line)) {
++		return;                         /* cannot be: the command line holds BOOT_LINE_LENGTH */
++	}
++	while (*d != '\0') {
++		while (*d == ' ') {
++			d++;
++		}
++		const char *word = d, *name_end = d;
++		while (*d != '\0' && *d != ' ') {
++			d++;
++		}
++		while (name_end < d && *name_end != '=') {
++			name_end++;
++		}
++		size_t word_len = (size_t)(d - word);
++		if (word_len == 0 || hakios_line_names(command_line, word, (size_t)(name_end - word))) {
++			continue;
++		}
++		if (len + 1 + word_len >= sizeof(hakios_line)) {
++			break;
++		}
++		if (len > 0) {
++			hakios_line[len++] = ' ';
++		}
++		memcpy(hakios_line + len, word, word_len);
++		len += word_len;
++		hakios_line[len] = '\0';
++	}
++}
++#endif /* HAKIOS_DEFAULT_BOOTARGS */
+ 
+ char *
+ PE_boot_args(
+ 	void)
+ {
+-	return (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++	char *line = (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++
++#if defined(HAKIOS_DEFAULT_BOOTARGS)
++	if (HAKIOS_DEFAULT_BOOTARGS[0] != '\0') {
++		if (!hakios_line_made) {
++			hakios_make_line(line);
++			hakios_line_made = 1;
++		}
++		return hakios_line;
++	}
++#endif
++	return line;
+ }
 diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
 index 3ad743fc3efb..ce036c5a2c26 100644
 --- a/pexpert/arm/pe_fiq.c

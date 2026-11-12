@@ -1,0 +1,40 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's Wi-Fi: how much of the time the internet is there -- an address, then a fetch every 20 s for ~13
+# minutes (with the firmware's traps and recoveries of the legacy mode: wifi_hostcap=1 wifi_inforing=0; TODO 35e).
+/redwood/bin/net_test waitaddr en0 150
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
+/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html wait 20
