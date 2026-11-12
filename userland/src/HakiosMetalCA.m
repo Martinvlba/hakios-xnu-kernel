@@ -2224,6 +2224,9 @@ hm_boot_arg_set(const char *what)
  * system's by the shared cache's symbols), then lets the signal do what it does. A process with a handler of its own
  * keeps it. */
 static struct sigaction hm_crash_before[32];
+/* what the thread was about to do with the caller's memory, for the handler's line (a copy that runs off a mapping:
+ * Weather's -replaceRegion:, 11-13) */
+static __thread char hm_crash_doing[320];
 
 static void
 hm_crash_frame(char *line, size_t size, size_t *at, uintptr_t pc)
@@ -2274,6 +2277,9 @@ hm_crash(int sig, siginfo_t *info, void *context)
 			fp = next;
 		}
 		hm_print("%s\n", line);
+		if (hm_crash_doing[0] != 0) {
+			hm_print("CRASH: the thread was in: %s\n", hm_crash_doing);
+		}
 	}
 	/* as it was before: the default (the instruction faults again and the process dies of it) or the one there was */
 	if (sig >= 0 && sig < 32) {
@@ -5029,6 +5035,21 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 	if (![self hakiosRegion:region level:level slice:slice bytes:bytes isFor:"replaceRegion"]) {
 		return;
 	}
+	snprintf(hm_crash_doing, sizeof(hm_crash_doing), "replaceRegion %lux%lux%lu at (%lu, %lu, %lu), level %lu, slice %lu, the "
+		 "caller's rows %lu bytes apart (images %lu), from %p; the texture %lux%lu, MTLPixelFormat %lu, type %lu, %u level(s), %u "
+		 "bytes a pixel, %llu bytes of memory", (unsigned long)region.size.width, (unsigned long)region.size.height,
+		 (unsigned long)region.size.depth, (unsigned long)region.origin.x, (unsigned long)region.origin.y,
+		 (unsigned long)region.origin.z, (unsigned long)level, (unsigned long)slice, (unsigned long)bytesPerRow,
+		 (unsigned long)bytesPerImage, bytes, (unsigned long)[self width], (unsigned long)[self height],
+		 (unsigned long)[self pixelFormat], (unsigned long)[self textureType], hakios_metal_texture_levels(_texture),
+		 hakios_metal_texture_bytes_per_pixel(_texture), (unsigned long long)hakios_metal_texture_allocated_bytes(_texture));
+	[self hakiosReplaceRegion:region mipmapLevel:level slice:slice withBytes:bytes bytesPerRow:bytesPerRow bytesPerImage:bytesPerImage];
+	hm_crash_doing[0] = 0;
+}
+
+- (void)hakiosReplaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)bytes
+		bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage
+{
 	/* a 2D array's layer SLICE, or a cube's face: the core's slice copy, one slice at the layer */
 	if (hm_layered(hakios_metal_texture_type(_texture))) {
 		if (hakios_metal_texture_replace_3d(_texture, (unsigned)level, (unsigned)region.origin.x, (unsigned)region.origin.y, (unsigned)slice, (unsigned)region.size.width,

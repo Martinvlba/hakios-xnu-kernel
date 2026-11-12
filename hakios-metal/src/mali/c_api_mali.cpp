@@ -695,9 +695,13 @@ const MaliFormat kFormats[] = {
     { 260, 167u << 12 | 16, 4 },
     // ASTC, LDR (Metal 204..217) and sRGB (186..199), 16 bytes a block: on Valhall the format is the one it decodes to
     // (RGBA16F; sRGB RGBA8), the block size in the plane descriptor ("ASTC 2D Plane", describe())
+    // (11-13: METAL'S NUMBERS HAVE A GAP after 6x6 -- 204..208 are 4x4..6x6, 209 is not a format, 210..218 are 8x5..12x12
+    // (sRGB: 186..190, 192..200). Counted straight through, every block size from 8x5 up was the next one's: Weather's
+    // radar tiles, 512x512 ASTC 8x8 (212), were taken for 10x5 -- 103 rows of blocks read from the 64 the application
+    // gave, and it died in the copy, three times in the tester's hands)
 #define ASTC(n, w, h) { 204 + n, 223u << 12 | 0, 16, w, h }, { 186 + n, 187u << 12 | 0 | 1u << 20, 16, w, h }
-    ASTC(0, 4, 4), ASTC(1, 5, 4), ASTC(2, 5, 5), ASTC(3, 6, 5), ASTC(4, 6, 6), ASTC(5, 8, 5), ASTC(6, 8, 6), ASTC(7, 8, 8),
-    ASTC(8, 10, 5), ASTC(9, 10, 6), ASTC(10, 10, 8), ASTC(11, 10, 10), ASTC(12, 12, 10), ASTC(13, 12, 12),
+    ASTC(0, 4, 4), ASTC(1, 5, 4), ASTC(2, 5, 5), ASTC(3, 6, 5), ASTC(4, 6, 6), ASTC(6, 8, 5), ASTC(7, 8, 6), ASTC(8, 8, 8),
+    ASTC(9, 10, 5), ASTC(10, 10, 6), ASTC(11, 10, 8), ASTC(12, 10, 10), ASTC(13, 12, 10), ASTC(14, 12, 12),
 #undef ASTC
 };
 // A COLOUR ATTACHMENT'S FORMAT: the render target's word 1 (write-back format, linear block, sRGB, swizzle) for the
@@ -3428,6 +3432,19 @@ copyRows(hakios_metal_texture *t, unsigned x, unsigned y, unsigned w, unsigned h
     }
     uint8_t *base = t->pixels() + t->levelOffset(level);
     uint32_t stride = t->levelStride(level);
+    {
+        // (11-13) THE TEXTURE'S OWN MEMORY: a copy that would run past it is refused with its numbers -- Weather died in
+        // this memcpy as its radar map came up, at the first address after a mapping
+        const uint64_t rows = (uint64_t)(y + h + t->bh - 1) / t->bh, cols = (uint64_t)(x + w + t->bw - 1) / t->bw;
+        const uint64_t end = t->offset + t->levelOffset(level) + (rows ? rows - 1 : 0) * stride + cols * t->bytes;
+        if (h != 0 && w != 0 && end > t->bo.size) {
+            fail("a texture copy past the texture's memory: %ux%u at (%u, %u) of level %u, MTLPixelFormat %u, rows %u bytes "
+                "apart from %llu + %llu: it would end at %llu of %llu bytes", w, h, x, y, level, t->format, stride,
+                (unsigned long long)t->offset, (unsigned long long)t->levelOffset(level), (unsigned long long)end,
+                (unsigned long long)t->bo.size);
+            return -1;
+        }
+    }
     if (t->bw > 1 || t->bh > 1) {
         // a compressed format: the region in whole blocks (its edge blocks may be partly past the level), rows of blocks
         if (x % t->bw || y % t->bh) {
