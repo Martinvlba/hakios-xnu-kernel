@@ -1002,12 +1002,13 @@ half_value(uint16_t h)
 static int
 float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
 {
-	static const struct { unsigned format, n; const char *name; } kinds[2] = { { 65, 2, "RG16Float" }, { 25, 1, "R16Float" } };
+	static const struct { unsigned format, n; const char *name; } kinds[3] = { { 65, 2, "RG16Float" }, { 25, 1, "R16Float" },
+	    { 115, 4, "RGBA16Float" } };
 	int ok = 1;
 
-	for (int k = 0; k < 2; k++) {
+	for (int k = 0; k < 3; k++) {
 		hakios_metal_texture *t = hakios_metal_texture_new(d, 2, kinds[k].format, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
-		static uint16_t px[64 * 64 * 2];
+		static uint16_t px[64 * 64 * 4];
 		struct hakios_metal_render_pass pass;
 		unsigned cleared = 0, drawn = 0, n = kinds[k].n;
 		int st1 = -1, st2 = -1;
@@ -1024,6 +1025,8 @@ float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_pr
 		pass.store_action = 1;
 		pass.clear_color[0] = 0.25;
 		pass.clear_color[1] = 0.75;
+		pass.clear_color[2] = 0.125;            /* (halves 0x3000 and 0x3c00: an RGBA16Float's second word) */
+		pass.clear_color[3] = 1;
 		cb = hakios_metal_cb_new(q);
 		if (hakios_metal_cb_clear(cb, &pass) == 0) {
 			hakios_metal_cb_commit(cb, NULL, NULL);
@@ -1031,7 +1034,10 @@ float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_pr
 			st1 = hakios_metal_cb_status(cb);
 			memset(px, 0xee, sizeof(px));
 			hakios_metal_texture_read(t, 0, 0, 64, 64, px, 64 * 2 * n);
-			for (unsigned i = 0; i < 4096; i++) cleared += px[i * n] == 0x3400 && (n == 1 || px[i * n + 1] == 0x3a00);
+			for (unsigned i = 0; i < 4096; i++) {
+				cleared += px[i * n] == 0x3400 && (n == 1 || px[i * n + 1] == 0x3a00) &&
+				    (n < 4 || (px[i * n + 2] == 0x3000 && px[i * n + 3] == 0x3c00));
+			}
 		} else {
 			printf("mali_draw_test: a %s colour attachment: the clear refused: %s\n", kinds[k].name, hakios_metal_error());
 		}
@@ -1046,7 +1052,9 @@ float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_pr
 			hakios_metal_texture_read(t, 0, 0, 64, 64, px, 64 * 2 * n);
 			for (unsigned i = 0; i < 4096; i++) {
 				float r = half_value(px[i * n]) - 32.0f / 255.0f, g = n == 1 ? 0 : half_value(px[i * n + 1]) - 64.0f / 255.0f;
-				drawn += r > -0.004f && r < 0.004f && g > -0.004f && g < 0.004f;
+				float b = n < 4 ? 0 : half_value(px[i * n + 2]) - 128.0f / 255.0f, a = n < 4 ? 0 : half_value(px[i * n + 3]) - 1.0f;
+				drawn += r > -0.004f && r < 0.004f && g > -0.004f && g < 0.004f && b > -0.004f && b < 0.004f && a > -0.004f &&
+				    a < 0.004f;
 			}
 		} else {
 			printf("mali_draw_test: a %s colour attachment: the draw refused: %s\n", kinds[k].name, hakios_metal_error());
@@ -1058,6 +1066,60 @@ float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_pr
 		ok = ok && st1 == HAKIOS_METAL_COMPLETED && st2 == HAKIOS_METAL_COMPLETED && cleared == 4096 && drawn == 4096;
 		hakios_metal_texture_free(t);
 	}
+	return ok;
+}
+
+/* 7b+. A WIDE TARGET AMONG OTHERS (11-13): RGBA8, RGBA16Float, RGBA8 cleared in one pass -- the RGBA16Float takes two of
+ * the tile buffer's kilobytes, so the third target's part starts further on: each must come back its own clear */
+static int
+wide_among_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	const unsigned rt = 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET;
+	hakios_metal_texture *a = hakios_metal_texture_new(d, 2, 70, 64, 64, rt), *w = hakios_metal_texture_new(d, 2, 115, 64, 64, rt);
+	hakios_metal_texture *c = hakios_metal_texture_new(d, 2, 70, 64, 64, rt);
+	struct hakios_metal_render_pass pass;
+	static uint32_t px[64 * 64];
+	static uint16_t hx[64 * 64 * 4];
+	unsigned ra = 0, rw = 0, rc = 0;
+	int ok;
+	hakios_metal_cb *cb;
+
+	if (a == NULL || w == NULL || c == NULL) {
+		printf("mali_draw_test: a wide target among others: no texture: %s: FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = a;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = 1;                /* red */
+	pass.clear_color[3] = 1;
+	pass.more[0].texture = w;
+	pass.more[0].load_action = 2;
+	pass.more[0].store_action = 1;
+	pass.more[0].clear_color[0] = 0.25;
+	pass.more[0].clear_color[1] = 0.75;
+	pass.more[0].clear_color[2] = 0.125;
+	pass.more[0].clear_color[3] = 1;
+	pass.more[1].texture = c;
+	pass.more[1].load_action = 2;
+	pass.more[1].store_action = 1;
+	pass.more[1].clear_color[2] = pass.more[1].clear_color[3] = 1;      /* blue */
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_clear(cb, &pass) != 0) printf("mali_draw_test: a wide target among others: refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "a wide target among others");
+	hakios_metal_texture_read(a, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 4096; i++) ra += px[i] == 0xff0000ffu;
+	hakios_metal_texture_read(c, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 4096; i++) rc += px[i] == 0xffff0000u;
+	hakios_metal_texture_read(w, 0, 0, 64, 64, hx, 512);
+	for (unsigned i = 0; i < 4096; i++) rw += hx[i * 4] == 0x3400 && hx[i * 4 + 1] == 0x3a00 && hx[i * 4 + 2] == 0x3000 && hx[i * 4 + 3] == 0x3c00;
+	ok = ok && ra == 4096 && rw == 4096 && rc == 4096;
+	printf("mali_draw_test: a wide target among others: RGBA8 %u red, RGBA16Float %u its clear (first %04x %04x %04x %04x), RGBA8 "
+	    "%u blue (of 4096): %s\n", ra, rw, hx[0], hx[1], hx[2], hx[3], rc, ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(a);
+	hakios_metal_texture_free(w);
+	hakios_metal_texture_free(c);
 	return ok;
 }
 
@@ -1450,6 +1512,7 @@ main(int argc, char **argv)
 	right = float_target_test(d, q, flat) && right;
 	right = raw_float_target_test(d, q, flat) && right;
 	right = raw_blend_test(d, q) && right;
+	right = wide_among_test(d, q) && right;
 	right = layered_test(d, q, flat) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;
