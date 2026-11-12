@@ -27,6 +27,9 @@
  *                         in it; no addresses)
  *   wifipower on|off      the radio on or off as Settings' switch has wifid ask (Apple80211 POWER), and
  *                         its state read back
+ *   leavejoin             as wrongjoin, after Apple80211's DISASSOCIATE 10 ms before -- what Settings' join after
+ *                         "Forget" has wifid send (the kernel's log then says whether a "link down" came after the
+ *                         ASSOCIATE: wifid takes that for the join failing)
  *   wrongjoin             ask the radio to join the network it is on with a passphrase that is
  *                         wrong on purpose, through the request wifid uses (Apple80211's
  *                         ASSOCIATE), and say what the kernel answers: Apple80211's result number
@@ -527,7 +530,7 @@ wifipower(bool on)
 }
 
 static void
-wrongjoin(void)
+wrongjoin(bool leave_first)
 {
 	static const char wrong[] = "not-the-passphrase-0";     /* (a passphrase nobody has: the test is that it fails) */
 	uint8_t ssid[32], assoc[592];
@@ -547,6 +550,17 @@ wrongjoin(void)
 		return;
 	}
 	length = request.length;
+	if (leave_first) {
+		uint8_t none[8] = { 0 };
+
+		memset(&request, 0, sizeof(request));
+		strlcpy(request.name, "en0", sizeof(request.name));
+		request.type = 22;                      /* DISASSOCIATE, as wifid sends it: 8 bytes */
+		request.length = sizeof(none);
+		request.data = none;
+		printf("net_test: leavejoin: DISASSOCIATE: %s\n", ioctl(s, SIOCSA80211, &request) == 0 ? "answered" : strerror(errno));
+		usleep(10000);
+	}
 	/* the layout of Darwin userland 16.5 (drivers/wifi/hakios.apple80211.c of the kernel): version, mode, authentication lower and
 	 * upper, the name's length and the name, the access point (none: any), the key's version, length and kind (10:
 	 * a passphrase as typed), the key */
@@ -631,7 +645,9 @@ main(int argc, char **argv)
 			} else if (strcmp(step, "watch") == 0 && i + 1 < argc) {
 				watch(atof(argv[++i]));
 			} else if (strcmp(step, "wrongjoin") == 0) {
-				wrongjoin();
+				wrongjoin(false);
+			} else if (strcmp(step, "leavejoin") == 0) {
+				wrongjoin(true);
 			} else if (strcmp(step, "wifipower") == 0 && i + 1 < argc) {
 				wifipower(strcmp(argv[++i], "on") == 0);
 			} else {

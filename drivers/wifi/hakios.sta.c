@@ -123,8 +123,27 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 			}
 			lck_mtx_unlock(&sta_lock);
 		} else if (leave) {
+			/*
+			 * "Link down" only for a link there was, and not when a join is already waiting: Settings' join after
+			 * "Forget" is wifid's DISASSOCIATE and, 10 ms later, its ASSOCIATE -- the leave took ~28 ms, so a link-down
+			 * said for it came AFTER the ASSOCIATE, which wifid reads as that join failing; the join came through 7 s
+			 * later and Settings never said "joined" (the tester, 11-11; amp2-ear 276.087-276.116 s).
+			 */
+			struct hakios_sta_state *state = kalloc_data(sizeof(*state), Z_WAITOK | Z_ZERO);
+			bool was_joined = true, join_waits;
+
+			if (state != NULL) {
+				ops->state(state);
+				was_joined = state->phase == HAKIOS_STA_JOINED;
+				kfree_data(state, sizeof(*state));
+			}
 			ops->leave();
-			hakios_apple80211_event(HAKIOS_STA_LINK, 0);
+			lck_mtx_lock(&sta_lock);
+			join_waits = asked_join;
+			lck_mtx_unlock(&sta_lock);
+			if (was_joined && !join_waits) {
+				hakios_apple80211_event(HAKIOS_STA_LINK, 0);
+			}
 		} else if (do_join) {
 			error = ops->join(&join);
 			bzero(&join, sizeof(join));
