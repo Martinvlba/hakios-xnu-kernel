@@ -476,6 +476,7 @@ struct hakios_metal_program {
     // the targets whose blend fixed function cannot do, blended in the fragment shader instead (compileFetch compiles it
     // again with mali_fragment_compile; their equation is a replace that reads the tile buffer)
     mali_shader_blend shader_blend = {};
+    bool rt_blend_on[4] = {};                   // blending enabled at colour attachment n (hakios_metal_program_set_blend*)
     std::string fetch_refusal;
     bool blend_reads_dest = false;
     std::string blend_refusal;
@@ -703,11 +704,12 @@ const MaliFormat kFormats[] = {
 // blend descriptors' and LD_TILE's conversion), converted at write-back. Metal names packed formats from the low bits:
 // BGRA8, BGR5A1 and B5G6R5 all have blue first, hence the swizzle.
 constexpr uint32_t kRtFloat = 1u << 30;       // (not the descriptor's: a float target, see below)
+constexpr uint32_t kRtRaw = 1u << 29;         // (not the descriptor's: a raw 32-bit target, R32Float)
 bool
 rtFormat(unsigned f, uint32_t &rt1)
 {
     uint32_t wb;
-    bool bgra, srgb = f == 71 || f == 81, flt = false;
+    bool bgra, srgb = f == 71 || f == 81, flt = false, raw = false;
     switch (f) {
     case 70: case 71: wb = 19; bgra = false; break;     // R8G8B8A8
     case 80: case 81: wb = 19; bgra = true; break;
@@ -723,16 +725,25 @@ rtFormat(unsigned f, uint32_t &rt1)
     // format's (rtBlend). kRtFloat marks the word for emitDraw, which takes it out again.
     case 25: wb = 16; bgra = false; flt = true; break;  // R16Float
     case 65: wb = 17; bgra = false; flt = true; break;  // RG16Float
+    // R32Float (11-12 night: WebKit's GPU process draws its paths' coverage into one): no tile-buffer format of its
+    // own -- raw, 32 bits as they are (internal RAW32, written back as RAW32; Mesa's get_rt_formats for a format that
+    // is not blendable). Opaque writes only: the fixed-function blend does not know such a target.
+    case 55: wb = 3; bgra = false; raw = true; break;
     default: return false;
     }
     uint32_t swizzle = bgra ? (2 | 1 << 3 | 0 << 6 | 3 << 9) : (0 | 1 << 3 | 2 << 6 | 3 << 9);
-    rt1 = wb << 3 | 2u << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16 | (flt ? kRtFloat : 0u);
+    rt1 = wb << 3 | 2u << 8 | (srgb ? 1u << 14 : 0) | swizzle << 16 | (flt ? kRtFloat : 0u) | (raw ? kRtRaw : 0u);
     return true;
 }
 // the render target's internal format (word 0, bits 26..), the blend descriptor's memory format, and a clear colour
 // as the tile buffer holds it, for a target whose word 1 is RT1
-inline uint32_t rtInternal(uint32_t rt1) { return (rt1 & kRtFloat) ? (rt1 >> 3) & 31 : 1; }
-inline uint32_t rtBlend(uint32_t rt1) { return !(rt1 & kRtFloat) ? 237u << 12 : ((rt1 >> 3) & 31) == 16 ? 199u << 12 : 207u << 12; }
+inline uint32_t rtInternal(uint32_t rt1) { return (rt1 & kRtRaw) ? 34 : (rt1 & kRtFloat) ? (rt1 >> 3) & 31 : 1; }
+inline uint32_t
+rtBlend(uint32_t rt1)
+{
+    if (rt1 & kRtRaw) return 167u << 12 | 16;                   // R32F, as a texture of it is named
+    return !(rt1 & kRtFloat) ? 237u << 12 : ((rt1 >> 3) & 31) == 16 ? 199u << 12 : 207u << 12;
+}
 inline uint32_t
 halfOf(double v)
 {
@@ -749,6 +760,12 @@ uint8_t unorm8(double v);
 inline uint32_t
 rtClear(uint32_t rt1, const double *k)
 {
+    if (rt1 & kRtRaw) {
+        float f = (float)k[0];
+        uint32_t bits;
+        memcpy(&bits, &f, 4);
+        return bits;
+    }
     if (rt1 & kRtFloat) {
         uint32_t r = halfOf(k[0]);
         return ((rt1 >> 3) & 31) == 16 ? r | r << 16 : r | halfOf(k[1]) << 16;
@@ -1224,7 +1241,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         }
     }
     rt[0] = rtInternal(dj.rt1) << 26;                                          // internal format (R8G8B8A8, or a float one)
-    rt[1] = (dj.rt1 & ~kRtFloat) | (dj.write ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);   // clean tiles written too
+    rt[1] = (dj.rt1 & ~(kRtFloat | kRtRaw)) | (dj.write ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);   // clean tiles written too
     // (multisample: written back layered, a plane a sample, rt[11] apart)
     *(uint64_t *)&rt[8] = dj.target_va;
     rt[10] = dj.row_bytes;
@@ -1236,7 +1253,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         const DrawJob::More &m = dj.more[i - 1];
         auto *r = rt + 16 * i;
         r[0] = rtInternal(m.rt1) << 26 | (1024 * i / 16) << 4;
-        r[1] = (m.rt1 & ~kRtFloat) | (m.write && !m.elide ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);
+        r[1] = (m.rt1 & ~(kRtFloat | kRtRaw)) | (m.write && !m.elide ? 1u : 0u) | 1u << 31 | (dj.samples > 1 ? 3u << 12 : 0u);
         *(uint64_t *)&r[8] = m.va;
         r[10] = m.row_bytes;
         r[11] = m.row_bytes * dj.height;
@@ -3982,7 +3999,8 @@ bool
 compileFetch(hakios_metal_program *p)
 {
     std::lock_guard<std::mutex> g(p->lock);
-    bool blended = p->shader_blend.mask != 0;
+    bool blended = p->shader_blend.mask != 0 || p->shader_blend.format[0] || p->shader_blend.format[1] ||
+        p->shader_blend.format[2] || p->shader_blend.format[3];   // (a float target's format: the fetch's conversion)
     if ((!p->fetch_described && !blended) || p->fetch_compiled) {
         return p->fetch_refusal.empty();
     }
@@ -4121,9 +4139,14 @@ encodeBlend(int enabled, unsigned rgb_op, unsigned alpha_op, unsigned src_rgb, u
     // in the shader instead: any operation and factor -- the blend colour from the draw's push constants
     // (MALI_DRAW_BLEND_COLOR), the second source the fragment function's [[color(n), index(1)]] (nir_lower_blend)
     auto shaderable = [](unsigned f) { return f <= 18; };
-    if (why != nullptr && shader != nullptr && rgb_op <= 4 && alpha_op <= 4 && shaderable(src_rgb) && shaderable(dst_rgb) &&
-        shaderable(src_alpha) && shaderable(dst_alpha)) {
+    const bool can_shade = shader != nullptr && rgb_op <= 4 && alpha_op <= 4 && shaderable(src_rgb) && shaderable(dst_rgb) &&
+        shaderable(src_alpha) && shaderable(dst_alpha);
+    if (can_shade) {
+        // (kept whichever way it is blended: a raw target's blend is the shader's even when fixed function could --
+        // rawBlend)
         *shader = { rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask };
+    }
+    if (why != nullptr && can_shade) {
         *in_shader = true;
         equation = 0x132 | 0x132 << 12 | 0xfu << 28;    // the shader's result as it is (it applied the write mask)
         reads_dest = true;
@@ -4141,6 +4164,44 @@ encodeBlend(int enabled, unsigned rgb_op, unsigned alpha_op, unsigned src_rgb, u
 }
 }  // namespace
 
+namespace {
+// A RAW COLOUR ATTACHMENT (R32Float: the tile buffer holds its 32 bits as they are, and the fixed-function blend does
+// not know such a target) with blending on: the blend computed in the fragment shader (nir_lower_blend over the
+// target's own format), the hardware writing the result as it is -- as when fixed function has no such equation
+void
+rawBlend(hakios_metal_program *p, unsigned i)
+{
+    if (i > 3 || p->shader_blend.format[i] != 55 || !p->rt_blend_on[i]) {
+        return;
+    }
+    p->shader_blend.mask |= 1u << i;
+    if (i == 0) {
+        p->blend_equation = 0x132 | 0x132 << 12 | 0xfu << 28;
+        p->blend_reads_dest = true;
+        p->blend_refusal.clear();
+    } else {
+        p->more_blend_equation[i - 1] = 0x132 | 0x132 << 12 | 0xfu << 28;
+        p->more_blend_reads_dest[i - 1] = true;
+        p->more_blend_refusal[i - 1].clear();
+    }
+}
+}  // namespace
+
+// colour attachment INDEX's MTLPixelFormat, from the pipeline's descriptor (11-12 night): the ones that are not 8 bits a
+// channel are what the stage's compile and the blend go by
+void
+hakios_metal_program_set_attachment_format(hakios_metal_program *p, unsigned index, unsigned pixel_format)
+{
+    if (p == nullptr || index > 3) {
+        return;
+    }
+    // (R32Float alone: the half-float targets read back right with the tile buffer's RGBA8 conversion as before, and
+    // a format here sends the program through the compile that blending in the shader takes -- with RG16Float told,
+    // the Weather widget went black, webkit1/webkit2)
+    p->shader_blend.format[index] = pixel_format == 55 ? pixel_format : 0;
+    rawBlend(p, index);
+}
+
 void
 hakios_metal_program_set_blend(hakios_metal_program *p, int enabled, unsigned rgb_op, unsigned alpha_op, unsigned src_rgb,
     unsigned dst_rgb, unsigned src_alpha, unsigned dst_alpha, unsigned write_mask)
@@ -4149,10 +4210,12 @@ hakios_metal_program_set_blend(hakios_metal_program *p, int enabled, unsigned rg
         return;
     }
     p->blend_enabled = enabled != 0;
+    p->rt_blend_on[0] = enabled != 0;
     bool in_shader = false;
     encodeBlend(enabled, rgb_op, alpha_op, src_rgb, dst_rgb, src_alpha, dst_alpha, write_mask, p->blend_equation,
                 p->blend_reads_dest, p->blend_refusal, &p->shader_blend.rt[0], &in_shader);
     p->shader_blend.mask = (p->shader_blend.mask & ~1u) | (in_shader ? 1u : 0u);
+    rawBlend(p, 0);
 }
 
 int
@@ -4171,6 +4234,8 @@ hakios_metal_program_set_blend_at(hakios_metal_program *p, unsigned index, int e
                     p->more_blend_equation[index - 1], p->more_blend_reads_dest[index - 1], p->more_blend_refusal[index - 1],
                     &p->shader_blend.rt[index], &in_shader);
         p->shader_blend.mask = (p->shader_blend.mask & ~(1u << index)) | (in_shader ? 1u << index : 0u);
+        p->rt_blend_on[index] = enabled != 0;
+        rawBlend(p, index);
     }
     return 0;
 }
@@ -6191,6 +6256,7 @@ hakios_metal_program_specialize(hakios_metal_program *base, const void *fs_bitco
         p->fetch = base->fetch;
         p->fetch_described = base->fetch_described;
         p->shader_blend = base->shader_blend;
+        for (unsigned i = 0; i < 4; i++) p->rt_blend_on[i] = base->rt_blend_on[i];
         p->blend_reads_dest = base->blend_reads_dest;
         p->blend_refusal = base->blend_refusal;
         for (unsigned i = 0; i < 3; i++) {
@@ -6216,7 +6282,8 @@ hakios_metal_program_specialize(hakios_metal_program *base, const void *fs_bitco
     p->known.assign((const uint8_t *)bytes, (const uint8_t *)bytes + length);
     // both stages (the vertex stage again: the fragment stage is compiled against its varyings, which no cache keeps),
     // as compileFetch would at the first draw -- here, in the caller's background, and then not again
-    bool blended = p->shader_blend.mask != 0;
+    bool blended = p->shader_blend.mask != 0 || p->shader_blend.format[0] || p->shader_blend.format[1] ||
+        p->shader_blend.format[2] || p->shader_blend.format[3];   // (a float target's format: the fetch's conversion)
     mali_kernel_binary vs = {}, fs = {};
     char why[512] = "";
     uint64_t key = cacheKey(p->vs_bitcode.data(), p->vs_bitcode.size(), p->vs_constants, p->fs_bitcode.data(),

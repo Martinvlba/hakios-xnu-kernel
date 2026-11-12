@@ -1693,6 +1693,8 @@ nir_block_of(struct air_ctx *c, const struct air_block *b)
    return n;
 }
 
+static void aggregate_store_return(struct air_ctx *c, const struct air_val *value, const struct air_type *t, unsigned *k);
+
 static bool
 emit_return(struct air_ctx *c, const struct air_inst *in)
 {
@@ -1706,6 +1708,12 @@ emit_return(struct air_ctx *c, const struct air_inst *in)
     * caller passed, because a NIR call has no destination. The entry point
     * has no such parameter and its return is its render targets, below.
     */
+   if (c->ret_derefs) {
+      /* a struct or array returned from a function called in the module: member by member (WebKit's path_cubic) */
+      unsigned k = 0;
+      aggregate_store_return(c, v, c->ret_type, &k);
+      return true;
+   }
    if (c->ret_deref) {
       nir_def *d = air_get_ssa(c, in->operands[0]);
       if (!d)
@@ -1829,6 +1837,62 @@ aggregate_leaves(const struct air_type *t)
    return n;
 }
 
+/* the scalars and vectors of T, in order, into OUT (at most MOST) */
+static void
+aggregate_leaf_types(const struct air_type *t, const struct air_type **out, unsigned *n, unsigned most)
+{
+   if (!type_is_aggregate(t)) {
+      if (*n < most)
+         out[*n] = t;
+      (*n)++;
+      return;
+   }
+   unsigned members = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   for (unsigned i = 0; i < members; i++)
+      aggregate_leaf_types(t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem, out, n, most);
+}
+
+/* the variable type a value of T is returned through */
+static const struct glsl_type *
+return_glsl_type(struct air_ctx *c, const struct air_type *t)
+{
+   unsigned bits = t->kind == AIR_TYPE_POINTER ? 32 : air_nir_bit_size(c, t);
+   return glsl_vector_type(bits == 1 ? GLSL_TYPE_BOOL : bits == 8 ? GLSL_TYPE_UINT8 : bits == 16 ? GLSL_TYPE_FLOAT16 :
+                           bits == 64 ? GLSL_TYPE_UINT64 : GLSL_TYPE_UINT, air_nir_components(t));
+}
+
+#define AIR_MAX_RETURN_LEAVES 64
+
+/* a returned aggregate's leaves stored through the callee's out-parameters (emit_return); *K counts them */
+static void
+aggregate_store_return(struct air_ctx *c, const struct air_val *value, const struct air_type *t, unsigned *k)
+{
+   if (!type_is_aggregate(t)) {
+      if (*k < c->num_ret_derefs && value && value->kind == AIR_VAL_SSA && value->def &&
+          value->def->num_components == air_nir_components(t))
+         nir_store_deref(&c->b, c->ret_derefs[*k], value->def, nir_component_mask(value->def->num_components));
+      (*k)++;                           /* (an undefined member: its variable is left as it is) */
+      return;
+   }
+   unsigned members = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   for (unsigned i = 0; i < members; i++)
+      aggregate_store_return(c, value && value->kind == AIR_VAL_AGG && i < value->num_elems ? value->elems[i] : NULL,
+                             t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem, k);
+}
+
+/* the caller's side: the aggregate put together from the variables the callee stored into */
+static struct air_val *
+aggregate_load_return(struct air_ctx *c, const struct air_type *t, nir_variable **vars, unsigned *k)
+{
+   if (!type_is_aggregate(t))
+      return air_val_ssa(c, nir_load_var(&c->b, vars[(*k)++]));
+   unsigned members = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   struct air_val *agg = air_val_agg(c, members);
+   for (unsigned i = 0; i < members; i++)
+      agg->elems[i] = aggregate_load_return(c, t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem, vars, k);
+   return agg;
+}
+
 static void
 aggregate_declare_params(struct air_ctx *c, const struct air_type *t, nir_function *fn, unsigned *idx)
 {
@@ -1925,6 +1989,18 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    const struct air_type *rt = f->fn_type->elem;   /* FUNCTION: the return type */
    bool has_ret = rt && rt->kind != AIR_TYPE_VOID;
    unsigned nparams = 2 * f->num_args + (has_ret ? 1 : 0);   /* (at most: an offset parameter for each argument) */
+   const bool agg_ret = has_ret && type_is_aggregate(rt);
+   const struct air_type *ret_leaf[AIR_MAX_RETURN_LEAVES];
+   unsigned ret_leaves = 0;
+   if (agg_ret) {
+      aggregate_leaf_types(rt, ret_leaf, &ret_leaves, AIR_MAX_RETURN_LEAVES);
+      if (ret_leaves == 0 || ret_leaves > AIR_MAX_RETURN_LEAVES) {
+         air_error(c, "intrinsic: %s returns an aggregate of %u members", f->base.name ? f->base.name : "a function",
+                   ret_leaves);
+         return NULL;
+      }
+      nparams += ret_leaves;
+   }
    for (unsigned i = 0; i < f->num_args; i++)
       if (type_is_aggregate(f->args[i].type))
          nparams += aggregate_leaves(f->args[i].type);         /* (an aggregate's members, a parameter each) */
@@ -1935,7 +2011,15 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
 
    unsigned idx = 0;
    const struct glsl_type *ret_glsl = NULL;
-   if (has_ret) {
+   if (agg_ret) {
+      for (unsigned k = 0; k < ret_leaves; k++)
+         fn->params[idx++] = (nir_parameter){
+            .num_components = 1, .bit_size = 32,
+            .is_return = true,
+            .mode = nir_var_function_temp,
+            .type = return_glsl_type(c, ret_leaf[k]),
+         };
+   } else if (has_ret) {
       unsigned bits = air_nir_bit_size(c, rt);
       unsigned comps = air_nir_components(rt);
       ret_glsl = glsl_vector_type(bits == 16 ? GLSL_TYPE_FLOAT16 :
@@ -1982,6 +2066,9 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    struct hash_table *sv = c->values, *sb = c->blocks,
                      *sp = c->phi_cursors, *sr = c->phi_regs, *sbr = c->phi_bind_regs;
    nir_deref_instr *saved_ret = c->ret_deref;
+   nir_deref_instr **saved_rets = c->ret_derefs;
+   unsigned saved_num_rets = c->num_ret_derefs;
+   const struct air_type *saved_ret_type = c->ret_type;
 
    c->fn = f;
    c->values = _mesa_pointer_hash_table_create(c->mem_ctx);
@@ -1997,12 +2084,23 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
     * is what the corpus's reader count caught, 456 falling to 454. */
    c->b.impl->structured = false;
    c->ret_deref = NULL;
+   c->ret_derefs = NULL;
+   c->num_ret_derefs = 0;
+   c->ret_type = NULL;
 
    /* this function's own globals, built in its own builder */
    materialise_globals(c);
 
    bool ok = true;
-   if (has_ret) {
+   if (agg_ret) {
+      c->ret_derefs = rzalloc_array(c->mem_ctx, nir_deref_instr *, ret_leaves);
+      c->num_ret_derefs = ret_leaves;
+      c->ret_type = rt;
+      for (unsigned k = 0; k < ret_leaves; k++)
+         c->ret_derefs[k] = nir_build_deref_cast(&c->b, nir_load_param(&c->b, k), nir_var_function_temp,
+                                                 return_glsl_type(c, ret_leaf[k]), 0);
+      c->ret_deref = c->ret_derefs[0];
+   } else if (has_ret) {
       /* The caller passes the deref's own def and the callee casts it back,
        * which is the convention nir_functions.c documents: load_param is
        * replaced by the call's source at inline time and nir_opt_deref removes
@@ -2011,7 +2109,7 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
       c->ret_deref = nir_build_deref_cast(&c->b, nir_load_param(&c->b, 0),
                                           nir_var_function_temp, ret_glsl, 0);
    }
-   unsigned pidx = has_ret ? 1 : 0;
+   unsigned pidx = agg_ret ? ret_leaves : has_ret ? 1 : 0;
    for (unsigned i = 0; i < f->num_args && ok; i++) {
       if (!is_param[i]) {
          struct air_val *v = argv[i];
@@ -2050,6 +2148,9 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    c->phi_regs = sr;
    c->phi_bind_regs = sbr;
    c->ret_deref = saved_ret;
+   c->ret_derefs = saved_rets;
+   c->num_ret_derefs = saved_num_rets;
+   c->ret_type = saved_ret_type;
    return ok ? fn : NULL;
 }
 
@@ -2102,7 +2203,17 @@ air_call_in_module(struct air_ctx *c, const struct air_inst *in, const char *nam
    nir_variable *tmp = NULL;
    nir_call_instr *call = nir_call_instr_create(c->nir, fn);
    unsigned idx = 0;
-   if (has_ret) {
+   const bool agg_ret = has_ret && type_is_aggregate(rt);
+   nir_variable *ret_vars[AIR_MAX_RETURN_LEAVES];
+   if (agg_ret) {
+      const struct air_type *leaf[AIR_MAX_RETURN_LEAVES];
+      unsigned leaves = 0;
+      aggregate_leaf_types(rt, leaf, &leaves, AIR_MAX_RETURN_LEAVES);
+      for (unsigned k = 0; k < leaves && k < AIR_MAX_RETURN_LEAVES; k++) {
+         ret_vars[k] = nir_local_variable_create(c->b.impl, return_glsl_type(c, leaf[k]), "callret");
+         call->params[idx++] = nir_src_for_ssa(&nir_build_deref_var(&c->b, ret_vars[k])->def);
+      }
+   } else if (has_ret) {
       unsigned bits = air_nir_bit_size(c, rt);
       unsigned comps = air_nir_components(rt);
       const struct glsl_type *t =
@@ -2134,7 +2245,10 @@ air_call_in_module(struct air_ctx *c, const struct air_inst *in, const char *nam
    }
    nir_builder_instr_insert(&c->b, &call->instr);
 
-   if (has_ret)
+   if (agg_ret) {
+      unsigned k = 0;
+      air_set(c, &in->base, aggregate_load_return(c, rt, ret_vars, &k));
+   } else if (has_ret)
       air_set(c, &in->base, air_val_ssa(c, nir_load_var(&c->b, tmp)));
    return true;
 }

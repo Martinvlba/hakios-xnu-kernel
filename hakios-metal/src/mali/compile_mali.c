@@ -53,6 +53,9 @@ say(char *error, size_t error_size, const char *format, ...)
 	va_end(ap);
 }
 
+/* the colour attachments' formats for this thread's fragment compile (mali_fragment_compile's blend; NULL: RGBA8) */
+static __thread const struct mali_shader_blend *blend_formats;
+
 static nir_def *
 push_words(nir_builder *b, unsigned word, unsigned count, unsigned bit_size)
 {
@@ -281,11 +284,16 @@ lower_draw_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
 		value = nir_channel(b, nir_unpack_half_2x16(b, w), c & 1);
 		break;
 	}
-	case nir_intrinsic_load_rt_conversion_pan:
+	case nir_intrinsic_load_rt_conversion_pan: {
 		/* a framebuffer fetch's (LD_TILE) conversion: the tile buffer's format, as the blend descriptor's word 3 that
-		 * c_api_mali.cpp writes for every colour target it serves (R8G8B8A8 in the tile buffer) */
-		value = nir_imm_int(b, 237 << 12);
+		 * c_api_mali.cpp writes for every colour target it serves (R8G8B8A8 in the tile buffer; a float target's own
+		 * format: rtBlend there) */
+		unsigned rt = nir_intrinsic_base(in);
+		unsigned format = blend_formats != NULL && rt < 4 ? blend_formats->format[rt] : 0;
+
+		value = nir_imm_int(b, format == 55 ? (167 << 12 | 16) : 237 << 12);
 		break;
+	}
 	default:
 		return false;
 	}
@@ -630,7 +638,9 @@ lower_shader_blend(nir_shader *s, const struct mali_shader_blend *blend, struct 
 		nir_lower_blend_rt *rt = &o.rt[i];
 		const struct mali_blend_rt *m = i < 4 ? &blend->rt[i] : NULL;
 
-		rt->format = PIPE_FORMAT_R8G8B8A8_UNORM;
+		rt->format = blend->format[i < 4 ? i : 0] == 55 && i < 4 ? PIPE_FORMAT_R32_FLOAT :
+		    i < 4 && blend->format[i] == 25 ? PIPE_FORMAT_R16_FLOAT :
+		    i < 4 && blend->format[i] == 65 ? PIPE_FORMAT_R16G16_FLOAT : PIPE_FORMAT_R8G8B8A8_UNORM;
 		rt->colormask = 0xf;
 		rt->rgb = (nir_lower_blend_channel){ PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO };
 		rt->alpha = rt->rgb;
@@ -1049,8 +1059,10 @@ mali_fragment_compile(const void *bitcode, size_t size, const struct mali_consta
 	int r;
 
 	blend_now = blend;
+	blend_formats = blend;
 	r = mali_stage_compile(bitcode, size, constants, count, 1, vertex, out, error, error_size);
 	blend_now = NULL;
+	blend_formats = NULL;
 	return r;
 }
 

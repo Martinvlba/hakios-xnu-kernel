@@ -3427,6 +3427,7 @@ hm_compile_queue(void)
 		hakios_metal_program_set_blend(program, [c0 isBlendingEnabled] ? 1 : 0, (unsigned)[c0 rgbBlendOperation], (unsigned)[c0 alphaBlendOperation],
 					       (unsigned)[c0 sourceRGBBlendFactor], (unsigned)[c0 destinationRGBBlendFactor],
 					       (unsigned)[c0 sourceAlphaBlendFactor], (unsigned)[c0 destinationAlphaBlendFactor], (unsigned)[c0 writeMask]);
+		hakios_metal_program_set_attachment_format(program, 0, (unsigned)[c0 pixelFormat]);
 		for (unsigned i = 1; i < 8; i++) {
 			MTLRenderPipelineColorAttachmentDescriptor *c = [[descriptor colorAttachments] objectAtIndexedSubscript:i];
 
@@ -3437,6 +3438,16 @@ hm_compile_queue(void)
 							  (unsigned)[c alphaBlendOperation], (unsigned)[c sourceRGBBlendFactor],
 							  (unsigned)[c destinationRGBBlendFactor], (unsigned)[c sourceAlphaBlendFactor],
 							  (unsigned)[c destinationAlphaBlendFactor], (unsigned)[c writeMask]);
+			hakios_metal_program_set_attachment_format(program, i, (unsigned)[c pixelFormat]);
+			if ([c pixelFormat] == MTLPixelFormatR32Float || [c pixelFormat] == MTLPixelFormatRG16Float ||
+			    [c pixelFormat] == MTLPixelFormatR16Float) {
+				HM_ONCE("a pipeline's colour attachment %u is MTLPixelFormat %lu: blending %s (operations %lu/%lu, factors %lu "
+					"%lu / %lu %lu), write mask 0x%lx (the first such attachment)\n", i, (unsigned long)[c pixelFormat],
+					[c isBlendingEnabled] ? "on" : "off", (unsigned long)[c rgbBlendOperation],
+					(unsigned long)[c alphaBlendOperation], (unsigned long)[c sourceRGBBlendFactor],
+					(unsigned long)[c destinationRGBBlendFactor], (unsigned long)[c sourceAlphaBlendFactor],
+					(unsigned long)[c destinationAlphaBlendFactor], (unsigned long)[c writeMask]);
+			}
 		}
 	}
 	if ([descriptor label] != nil) {

@@ -1304,6 +1304,9 @@ int hakios_metal_program_set_samples(hakios_metal_program* p, unsigned samples) 
     return 0;
 }
 
+// (the Mali core's: colour attachments that are not 8 bits a channel; nothing to do with it here)
+void hakios_metal_program_set_attachment_format(hakios_metal_program*, unsigned, unsigned) {}
+
 int hakios_metal_program_set_blend_at(hakios_metal_program* p, unsigned index, int enabled, unsigned rgbOp, unsigned alphaOp, unsigned srcRgb,
                                       unsigned dstRgb, unsigned srcAlpha, unsigned dstAlpha, unsigned writeMask) {
     if (index >= kMaxColorOutputs) {
