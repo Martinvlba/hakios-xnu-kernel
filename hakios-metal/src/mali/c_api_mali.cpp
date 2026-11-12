@@ -1796,8 +1796,15 @@ openDraws(hakios_metal_device *d)
     // (HAKIOS_MALI_HEAP_CHUNKS=N: the heap's most chunks, 5 to 64 -- a test of incremental rendering, mali_draw_test)
     const char *most = getenv("HAKIOS_MALI_HEAP_CHUNKS");
     uint32_t max_chunks = most != nullptr && atoi(most) >= 5 && atoi(most) <= 64 ? (uint32_t)atoi(most) : 64;
+    // (11-13) THE HEAP'S FIRST CHUNKS: five (10 MB) for the window server, which draws the screen from its first frame;
+    // ONE for every other process -- with Metal for every process each client held 10 MB of the kernel's memory from its
+    // start, drawn or not (141 MB of them in an application sweep), and the heap grows by itself when a pass fills it
+    // (HakiosGPU's tiler out-of-memory answer, a chunk a time up to max_chunks). HAKIOS_MALI_HEAP_FIRST=N: N.
+    const char *prog = getprogname(), *first_env = getenv("HAKIOS_MALI_HEAP_FIRST");
+    uint32_t first_chunks = first_env != nullptr && atoi(first_env) >= 1 && atoi(first_env) <= 5 ? (uint32_t)atoi(first_env) :
+        prog != nullptr && strcmp(prog, "backboardd") == 0 ? 5 : 1;
     struct { uint32_t vm_id, initial, chunk_size, max_chunks, in_flight, handle; uint64_t ctx, first; } th =
-        { d->vm, 5, 2u << 20, max_chunks, 65535, 0, 0, 0 };
+        { d->vm, first_chunks, 2u << 20, max_chunks, 65535, 0, 0, 0 };
     if (d->call(0x4b /* TILER_HEAP_CREATE */, &th, sizeof(th)) != 0) {
         fail("HakiosGPU: no tiler heap (hakios-kernel with heaps, 11-05 or later)");
         return false;
