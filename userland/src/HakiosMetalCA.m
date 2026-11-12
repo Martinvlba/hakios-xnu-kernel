@@ -7053,6 +7053,20 @@ hm_blit_texture(hakios_metal_cb *cb, id object, const char *what)
 	if (to == NULL) {
 		return;
 	}
+	/* (11-13) between the layers of 2D arrays and cubes: the core's copy of one layer into one layer, where it is a
+	 * copy of bytes; its refusal otherwise */
+	if ((sourceSlice != 0 || destinationSlice != 0) && sourceOrigin.z == 0 && destinationOrigin.z == 0 && sourceSize.depth == 1 &&
+	    (sourceSlice == 0 || hm_layered(hakios_metal_texture_type(from))) &&
+	    (destinationSlice == 0 || hm_layered(hakios_metal_texture_type(to)))) {
+		if (hakios_metal_cb_blit_layer(cb, from, (unsigned)sourceLevel, (unsigned)sourceSlice, (unsigned)sourceOrigin.x,
+					       (unsigned)sourceOrigin.y, (unsigned)sourceSize.width, (unsigned)sourceSize.height, to,
+					       (unsigned)destinationLevel, (unsigned)destinationSlice, (unsigned)destinationOrigin.x,
+					       (unsigned)destinationOrigin.y) != 0) {
+			hm_print("refused: a texture copy of slice %lu into slice %lu: %s\n", (unsigned long)sourceSlice,
+				 (unsigned long)destinationSlice, hakios_metal_error());
+		}
+		return;
+	}
 	if (sourceSlice != 0 || destinationSlice != 0 || sourceOrigin.z != 0 || destinationOrigin.z != 0 || sourceSize.depth != 1) {
 		char why[160];
 
@@ -7080,17 +7094,16 @@ hm_blit_texture(hakios_metal_cb *cb, id object, const char *what)
 	      toTexture:(id)destinationTexture destinationSlice:(NSUInteger)destinationSlice
        destinationLevel:(NSUInteger)destinationLevel sliceCount:(NSUInteger)sliceCount levelCount:(NSUInteger)levelCount
 {
-	if (sliceCount != 1) {
-		hakios_metal_cb_refuse([_commandBuffer hakiosCommandBuffer], "a texture copy of several slices: one slice is served");
-		hm_print("refused: a texture copy of %lu slices: one slice is served\n", (unsigned long)sliceCount);
-		return;
-	}
-	for (NSUInteger l = 0; l < levelCount; l++) {
-		NSUInteger w = [sourceTexture width] >> (sourceLevel + l), h = [sourceTexture height] >> (sourceLevel + l);
+	/* (11-13: several slices are the one-slice copy, slice by slice) */
+	for (NSUInteger slice = 0; slice < sliceCount; slice++) {
+		for (NSUInteger l = 0; l < levelCount; l++) {
+			NSUInteger w = [sourceTexture width] >> (sourceLevel + l), h = [sourceTexture height] >> (sourceLevel + l);
 
-		[self copyFromTexture:sourceTexture sourceSlice:sourceSlice sourceLevel:sourceLevel + l sourceOrigin:MTLOriginMake(0, 0, 0)
-			   sourceSize:MTLSizeMake(w ? w : 1, h ? h : 1, 1) toTexture:destinationTexture destinationSlice:destinationSlice
-		     destinationLevel:destinationLevel + l destinationOrigin:MTLOriginMake(0, 0, 0)];
+			[self copyFromTexture:sourceTexture sourceSlice:sourceSlice + slice sourceLevel:sourceLevel + l
+				 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w ? w : 1, h ? h : 1, 1)
+				    toTexture:destinationTexture destinationSlice:destinationSlice + slice
+			     destinationLevel:destinationLevel + l destinationOrigin:MTLOriginMake(0, 0, 0)];
+		}
 	}
 }
 

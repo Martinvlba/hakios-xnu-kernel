@@ -999,6 +999,81 @@ half_value(uint16_t h)
 	return h & 0x8000 ? -v : v;
 }
 
+/* 7b''. an RG11B10Float colour attachment (92; 11-13): a clear to (0.25, 0.75, 0.125) -- the packed word 0x601d0340 --,
+ * then the flat draw (red 0x20/255, green 0x40/255, blue 0x80/255) loaded over it, each channel unpacked */
+static float
+small_float(uint32_t bits, unsigned mantissa_bits)
+{
+	unsigned e = bits >> mantissa_bits, m = bits & ((1u << mantissa_bits) - 1);
+	float f = (float)m / (float)(1u << mantissa_bits);
+
+	return e == 0 ? f / 16384.0f : (1.0f + f) * (e >= 15 ? (float)(1u << (e - 15)) : 1.0f / (float)(1u << (15 - e)));
+}
+
+static int
+packed_float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 92, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	static uint32_t px[64 * 64];
+	struct hakios_metal_render_pass pass;
+	unsigned cleared = 0, drawn = 0;
+	int st1 = -1, st2 = -1, ok;
+	hakios_metal_cb *cb;
+
+	if (t == NULL) {
+		printf("mali_draw_test: an RG11B10Float colour attachment: no texture: %s: FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = 0.25;
+	pass.clear_color[1] = 0.75;
+	pass.clear_color[2] = 0.125;
+	pass.clear_color[3] = 1;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_clear(cb, &pass) == 0) {
+		hakios_metal_cb_commit(cb, NULL, NULL);
+		hakios_metal_cb_wait(cb);
+		st1 = hakios_metal_cb_status(cb);
+		memset(px, 0xee, sizeof(px));
+		hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+		for (unsigned i = 0; i < 4096; i++) cleared += px[i] == 0x601d0340u;
+	} else {
+		printf("mali_draw_test: an RG11B10Float colour attachment: the clear refused: %s\n", hakios_metal_error());
+	}
+	hakios_metal_cb_free(cb);
+	{
+		uint32_t first = px[0];
+
+		pass.load_action = 1;
+		cb = hakios_metal_cb_new(q);
+		if (hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) == 0) {
+			hakios_metal_cb_commit(cb, NULL, NULL);
+			hakios_metal_cb_wait(cb);
+			st2 = hakios_metal_cb_status(cb);
+			memset(px, 0xee, sizeof(px));
+			hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+			for (unsigned i = 0; i < 4096; i++) {
+				float r = small_float(px[i] & 0x7ff, 6) - 32.0f / 255.0f, g = small_float((px[i] >> 11) & 0x7ff, 6) - 64.0f / 255.0f;
+				float b = small_float(px[i] >> 22, 5) - 128.0f / 255.0f;
+
+				drawn += r > -0.004f && r < 0.004f && g > -0.006f && g < 0.006f && b > -0.02f && b < 0.02f;
+			}
+		} else {
+			printf("mali_draw_test: an RG11B10Float colour attachment: the draw refused: %s\n", hakios_metal_error());
+		}
+		hakios_metal_cb_free(cb);
+		ok = st1 == HAKIOS_METAL_COMPLETED && st2 == HAKIOS_METAL_COMPLETED && cleared == 4096 && drawn == 4096;
+		printf("mali_draw_test: an RG11B10Float colour attachment: the clear status %d, %u of 4096 cleared (pixel 0 0x%08x, "
+		    "0x601d0340 expected); the draw status %d, %u of 4096 drawn (pixel 0 0x%08x): %s\n", st1, cleared, first, st2, drawn,
+		    px[0], ok ? "WORK" : "FAILED");
+	}
+	hakios_metal_texture_free(t);
+	return ok;
+}
+
 static int
 float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
 {
@@ -1383,6 +1458,40 @@ layered_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program
 		}
 		hakios_metal_cb_free(cb);
 	}
+	/* (11-13) copies between layers: the cube's face 3 into the array's layer 1, level 2 (16x16, whole); the array's
+	 * layer 2 into its layer 0, a 40x40 part at (8, 8) of level 0 (a row at a time); layer 2 itself as it was */
+	{
+		hakios_metal_cb *cb = hakios_metal_cb_new(q);
+		unsigned face = 0, part = 0, around = 0, source = 0;
+		int st = -1;
+		int asked = hakios_metal_cb_blit_layer(cb, cube, 0, 3, 0, 0, 16, 16, a, 2, 1, 0, 0) == 0 &&
+		    hakios_metal_cb_blit_layer(cb, a, 0, 2, 8, 8, 40, 40, a, 0, 0, 8, 8) == 0;
+
+		if (!asked) {
+			printf("mali_draw_test: copies between layers: refused: %s: FAILED\n", hakios_metal_error());
+			ok = 0;
+		} else {
+			hakios_metal_cb_commit(cb, NULL, NULL);
+			hakios_metal_cb_wait(cb);
+			st = hakios_metal_cb_status(cb);
+			hakios_metal_texture_read_3d(a, 2, 0, 0, 1, 16, 16, 1, got, 64, 0);
+			for (unsigned i = 0; i < 256; i++) face += got[i] == 0xff102033u;
+			hakios_metal_texture_read_3d(a, 0, 0, 0, 0, 64, 64, 1, got, 256, 0);
+			for (unsigned i = 0; i < 4096; i++) {
+				unsigned x = i % 64, y = i / 64;
+				if (x >= 8 && x < 48 && y >= 8 && y < 48) part += got[i] == (0xff000000u | 3 << 20 | 1 << 4);
+				else around += got[i] == (0xff000000u | 1 << 20 | 1 << 4);
+			}
+			hakios_metal_texture_read_3d(a, 0, 0, 0, 2, 64, 64, 1, got, 256, 0);
+			for (unsigned i = 0; i < 4096; i++) source += got[i] == (0xff000000u | 3 << 20 | 1 << 4);
+			printf("mali_draw_test: copies between layers: status %d; a cube's face into an array's layer 1 level 2: %u of 256; "
+			    "40x40 of layer 2 into layer 0: %u of 1600 there, %u of 2496 around it kept, %u of 4096 of layer 2 as it was: %s\n",
+			    st, face, part, around, source,
+			    st == HAKIOS_METAL_COMPLETED && face == 256 && part == 1600 && around == 2496 && source == 4096 ? "WORK" : "FAILED");
+			ok = ok && st == HAKIOS_METAL_COMPLETED && face == 256 && part == 1600 && around == 2496 && source == 4096;
+		}
+		hakios_metal_cb_free(cb);
+	}
 	hakios_metal_texture_free(a);
 	hakios_metal_texture_free(cube);
 	return ok;
@@ -1567,6 +1676,7 @@ main(int argc, char **argv)
 	right = narrow_target_test(d, q, flat) && right;
 	right = float_target_test(d, q, flat) && right;
 	right = raw_float_target_test(d, q, flat) && right;
+	right = packed_float_target_test(d, q, flat) && right;
 	right = raw_blend_test(d, q) && right;
 	right = wide_among_test(d, q) && right;
 	right = float_shader_blend_test(d, q) && right;

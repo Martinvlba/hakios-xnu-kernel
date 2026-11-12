@@ -480,6 +480,13 @@ int hakios_metal_cb_fill(hakios_metal_cb *cb, hakios_metal_buffer *buffer, uint6
 int hakios_metal_cb_blit(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned sx, unsigned sy,
     unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned dx, unsigned dy, unsigned dw,
     unsigned dh, int linear);
+/* The same between LAYERS (a 2D array's slices, a cube's faces), pixel for pixel: SW x SH of FROM_LAYER's FROM_LEVEL at
+ * (SX, SY) into TO_LAYER's TO_LEVEL at (DX, DY). The Mali core serves it where the copy is one of bytes (one pixel
+ * size; a compressed format block for block; part of a level's width up to 256 rows) and refuses the rest by name; the Adreno
+ * core serves layer 0 into layer 0. */
+int hakios_metal_cb_blit_layer(hakios_metal_cb *cb, hakios_metal_texture *from, unsigned from_level, unsigned from_layer,
+    unsigned sx, unsigned sy, unsigned sw, unsigned sh, hakios_metal_texture *to, unsigned to_level, unsigned to_layer,
+    unsigned dx, unsigned dy);
 /* FROM's level 0 into TO's level 0 turned by the 2D engine (a6xx_rotation ROTATION: 1 and 3 quarter turns, which take
  * a TO of FROM's sides swapped, 2 a half turn, 4 and 5 the flips): one pixel format, copied pixel for pixel. A
  * framebuffer CoreAnimation renders landscape over the portrait display surface goes into it so. -1 with the reason. */
