@@ -1,0 +1,6 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The tester's black widgets (11-12: on the widgets page and the home screen, black for minutes after a boot): the
+# widgets page opened 40 s into the job and left open ~5 minutes, for screenshots from the host every 30 s
+# (devices/akita/tools/usbmux-shot.py) and the console's refused draws. RC_JOBS=rc.jobs.widgetsblack.
+/redwood/bin/rwtouch wait 40
+/redwood/bin/rwtouch swipe 0.15 0.5 0.85 0.5 300 wait 300
