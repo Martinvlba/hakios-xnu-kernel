@@ -57,7 +57,7 @@ BT	arg	bt	User space	k	hakios.bt.c
 BT_AGAIN	arg	bt_again	User space	k	hakios.bt.c	the second look this many seconds later (0: no second look; 30)
 BUTTONS	arg	buttons	Touch and buttons	k	hakios.buttons.c	
 BUTTONS_STEPS	arg	buttons_steps	Touch and buttons	k	hakios.buttons.c	
-CA_METALLIB	arg	ca_metallib	User space	u	inject.c	
+CA_METALLIB	arg	ca_metallib	User space	u	HakiosMetalCA.m,inject.c	
 CA_PROF	arg	ca_prof	User space	u	HakiosMetalCA.m	
 CA_VBL	arg	ca_vbl	User space	u	inject.c	CoreAnimation's frame clock from the display driver's refresh notifications
 CAENV	arg	caenv	User space	u	inject.c,inject_sb.c	CoreAnimation's switches here as in the window server (inject.c), set before QuartzCore reads them
@@ -73,12 +73,14 @@ CAM_SENSOR	arg	cam_sensor	Cameras	k	hakios.camera.c
 CAM_SETTLE	arg	cam_settle	Cameras	k	hakios.camera.c	
 CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c	
 CAM_VBLANK	arg	cam_vblank	Cameras	k	hakios.camera.c	
+CB_WATCH	arg	cb_watch	User space	u	inject.c	
 CC_FADE	arg	cc_fade	User space	u	inject_sb.c	
 CPULOAD	arg	cpuload	CPU, memory and boot	k	hakios.cpufreq.c	every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py shows it per gesture)
 CPUMASK	arg	cpumask	Loader	l	loader.c	
 DDR	arg	ddr	CPU, memory and boot	k	hakios.cpufreq.c	the memory's bus clock managers ("BCM") in the command database the boot loader left, with what is needed to vote for bandwidth on them -- only read
 DDR_REST	arg	ddr_rest	CPU, memory and boot	k	hakios.cpufreq.c	
 DDR_VOTE	arg	ddr_vote	CPU, memory and boot	k	hakios.cpufreq.c	
+DISPLAY_HZ	arg	display_hz	User space	u	inject_cube.m	
 DISPLAY_PROBE	arg	display_probe	GPU and display	k	hakios.adreno.c	before any step: read what the firmware left the display controller doing (display_probe() below; two clocks are turned on, nothing else written)
 FB_BEAM	arg	fb_beam	GPU and display	k	MiniIOMobileFramebuffer.cpp	frames written to the panel's memory whenever their beat comes, as before
 FB_BEAT	arg	fb_beat	GPU and display	k	MiniIOMobileFramebuffer.cpp	
@@ -88,9 +90,13 @@ FB_FILTER	arg	fb_filter	GPU and display	k	MiniIOMobileFramebuffer.cpp	the pictur
 FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_INTF	arg	fb_intf	GPU and display	k	MiniIOMobileFramebuffer.cpp	the registers of the display interface the panel is on, for a port
 FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how often the panel is really refreshed
+FB_PHYSNITS	arg	fb_physnits	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_PRI	arg	fb_pri	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_QUEUE	arg	fb_queue	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_SWAPBRIGHT	arg	fb_swapbright	GPU and display	k	MiniIOMobileFramebuffer.cpp	the swaps' brightness said but not given to the panel (its unit unproven yet: nits, as the rest)
+FB_SWAPWAIT	arg	fb_swapwait	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_THREADS	arg	fb_threads	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_ZC	arg	fb_zc	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBHEIGHT	arg	fbheight	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x 812 points drawn at two pixels a point instead of three
 FBSUBTYPE	arg	fbsubtype	GPU and display	k	MiniIOMobileFramebuffer.cpp	
@@ -151,6 +157,7 @@ METAL_GMEM_DRAWS	arg	metal_gmem_draws	User space	u	HakiosMetalCA.m	GMEM for a pa
 METAL_GMEM_OFF	arg	metal_gmem_off	User space	u	HakiosMetalCA.m	
 METAL_LUMA_BOOST	arg	metal_luma_boost	User space	u	HakiosMetalCA.m	
 METAL_M2V	arg	metal_m2v	User space	u	HakiosMetalCA.m	
+METAL_PLUGIN	arg	metal_plugin	GPU and display	k	MiniIOMobileFramebuffer.cpp	Metal makes the bundle's path of this name
 METAL_SKIP	arg	metal_skip	User space	u	HakiosMetalCA.m	
 METAL_TRACE	arg	metal_trace	User space	u	HakiosMetalCA.m	
 METAL_WATCH	arg	metal_watch	User space	u	inject.c	
@@ -204,6 +211,7 @@ PRESS_POWER	arg	press_power	Touch and buttons	k	hakios.buttons.c	a short press o
 PRESS_POWER_MS	arg	press_power_ms	Touch and buttons	k	hakios.buttons.c	
 PRIVS	arg	privs	Security stand-ins	k	kern_minimac.c	
 RD	arg	rd	CPU, memory and boot	kl	(patch),loader.c	
+REC	arg	rec	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 REC_MB	arg	rec_mb	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 REC_RING	arg	rec_ring	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 REC_SECS	arg	rec_secs	GPU and display	k	MiniIOMobileFramebuffer.cpp	
@@ -216,6 +224,8 @@ REGTRACE	arg	regtrace	CPU, memory and boot	k	(patch)
 RETURN_CPU	arg	return_cpu	CPU, memory and boot	k	loader_return.c	
 RETURN_PANIC	arg	return_panic	CPU, memory and boot	k	loader_return.c	
 ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
+SB_CUBE	arg	sb_cube	User space	u	inject_sb.c	a cube tumbling over the home screen with the panel's frame rate under it (src/inject_cube.m)
+SB_DEBUG	arg	sb_debug	User space	u	inject_sb.c	a frame counter and the uptime under the status bar, for slow-motion videos (src/inject_cube.m)
 SERIAL	arg	serial	Loader	l	loader.c	
 SMALL_CORES	arg	small_cores	CPU, memory and boot	k	(patch)	
 SMALL_CORES_AFTER	arg	small_cores_after	CPU, memory and boot	k	GenericARMPE.cpp	
@@ -248,7 +258,7 @@ SYSTRACE_NAME	arg	systrace_name	CPU, memory and boot	k	(patch)
 THERMAL_LOG	arg	thermal_log	Chip, thermal and PMIC	k	hakios.thermal.c	a summary line this often (0: only on a rise; 60)
 THERMAL_TM0	arg	thermal_tm0	Chip, thermal and PMIC	k	hakios.thermal.c	
 THERMAL_TM1	arg	thermal_tm1	Chip, thermal and PMIC	k	hakios.thermal.c	
-TORCH	arg	torch	Haptics and torch	kl	hakios.torch.c,loader.c	a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its registers, the PMIC's temperature
+TORCH	arg	torch	Haptics and torch	klu	hakios.torch.c,init.c,inject_media.c,loader.c	a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its registers, the PMIC's temperature
 TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.torch.c	
 TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.torch.c	
 TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.goodix.c	
@@ -283,8 +293,10 @@ VBLUR	arg	vblur	GPU and display	u	eagl.c
 VIRTIO_BLK	arg	virtio_blk	Storage and APFS	k	hakios.virtio_blk.c	
 VIRTIO_INPUT	arg	virtio_input	Touch and buttons	k	hakios.virtio_input.c	
 VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c	
+VM_PREHEAT_KB	arg	vm_preheat_kb	Storage and APFS	k	hakios.ufs.c	
 WALLPAPER_CACHE	arg	wallpaper_cache	User space	u	inject_sb.c	the window that shows the wallpaper rasterized by the window server (CALayer's shouldRasterize), drawn from one texture instead of composed again
 WALLPAPER_FREEZE	arg	wallpaper_freeze	User space	u	inject_sb.c	the wallpaper as one still picture
+WDT_STARVE	arg	wdt_starve	CPU, memory and boot	k	loader_return.c	
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	

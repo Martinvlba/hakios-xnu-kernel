@@ -23,6 +23,8 @@ Where this differs from Linux's, on purpose:
     firmware pulled from the device): the open configuration. The check refuses an option that needs firmware in it.
   - the kernel's command line holds 607 characters; the check says how much of them the configuration takes, and
     refuses what cannot fit, because a command line that is too long loses its tail without an error.
+  - CONFIG_DEFAULTS="name=value ..." is not on the command line at all: `kernel` builds it into the kernel
+    (bsd/dev/hakios.drivers.h, read by pexpert/arm/pe_bootargs.c), each argument in force unless the command line names it.
 """
 import argparse
 import collections
@@ -84,6 +86,12 @@ SYMBOLS = [
     # Linux's CONFIG_CMDLINE: whatever the symbols above do not cover, as name=value words in quotes. It is not an escape
     # from the checks: every name must be one the source reads (configs/boot-args.lst), so a typo is an error, not a no-op.
     ("BOOTARGS", "args", None, "more kernel arguments, as `name=value` words in quotes; each name must be one docs/boot-args.md lists", None, None),
+    # Arguments BUILT INTO the kernel (bsd/dev/hakios.drivers.h -> pexpert's PE_parse_boot_argn and sysctl kern.bootargs):
+    # each holds unless the command line names it -- the command line always wins, x=0 turns a default off. For what
+    # WORKS on a device (the tester, 11-12: stable things on by default, what is not done behind an argument), so its
+    # command line stays short. Not for what the loader reads (it sees only the command line).
+    ("DEFAULTS", "args", None, "kernel arguments built into the kernel, each in force unless the command line names it (x=0 turns one off); "
+                               "for what works on the device; never one the loader reads", None, None),
 ]
 
 # The group a symbol is listed under in the documented defconfig (the generated ones carry theirs in configs/symbols.tsv)
@@ -97,7 +105,7 @@ GROUP_OF = {
     "MODEM": "Cellular", "MODEM_AGAIN": "Cellular", "MODEM_BUFFER": "Cellular",
     "NET_TRACE": "Network", "NET_NAMES": "Network", "VIRTIO_NET": "Network",
     "BATTERY_STOP": "Audio and battery", "BATTERY_STOP_POLL": "Audio and battery", "SOCINFO": "Chip, thermal and PMIC", "THERMAL": "Chip, thermal and PMIC", "THERMAL_POLL": "Chip, thermal and PMIC",
-    "THERMAL_STOP": "Chip, thermal and PMIC", "PMIC": "Chip, thermal and PMIC", "BOOTARGS": "Extra arguments",
+    "THERMAL_STOP": "Chip, thermal and PMIC", "PMIC": "Chip, thermal and PMIC", "BOOTARGS": "Extra arguments", "DEFAULTS": "Extra arguments",
 }
 LAYER_OF = {}
 RELAXED = re.compile(r"[A-Za-z0-9_.,:/+@=\-]+")       # what a text value may hold: no space, no quote, no backslash
@@ -568,6 +576,25 @@ def check(config):
         if arg in seen:
             problems.append("CONFIG_BOOTARGS: %s twice" % arg)
         seen.add(arg)
+    defaults = parsed.get("DEFAULTS", [])
+    if defaults:
+        known = known_args()
+        known = None if known is None else set(known) | device_args()
+    seen = set()
+    for word in defaults:
+        arg = word.partition("=")[0]
+        if known is not None and arg not in known:
+            close = difflib.get_close_matches(arg, known, n=1)
+            problems.append("CONFIG_DEFAULTS: nothing reads the argument %s (docs/boot-args.md lists them)%s" %
+                            (arg, "; did you mean %s?" % close[0] if close else ""))
+        if arg in seen:
+            problems.append("CONFIG_DEFAULTS: %s twice" % arg)
+        seen.add(arg)
+    loader_read = loader_args() if defaults else None
+    for word in defaults:
+        arg = word.partition("=")[0]
+        if loader_read is not None and arg in loader_read:
+            problems.append("CONFIG_DEFAULTS: the loader reads %s= from the command line itself: it cannot be built in" % arg)
     length = len(" ".join(args))
     if length > KERNEL_LINE - RUN_OVERHEAD:
         problems.append("the boot-arguments take %d characters; a run adds about %d of its own and the kernel's command line holds %d: "
@@ -596,6 +623,7 @@ def check_drivers(config, parsed):
     owner = {os.path.basename(f): d.symbol for d in DRIVERS for f, _tags in d.files}
     wanted = [(name, BY_NAME[name][2]) for name in parsed if BY_NAME[name][2]]
     wanted += [("BOOTARGS", w.partition("=")[0]) for w in parsed.get("BOOTARGS", [])]
+    wanted += [("DEFAULTS", w.partition("=")[0]) for w in parsed.get("DEFAULTS", [])]
     for name, arg in wanted:
         read_by = readers.get(arg)
         if read_by and read_by <= left_out:
@@ -606,21 +634,43 @@ def check_drivers(config, parsed):
 
 
 _READERS = []
+_SCAN = []
+
+
+def scanned():
+    """tools/boot-args.py's scan of the source, the device repositories' drivers included: {argument: {"kernel": ...,
+    "loader": ..., "user": ...}}; None when the source cannot be scanned (not a git checkout)."""
+    if not _SCAN:
+        try:
+            spec = importlib.util.spec_from_file_location("boot_args", os.path.join(HERE, "boot-args.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _SCAN.append(module.scan(ROOT, devices=True))
+        except (OSError, subprocess.CalledProcessError, AttributeError):
+            _SCAN.append(None)
+    return _SCAN[0]
+
+
+def loader_args():
+    """The arguments the loader reads from the command line; None when the source cannot be scanned."""
+    found = scanned()
+    return None if found is None else {arg for arg, where in found.items() if where["loader"]}
+
+
+def device_args():
+    """The arguments the device repositories' drivers read (configs/boot-args.lst lists only this repository's)."""
+    found = scanned()
+    return set() if found is None else {arg for arg, where in found.items() if where["kernel"]}
 
 
 def arg_readers():
     """{argument: {file names}} of the arguments only the kernel reads (tools/boot-args.py's scan of the source); None when
     the source cannot be scanned (not a git checkout)."""
     if not _READERS:
-        try:
-            spec = importlib.util.spec_from_file_location("boot_args", os.path.join(HERE, "boot-args.py"))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            found = module.scan(ROOT)
-            _READERS.append({arg: set(where["kernel"]) for arg, where in found.items()
-                             if where["kernel"] and not where["loader"] and not where["user"]})
-        except (OSError, subprocess.CalledProcessError, AttributeError):
-            _READERS.append(None)
+        found = scanned()
+        _READERS.append(None if found is None else
+                        {arg: set(where["kernel"]) for arg, where in found.items()
+                         if where["kernel"] and not where["loader"] and not where["user"]})
     return _READERS[0]
 
 
@@ -628,8 +678,8 @@ def boot_args(parsed):
     """['cpus=8', 'gpu=1', ...] in the order of the symbol table."""
     args = []
     for name, kind, arg, _help, _needs, _requires in SYMBOLS:
-        if name not in parsed or (arg is None and kind != "args"):
-            continue
+        if name not in parsed or (arg is None and kind != "args") or name == "DEFAULTS":
+            continue                # (CONFIG_DEFAULTS is built into the kernel, not on its command line)
         value = parsed[name]
         if kind == "args":
             args.extend(value)
@@ -943,11 +993,13 @@ def master_hakios(built, sources):
     return "\n".join(lines) + "\n"
 
 
-def drivers_header(built, sources):
+def drivers_header(built, sources, defaults=()):
     on = [d.name.lower() for d in DRIVERS if built[d.symbol]]
     return ("/* The drivers this kernel is built with: made by tools/hakios-config.py kernel from %s. Not part of the patch. */\n"
-            "#define HAKIOS_DRIVERS_LIST     \"%s\"\n#define HAKIOS_DRIVERS_COUNT    %d\n#define HAKIOS_DRIVERS_CONFIG   \"%s\"\n" %
-            (sources, " ".join(on), len(on), sources))
+            "#define HAKIOS_DRIVERS_LIST     \"%s\"\n#define HAKIOS_DRIVERS_COUNT    %d\n#define HAKIOS_DRIVERS_CONFIG   \"%s\"\n"
+            "/* CONFIG_DEFAULTS: the arguments in force unless the command line names them (pexpert/arm/pe_bootargs.c) */\n"
+            "#define HAKIOS_DEFAULT_BOOTARGS \"%s\"\n" %
+            (sources, " ".join(on), len(on), sources, " ".join(defaults)))
 
 
 def write_if_changed(path, text):
@@ -1028,7 +1080,8 @@ def cmd_kernel(a):
     choice_changed = write_if_changed(os.path.join(tree, "config", "MASTER.hakios"), master_hakios(built, sources))
     if choice_changed:
         changed.append("config/MASTER.hakios")
-    if write_if_changed(os.path.join(tree, "bsd", "dev", "hakios.drivers.h"), drivers_header(built, sources)):
+    defaults = typed("DEFAULTS", config["DEFAULTS"]) if "DEFAULTS" in config else []
+    if write_if_changed(os.path.join(tree, "bsd", "dev", "hakios.drivers.h"), drivers_header(built, sources, defaults)):
         changed.append("bsd/dev/hakios.drivers.h")
     removed = stale_objects(tree) if choice_changed and os.path.isdir(os.path.join(tree, "BUILD", "obj")) else 0
     on = [d.name.lower() for d in DRIVERS if built[d.symbol]]

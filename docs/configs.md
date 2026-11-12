@@ -102,6 +102,18 @@ escape from the checks. Every name must be one the source reads ([boot-args.md](
 suggestion rather than a silent no-op; an argument that a symbol already sets (`cpus=8`) is refused with the name of the symbol; a
 word is `name=value` with no space, quote or backslash in it; and the words count towards the 607 characters.
 
+## `CONFIG_DEFAULTS`: arguments built into the kernel
+
+`CONFIG_BOOTARGS` still travels on the command line, which the loader hands over only ~490 characters of on a phone. What works
+on a device belongs in the kernel instead: `CONFIG_DEFAULTS="touchscreen=1 wifi=8 ..."` (devices/akita/configs/akita.config has
+the Pixel 8a's). `tools/hakios-config.py kernel` writes it to `bsd/dev/hakios.drivers.h` (`HAKIOS_DEFAULT_BOOTARGS`), and
+`pexpert/arm/pe_bootargs.c` makes the line every reader sees -- `PE_parse_boot_argn`, `sysctl kern.bootargs` (user space), the
+panic log -- from the command line followed by each default the command line does not name. So the command line always wins:
+`wifi=0` turns the built-in `wifi=8` off, and launchd logs the whole line (`boot-args = ...`). The same checks as for
+`CONFIG_BOOTARGS` (every name read somewhere, the device repositories' drivers included; none twice), and one more: never an
+argument the loader reads (`cpus`, `ufs`, `torch`, ...), since the loader sees only the command line. Unfinished work stays out
+of it, behind its argument (the tester, 11-12: stable things on by default, what is not done behind an argument).
+
 ## What is the same as Linux, and what is not
 
 | | Linux / Android | here |
@@ -112,7 +124,7 @@ word is `name=value` with no space, quote or backslash in it; and the words coun
 | the result | `.config`, compiled in | `.config`: the drivers compiled in (`CONFIG_HAKIOS_*`), the rest becomes the boot-arguments |
 | a driver's options | `Kconfig` + `obj-$(CONFIG_X) += x.o` | `drivers/<subsystem>/conf`, XNU's `options` and `optional` in `conf/files` |
 | a minimal config | `make savedefconfig` | `make savedefconfig` |
-| a command line baked in | `CONFIG_CMDLINE` | `CONFIG_BOOTARGS` (names checked) |
+| a command line baked in | `CONFIG_CMDLINE` | `CONFIG_BOOTARGS` (names checked); `CONFIG_DEFAULTS` in the kernel itself |
 | an option that needs a blob | `CONFIG_EXTRA_FIRMWARE` | `CONFIG_FIRMWARE="device"` / `"none"`, and `needs` |
 | the version | `uname -r` | `kern.hakios.version`, `kernel.ver=` |
 | how many options | thousands, in Kconfig | about 310, one for each argument the source reads |

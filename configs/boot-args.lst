@@ -79,6 +79,7 @@ cam_sensor	k
 cam_settle	k
 cam_shutter	k
 cam_vblank	k
+cb_watch	u
 cc_fade	u
 cpufreq	k
 cpuload	k
@@ -87,6 +88,7 @@ cpus	l
 ddr	k
 ddr_rest	k
 ddr_vote	k
+display_hz	u
 display_probe	k
 epoch	k
 fb_beam	k
@@ -97,9 +99,13 @@ fb_filter	k
 fb_hz	k
 fb_intf	k
 fb_measure	k
+fb_physnits	k
 fb_pri	k
 fb_queue	k
+fb_swapbright	k
+fb_swapwait	k
 fb_threads	k
+fb_zc	k
 fbheight	k
 fbscale	k
 fbsubtype	k
@@ -165,6 +171,7 @@ metal_gmem_draws	u
 metal_gmem_off	u
 metal_luma_boost	u
 metal_m2v	u
+metal_plugin	k
 metal_skip	u
 metal_trace	u
 metal_watch	u
@@ -225,6 +232,7 @@ press_power	k
 press_power_ms	k
 privs	k
 rd	kl
+rec	k
 rec_mb	k
 rec_ring	k
 rec_secs	k
@@ -237,6 +245,8 @@ regtrace	k
 return_cpu	k
 return_panic	k
 root_apfs	u
+sb_cube	u
+sb_debug	u
 sb_delay	u
 serial	l
 small_cores	k
@@ -275,7 +285,7 @@ thermal_poll	k
 thermal_stop	k
 thermal_tm0	k
 thermal_tm1	k
-torch	kl
+torch	klu
 torch_max_s	k
 torch_secs	k
 touch_flip	k
@@ -316,8 +326,10 @@ virtio_blk	k
 virtio_input	k
 virtio_net	k
 virtio_sound	k
+vm_preheat_kb	k
 wallpaper_cache	u
 wallpaper_freeze	u
+wdt_starve	k
 wifi	k
 wifi_again	k
 wifi_ask	k

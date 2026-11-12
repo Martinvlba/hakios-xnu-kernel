@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's Wi-Fi: what changes in configd's store at the moment iOS comes online (State:/Network/Global/IPv4
+# appears) after minutes "offline" with a complete Wi-Fi service (TODO 35e; boot-args pcie=5 pcie_delay=60 wifi=8
+# test_reboot_after=1200): every change for 15 minutes, then the store and the reachability.
+/redwood/bin/net_test waitaddr en0 150 reach www.apple.com
+/redwood/bin/net_test watch 900
+/redwood/bin/net_test store State:/Network/Global/.* reach www.apple.com fetch https://www.apple.com/library/test/success.html

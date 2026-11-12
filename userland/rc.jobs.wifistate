@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's Wi-Fi: configd's whole picture when iOS says "offline" though en0 has its address (TODO 35e, boot-args
+# pcie=5 pcie_delay=60 wifi=8): the store under State:/Network and Setup:/Network once the address is there, every
+# change for 4 minutes (Service, Interface/en0, Global, Plugin keys), the store again.
+/redwood/bin/net_test waitaddr en0 150 store
+/redwood/bin/net_test watch 240
+/redwood/bin/net_test store reach www.apple.com
