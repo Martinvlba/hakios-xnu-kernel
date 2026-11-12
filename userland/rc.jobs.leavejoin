@@ -1,0 +1,5 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's Wi-Fi: Settings' join after "Forget" -- wifid's DISASSOCIATE and, 10 ms later, its ASSOCIATE (here with
+# a wrong passphrase, so the standing network is joined again after it): the kernel must not say "link down" after the
+# ASSOCIATE (wifid takes that for the join failing; drivers/wifi/hakios.sta.c, 11-12). Then the internet again.
+/redwood/bin/net_test waitaddr en0 150 wait 20 leavejoin wait 60 fetch https://www.apple.com/library/test/success.html
