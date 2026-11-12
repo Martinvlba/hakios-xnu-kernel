@@ -4235,7 +4235,13 @@ HM_REFUSES_OUT_LOUD
 	}
 	_buffer = hakios_metal_buffer_new([device hakiosDevice], length);
 	if (_buffer == NULL) {
-		hm_print("refused: a buffer of %lu bytes: %s\n", (unsigned long)length, hakios_metal_error());
+		/* (11-12: said 20 times, then every 100000th -- a client that asks again and again when the GPU's memory
+		 * is gone wrote this line seven million times in five minutes) */
+		static _Atomic unsigned long hm_buffer_refusals;
+		unsigned long nth = ++hm_buffer_refusals;
+		if (nth <= 20 || nth % 100000 == 0) {
+			hm_print("refused: a buffer of %lu bytes: %s (refusal %lu)\n", (unsigned long)length, hakios_metal_error(), nth);
+		}
 		[self release];
 		return nil;
 	}

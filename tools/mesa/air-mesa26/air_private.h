@@ -49,6 +49,8 @@ struct air_ptr {
    unsigned binding;
    bool is_image;                    /* a texture the shader writes: an image, not a view */
    nir_def *offset;                  /* bytes, 32-bit; NULL means zero */
+   nir_def *binding_def;             /* a buffer chosen while the shader runs (a phi or select between buffers): its
+                                      * index, 32-bit; NULL: BINDING as it stands */
    const struct air_type *pointee;   /* for sizes, and for loads without a type */
 };
 
@@ -85,6 +87,7 @@ struct air_ctx {
    struct hash_table *phi_cursors;
    /* phi -> nir register decl */
    struct hash_table *phi_regs;
+   struct hash_table *phi_bind_regs;  /* a pointer phi's second register: the buffer's index (binding_def) */
    /* the blocks the entry can reach, branches on known values followed only
     * where they go (translate_body): what a phi between pointers chooses from
     */
@@ -191,6 +194,7 @@ unsigned air_nir_components(const struct air_type *t);
 nir_def *air_load_ptr(struct air_ctx *c, struct air_ptr ptr, const struct air_type *type,
                       unsigned align);
 bool air_store_ptr(struct air_ctx *c, struct air_ptr ptr, nir_def *value, unsigned align);
+nir_def *ptr_binding(struct air_ctx *c, struct air_ptr ptr);
 struct air_ptr air_ptr_add(struct air_ctx *c, struct air_ptr ptr, nir_def *bytes);
 
 /* air.* and llvm.* calls; the result is set on the instruction by the callee */

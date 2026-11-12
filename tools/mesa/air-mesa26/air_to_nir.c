@@ -166,6 +166,26 @@ air_get(struct air_ctx *c, const struct air_value *v)
              v->kind == AIR_VALUE_ARGUMENT ? "argument" :
              v->kind == AIR_VALUE_INSTRUCTION ? "computed" : "metadata",
              v->name ? " " : "", v->name ? v->name : "");
+   if (v->kind == AIR_VALUE_INSTRUCTION && !c->fn && strlen(c->error) + 40 < sizeof(c->error))
+      strcat(c->error, " (outside any function's translation)");
+   if (v->kind == AIR_VALUE_INSTRUCTION && c->fn) {
+      /* which one, and where it stands in the function being translated (11-12) */
+      const struct air_inst *vi = (const struct air_inst *)v;
+      char more[120];
+      int vb = -1, vn = -1;
+
+      for (unsigned bi = 0; bi < c->fn->num_blocks && vb < 0; bi++)
+         for (unsigned i = 0; i < c->fn->blocks[bi].num_insts; i++)
+            if (c->fn->blocks[bi].insts[i] == vi) {
+               vb = (int)bi;
+               vn = (int)i;
+               break;
+            }
+      snprintf(more, sizeof(more), " (the value: opcode %u sub %u, block %d instruction %d of %s)", vi->op, vi->sub, vb, vn,
+               c->fn->base.name ? c->fn->base.name : "?");
+      if (strlen(c->error) + strlen(more) < sizeof(c->error))
+         strcat(c->error, more);
+   }
    return NULL;
 }
 
@@ -359,6 +379,13 @@ air_ptr_add(struct air_ctx *c, struct air_ptr ptr, nir_def *bytes)
    return ptr;
 }
 
+/* the buffer's index: as it stands, or the one chosen while the shader runs */
+nir_def *
+ptr_binding(struct air_ctx *c, struct air_ptr ptr)
+{
+   return ptr.binding_def ? ptr.binding_def : nir_imm_int(&c->b, ptr.binding);
+}
+
 static nir_def *
 ptr_offset(struct air_ctx *c, struct air_ptr ptr)
 {
@@ -384,11 +411,11 @@ air_load_ptr(struct air_ctx *c, struct air_ptr ptr, const struct air_type *type,
    nir_def *res;
    switch (ptr.class) {
    case AIR_PTR_UBO:
-      res = nir_load_ubo(&c->b, comps, bits, nir_imm_int(&c->b, ptr.binding), off,
+      res = nir_load_ubo(&c->b, comps, bits, ptr_binding(c, ptr), off,
                          .align_mul = align, .align_offset = 0, .range_base = 0, .range = ~0);
       break;
    case AIR_PTR_SSBO:
-      res = nir_load_ssbo(&c->b, comps, bits, nir_imm_int(&c->b, ptr.binding), off,
+      res = nir_load_ssbo(&c->b, comps, bits, ptr_binding(c, ptr), off,
                           .align_mul = align, .align_offset = 0);
       break;
    case AIR_PTR_SHARED:
@@ -441,7 +468,7 @@ air_store_ptr(struct air_ctx *c, struct air_ptr ptr, nir_def *value, unsigned al
    nir_def *off = ptr_offset(c, ptr);
    switch (ptr.class) {
    case AIR_PTR_SSBO:
-      nir_store_ssbo(&c->b, value, nir_imm_int(&c->b, ptr.binding), off,
+      nir_store_ssbo(&c->b, value, ptr_binding(c, ptr), off,
                      .write_mask = BITFIELD_MASK(comps), .align_mul = align);
       return true;
    case AIR_PTR_SHARED:
@@ -659,7 +686,14 @@ load_sysval(struct air_ctx *c, enum air_sysval sv)
    case AIR_SV_TG_POS_GRID: return nir_load_workgroup_id(&c->b);
    case AIR_SV_THREADS_PER_TG: return nir_load_workgroup_size(&c->b);
    case AIR_SV_TGS_PER_GRID: return nir_load_num_workgroups(&c->b);
-   case AIR_SV_THREAD_INDEX_TG: return nir_load_local_invocation_index(&c->b);
+   case AIR_SV_THREAD_INDEX_TG: {
+      /* (not nir_load_local_invocation_index: the Mali's compiler has no such input -- "Unhandled intrinsic
+       * load_local_invocation_index", and mediaserverd died in the compile) (z * height + y) * width + x */
+      nir_def *id = nir_load_local_invocation_id(&c->b), *size = nir_load_workgroup_size(&c->b);
+
+      return nir_iadd(&c->b, nir_imul(&c->b, nir_iadd(&c->b, nir_imul(&c->b, nir_channel(&c->b, id, 2),
+          nir_channel(&c->b, size, 1)), nir_channel(&c->b, id, 1)), nir_channel(&c->b, size, 0)), nir_channel(&c->b, id, 0));
+   }
    case AIR_SV_THREADS_PER_GRID:
       return nir_imul(&c->b, nir_load_num_workgroups(&c->b), nir_load_workgroup_size(&c->b));
    case AIR_SV_SIMD_LANE: return nir_load_subgroup_invocation(&c->b);
@@ -759,6 +793,14 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
 
       struct air_ptr p = { .binding = index, .pointee = t->elem };
       enum air_resource_kind rk;
+      if (as == 0) {
+         /* no air.address_space in the metadata (VectorKit's Clear::clear functions): the pointer's own, and failing
+          * that a buffer the function only reads is a constant buffer, any other a device buffer -- one thing to the
+          * back end either way */
+         as = t->kind == AIR_TYPE_POINTER ? t->addrspace : 0;
+         if (as == 0 || as > 3)
+            as = write ? 1 : 2;
+      }
       switch (as) {
       case 1: p.class = AIR_PTR_SSBO; rk = AIR_RESOURCE_DEVICE_BUFFER; break;
       case 2: p.class = AIR_PTR_UBO; rk = AIR_RESOURCE_CONSTANT_BUFFER; break;
@@ -1125,10 +1167,20 @@ translate_cast(struct air_ctx *c, const struct air_inst *in)
    case AIR_CAST_FPTRUNC: res = nir_f2fN(&c->b, x, bits); break;
    case AIR_CAST_FPEXT: res = nir_f2fN(&c->b, x, bits); break;
    case AIR_CAST_BITCAST:
-      if (air_nir_components(dt) != air_nir_components(st) ||
-          air_nir_bit_size(c, dt) != air_nir_bit_size(c, st))
-         return air_error(c, "instruction: a bitcast that changes the shape of its value");
-      res = nir_mov(&c->b, x);
+      if (air_nir_components(dt) == air_nir_components(st) &&
+          air_nir_bit_size(c, dt) == air_nir_bit_size(c, st)) {
+         res = nir_mov(&c->b, x);
+      } else if (bits >= 8 && x->bit_size >= 8 &&
+                 air_nir_components(dt) * bits == x->num_components * x->bit_size &&
+                 air_nir_components(dt) <= NIR_MAX_VEC_COMPONENTS) {
+         /* the same bits as another vector (<2 x i64> as <4 x i32>, a float4 as 16 bytes, an i32 as <4 x i8>...):
+          * the low element first, as LLVM on a little-endian target -- mediaserverd's video kernels (VTMTS,
+          * pyr_downscale, hbf) */
+         res = nir_bitcast_vector(&c->b, x, bits);
+      } else {
+         return air_error(c, "instruction: a bitcast that changes the size of its value (%u x %u bits to %u x %u)",
+                          x->num_components, x->bit_size, air_nir_components(dt), bits);
+      }
       break;
    default:
       return air_error(c, "instruction: cast %u", in->sub);
@@ -1177,6 +1229,53 @@ translate_cmp(struct air_ctx *c, const struct air_inst *in)
    return true;
 }
 
+/* a struct or array at PTR as a value: its members loaded where the layout puts them (a pointer member is refused by
+ * air_load_ptr, by name) */
+static struct air_val *
+load_aggregate(struct air_ctx *c, struct air_ptr ptr, const struct air_type *t)
+{
+   if (t->kind != AIR_TYPE_STRUCT && t->kind != AIR_TYPE_ARRAY) {
+      nir_def *v = air_load_ptr(c, ptr, t, 0);
+      return v ? air_val_ssa(c, v) : NULL;
+   }
+   unsigned n = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   if (n > 4096)
+      return air_error(c, "instruction: a load of an aggregate of %u members", n), NULL;
+   struct air_val *agg = air_val_agg(c, n);
+   uint64_t stride = t->kind == AIR_TYPE_ARRAY ? air_type_alloc_size(c->m, t->elem) : 0;
+   for (unsigned i = 0; i < n; i++) {
+      const struct air_type *mt = t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem;
+      uint64_t off = t->kind == AIR_TYPE_STRUCT ? air_struct_member_offset(c->m, t, i) : stride * i;
+      struct air_ptr mp = air_ptr_add(c, ptr, off ? nir_imm_int(&c->b, (int)off) : NULL);
+      mp.pointee = mt;
+      if (!(agg->elems[i] = load_aggregate(c, mp, mt)))
+         return NULL;
+   }
+   return agg;
+}
+
+/* ... and written: VALUE's members stored where the layout puts them (an undefined member is left as it is) */
+static bool
+store_aggregate(struct air_ctx *c, struct air_ptr ptr, struct air_val *value, const struct air_type *t)
+{
+   if (!value)
+      return true;
+   if (value->kind == AIR_VAL_SSA)
+      return air_store_ptr(c, ptr, value->def, 0);
+   if (value->kind != AIR_VAL_AGG || !t || (t->kind != AIR_TYPE_STRUCT && t->kind != AIR_TYPE_ARRAY))
+      return air_error(c, "instruction: a store of an aggregate holding a pointer");
+   uint64_t stride = t->kind == AIR_TYPE_ARRAY ? air_type_alloc_size(c->m, t->elem) : 0;
+   for (unsigned i = 0; i < value->num_elems; i++) {
+      const struct air_type *mt = t->kind == AIR_TYPE_STRUCT ? (i < t->num_members ? t->members[i] : NULL) : t->elem;
+      uint64_t off = t->kind == AIR_TYPE_STRUCT ? air_struct_member_offset(c->m, t, i) : stride * i;
+      struct air_ptr mp = air_ptr_add(c, ptr, off ? nir_imm_int(&c->b, (int)off) : NULL);
+      mp.pointee = mt;
+      if (!mt || !store_aggregate(c, mp, value->elems[i], mt))
+         return false;
+   }
+   return true;
+}
+
 /* an aggregate value's field, by the index path of extract/insertvalue */
 static struct air_val **
 agg_slot(struct air_ctx *c, struct air_val *agg, const uint32_t *idx, unsigned n)
@@ -1184,7 +1283,11 @@ agg_slot(struct air_ctx *c, struct air_val *agg, const uint32_t *idx, unsigned n
    struct air_val **slot = &agg;
    for (unsigned i = 0; i < n; i++) {
       if (!*slot || (*slot)->kind != AIR_VAL_AGG || idx[i] >= (*slot)->num_elems) {
-         air_error(c, "instruction: an aggregate index out of its value");
+         air_error(c, "instruction: an aggregate index out of its value (index %u of %u: %u into %s of %u)", i, n, idx[i],
+                   !*slot ? "nothing" : (*slot)->kind == AIR_VAL_AGG ? "an aggregate" : (*slot)->kind == AIR_VAL_SSA ?
+                   "a scalar or vector" : (*slot)->kind == AIR_VAL_PTR ? "a pointer" : "no value",
+                   *slot && (*slot)->kind == AIR_VAL_AGG ? (*slot)->num_elems : *slot && (*slot)->kind == AIR_VAL_SSA &&
+                   (*slot)->def ? (*slot)->def->num_components : 0);
          return NULL;
       }
       slot = &(*slot)->elems[idx[i]];
@@ -1274,8 +1377,22 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
          nir_def *pcond = air_get_ssa(c, in->operands[0]);
          if (!pcond)
             return false;
+         if (pcond->num_components == 1 && !nir_def_is_const(pcond) && pa->kind == AIR_VAL_PTR && pb->kind == AIR_VAL_PTR &&
+             pa->ptr.class == pb->ptr.class && pa->ptr.is_image == pb->ptr.is_image &&
+             ((pa->ptr.binding == pb->ptr.binding && !pa->ptr.binding_def && !pb->ptr.binding_def) ||
+              ((pa->ptr.class == AIR_PTR_SSBO || pa->ptr.class == AIR_PTR_UBO) && !pa->ptr.is_image))) {
+            /* two places in ONE buffer, chosen while the shader runs: the offset is what is chosen (VectorKit's
+             * PolygonStroke: one of two members of its constants) */
+            struct air_ptr p = pa->ptr;
+            p.offset = nir_bcsel(&c->b, pcond, pa->ptr.offset ? pa->ptr.offset : nir_imm_int(&c->b, 0),
+                                 pb->ptr.offset ? pb->ptr.offset : nir_imm_int(&c->b, 0));
+            if (pa->ptr.binding != pb->ptr.binding || pa->ptr.binding_def || pb->ptr.binding_def)
+               p.binding_def = nir_bcsel(&c->b, pcond, ptr_binding(c, pa->ptr), ptr_binding(c, pb->ptr));   /* two buffers */
+            air_set(c, &in->base, air_val_ptr(c, p));
+            return true;
+         }
          if (pcond->num_components != 1 || !nir_def_is_const(pcond))
-            return air_error(c, "instruction: a select between pointers decided while the shader runs");
+            return air_error(c, "instruction: a select between pointers into different buffers decided while the shader runs");
          air_set(c, &in->base, nir_const_value_as_bool(nir_def_as_load_const(pcond)->value[0], pcond->bit_size) ? pa : pb);
          return true;
       }
@@ -1370,11 +1487,30 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
       struct air_val *agg = air_get(c, in->operands[0]);
       if (!agg)
          return false;
-      struct air_val **slot = agg_slot(c, agg, in->indices, in->num_indices);
-      if (!slot)
+      /* (11-12) a field INSIDE a member that is itself undefined (an undef struct's member's member: the widgets'
+       * uber_fragment): undefined too -- agg_slot refused the second index "into nothing" */
+      struct air_val *walk = agg;
+      bool undefined = false;
+      for (unsigned i = 0; i < in->num_indices && !undefined; i++) {
+         if (!walk)
+            undefined = true;
+         else if (walk->kind == AIR_VAL_SSA && walk->def && nir_def_instr(walk->def)->type == nir_instr_type_undef)
+            undefined = true;        /* (an undef aggregate that came as one undefined value: a callee's argument) */
+         else if (walk->kind != AIR_VAL_AGG || in->indices[i] >= walk->num_elems)
+            break;
+         else
+            walk = walk->elems[in->indices[i]];
+      }
+      struct air_val **slot = undefined ? NULL : agg_slot(c, agg, in->indices, in->num_indices);
+      if (!slot && !undefined)
          return false;
-      if (!*slot) {
+      if (undefined || !*slot) {
          /* a field of an undef aggregate */
+         const struct air_type *rt = in->base.type;
+         if (rt->kind == AIR_TYPE_STRUCT || rt->kind == AIR_TYPE_ARRAY) {
+            air_set(c, &in->base, air_val_agg(c, rt->kind == AIR_TYPE_STRUCT ? rt->num_members : rt->count));
+            return true;
+         }
          air_set(c, &in->base,
                  air_val_ssa(c, nir_undef(&c->b, air_nir_components(in->base.type),
                                           air_nir_bit_size(c, in->base.type))));
@@ -1389,6 +1525,22 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
       if (!agg || !val)
          return false;
       struct air_val *copy = clone_val(c, agg);
+      {
+         /* (11-12) a member on the way that is still undefined (insertvalue into an undef struct's member struct:
+          * the widgets' uber_fragment, "index 1 of 2: 0 into nothing") is made, empty, as its type says */
+         const struct air_type *t = in->operands[0]->type;
+         struct air_val **at = &copy;
+
+         for (unsigned i = 0; i < in->num_indices && t; i++) {
+            if (!*at && (t->kind == AIR_TYPE_STRUCT || t->kind == AIR_TYPE_ARRAY))
+               *at = air_val_agg(c, t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count);
+            if (!*at || (*at)->kind != AIR_VAL_AGG || in->indices[i] >= (*at)->num_elems)
+               break;
+            at = &(*at)->elems[in->indices[i]];
+            t = t->kind == AIR_TYPE_STRUCT ? (in->indices[i] < t->num_members ? t->members[in->indices[i]] : NULL) :
+                t->kind == AIR_TYPE_ARRAY ? t->elem : NULL;
+         }
+      }
       struct air_val **slot = agg_slot(c, copy, in->indices, in->num_indices);
       if (!slot)
          return false;
@@ -1450,6 +1602,15 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
             return true;
          }
       }
+      if (in->base.type && (in->base.type->kind == AIR_TYPE_STRUCT || in->base.type->kind == AIR_TYPE_ARRAY)) {
+         /* A WHOLE STRUCT OR ARRAY LOADED (11-12: the widgets' uber_fragment hands one to a function, which takes its
+          * members with extractvalue -- "an aggregate index ... into a scalar"): member by member, where each lies */
+         struct air_val *agg = load_aggregate(c, p->ptr, in->base.type);
+         if (!agg)
+            return false;
+         air_set(c, &in->base, agg);
+         return true;
+      }
       nir_def *res = air_load_ptr(c, p->ptr, in->base.type, in->align);
       if (!res)
          return false;
@@ -1478,6 +1639,8 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
          c->scratch_ptrs[k].val = sv;
          return true;
       }
+      if (sv->kind == AIR_VAL_AGG && p->kind == AIR_VAL_PTR)
+         return store_aggregate(c, p->ptr, sv, in->operands[0]->type);   /* a whole struct or array, member by member */
       nir_def *v = air_get_ssa(c, in->operands[0]);
       if (!v)
          return false;
@@ -1646,6 +1809,85 @@ offset_passed(const struct air_val *v)
    return v && v->kind == AIR_VAL_PTR && v->ptr.offset && !nir_src_is_const(nir_src_for_ssa(v->ptr.offset));
 }
 
+/* AN ARGUMENT THAT IS A WHOLE STRUCT OR ARRAY (11-12: the widgets' uber_fragment passes one by value; the callee's
+ * first instruction is an extractvalue of it): each scalar or vector in it is a NIR parameter of its own, in the
+ * order of the type -- the callee puts them together again as the aggregate. */
+static bool
+type_is_aggregate(const struct air_type *t)
+{
+   return t && (t->kind == AIR_TYPE_STRUCT || t->kind == AIR_TYPE_ARRAY);
+}
+
+static unsigned
+aggregate_leaves(const struct air_type *t)
+{
+   if (!type_is_aggregate(t))
+      return 1;
+   unsigned n = 0, members = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   for (unsigned i = 0; i < members && n < 4096; i++)
+      n += aggregate_leaves(t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem);
+   return n;
+}
+
+static void
+aggregate_declare_params(struct air_ctx *c, const struct air_type *t, nir_function *fn, unsigned *idx)
+{
+   if (!type_is_aggregate(t)) {
+      fn->params[(*idx)++] = (nir_parameter){
+         .num_components = (uint8_t)air_nir_components(t),
+         .bit_size = (uint8_t)(t->kind == AIR_TYPE_POINTER ? 32 : air_nir_bit_size(c, t)),
+      };
+      return;
+   }
+   unsigned members = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   for (unsigned i = 0; i < members; i++)
+      aggregate_declare_params(c, t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem, fn, idx);
+}
+
+static struct air_val *
+aggregate_from_params(struct air_ctx *c, const struct air_type *t, unsigned *pidx)
+{
+   if (!type_is_aggregate(t))
+      return air_val_ssa(c, nir_load_param(&c->b, (*pidx)++));
+   unsigned members = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   struct air_val *agg = air_val_agg(c, members);
+   for (unsigned i = 0; i < members; i++)
+      agg->elems[i] = aggregate_from_params(c, t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem, pidx);
+   return agg;
+}
+
+static bool
+aggregate_holds_pointer(const struct air_val *value)
+{
+   if (!value)
+      return false;
+   if (value->kind == AIR_VAL_PTR)
+      return true;
+   if (value->kind == AIR_VAL_AGG)
+      for (unsigned i = 0; i < value->num_elems; i++)
+         if (aggregate_holds_pointer(value->elems[i]))
+            return true;
+   return false;
+}
+
+/* the caller's side: VALUE's leaves as the call's sources (one that is undefined, or not a plain value: undefined) */
+static void
+aggregate_pass_params(struct air_ctx *c, const struct air_val *value, const struct air_type *t, nir_call_instr *call,
+                      unsigned *idx)
+{
+   if (!type_is_aggregate(t)) {
+      unsigned comps = air_nir_components(t), bits = t->kind == AIR_TYPE_POINTER ? 32 : air_nir_bit_size(c, t);
+      nir_def *d = value && value->kind == AIR_VAL_SSA && value->def && value->def->num_components == comps &&
+                   value->def->bit_size == bits ? value->def : nir_undef(&c->b, comps, bits);
+      call->params[(*idx)++] = nir_src_for_ssa(d);
+      return;
+   }
+   unsigned members = t->kind == AIR_TYPE_STRUCT ? t->num_members : (unsigned)t->count;
+   for (unsigned i = 0; i < members; i++)
+      aggregate_pass_params(c, value && value->kind == AIR_VAL_AGG && i < value->num_elems ? value->elems[i] : NULL,
+                            t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem, call, idx);
+}
+
 static nir_function *
 translate_callee(struct air_ctx *c, const struct air_function *f,
                  struct air_val **argv, bool *is_param)
@@ -1683,6 +1925,9 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    const struct air_type *rt = f->fn_type->elem;   /* FUNCTION: the return type */
    bool has_ret = rt && rt->kind != AIR_TYPE_VOID;
    unsigned nparams = 2 * f->num_args + (has_ret ? 1 : 0);   /* (at most: an offset parameter for each argument) */
+   for (unsigned i = 0; i < f->num_args; i++)
+      if (type_is_aggregate(f->args[i].type))
+         nparams += aggregate_leaves(f->args[i].type);         /* (an aggregate's members, a parameter each) */
    nir_function *fn = nir_function_create(c->nir, f->base.name ? f->base.name : "callee");
    fn->num_params = nparams;
    fn->params = rzalloc_array(c->nir, nir_parameter, MAX2(nparams, 1));
@@ -1706,6 +1951,10 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
       if (!is_param[i])
          continue;
       const struct air_type *at = f->args[i].type;
+      if (type_is_aggregate(at)) {
+         aggregate_declare_params(c, at, fn, &idx);
+         continue;
+      }
       fn->params[idx++] = (nir_parameter){
          .num_components = (uint8_t)air_nir_components(at),
          .bit_size = (uint8_t)air_nir_bit_size(c, at),
@@ -1731,7 +1980,7 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    nir_builder saved_b = c->b;
    const struct air_function *saved_fn = c->fn;
    struct hash_table *sv = c->values, *sb = c->blocks,
-                     *sp = c->phi_cursors, *sr = c->phi_regs;
+                     *sp = c->phi_cursors, *sr = c->phi_regs, *sbr = c->phi_bind_regs;
    nir_deref_instr *saved_ret = c->ret_deref;
 
    c->fn = f;
@@ -1739,6 +1988,7 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    c->blocks = _mesa_pointer_hash_table_create(c->mem_ctx);
    c->phi_cursors = _mesa_pointer_hash_table_create(c->mem_ctx);
    c->phi_regs = _mesa_pointer_hash_table_create(c->mem_ctx);
+   c->phi_bind_regs = _mesa_pointer_hash_table_create(c->mem_ctx);
    c->b = nir_builder_at(nir_before_impl(nir_function_impl_create(fn)));
    c->b.constant_fold_alu = true;   /* (see main's builder) */
    /* as for the entry point: this translator emits an unstructured CFG with
@@ -1776,6 +2026,10 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
          air_set(c, &f->args[i], v);   /* the caller's own resolution */
          continue;
       }
+      if (type_is_aggregate(f->args[i].type)) {
+         air_set(c, &f->args[i], aggregate_from_params(c, f->args[i].type, &pidx));
+         continue;
+      }
       air_set(c, &f->args[i], air_val_ssa(c, nir_load_param(&c->b, pidx++)));
    }
    for (unsigned i = 0; i < f->num_args && ok; i++) {
@@ -1794,6 +2048,7 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
    c->blocks = sb;
    c->phi_cursors = sp;
    c->phi_regs = sr;
+   c->phi_bind_regs = sbr;
    c->ret_deref = saved_ret;
    return ok ? fn : NULL;
 }
@@ -1860,6 +2115,13 @@ air_call_in_module(struct air_ctx *c, const struct air_inst *in, const char *nam
    for (unsigned i = 0; i < f->num_args; i++) {
       if (!is_param[i])
          continue;
+      if (type_is_aggregate(f->args[i].type)) {
+         if (aggregate_holds_pointer(argv[i]))
+            return air_error(c, "intrinsic: argument %u of %s is an aggregate holding a pointer (a texture, a "
+                                "sampler, a buffer)", i, name);
+         aggregate_pass_params(c, argv[i], f->args[i].type, call, &idx);
+         continue;
+      }
       nir_def *a = air_get_ssa(c, in->operands[i + 1]);
       if (!a)
          return air_error(c, "intrinsic: argument %u of %s is not a value this can pass",
@@ -1984,6 +2246,11 @@ wrap_library_function(struct air_ctx *c, const struct air_md *out_md)
  * runs; for one on a known value, only where that value says. (FROM's
  * terminator is translated before TO's phis: reverse post-order.)
  */
+static struct air_val *air_peek(struct air_ctx *c, const struct air_value *v);
+
+/* (11-12: its looks at a condition are air_peek's -- a back edge's condition is defined further down, and air_get's
+ * "used before it is defined" stayed in the error text though the edge was simply taken as live: a later refusal
+ * that said nothing of its own was reported with that stale reason) */
 static bool
 edge_live(struct air_ctx *c, const struct air_block *from, const struct air_block *to)
 {
@@ -1991,7 +2258,7 @@ edge_live(struct air_ctx *c, const struct air_block *from, const struct air_bloc
       return false;
    const struct air_inst *term = from->insts[from->num_insts - 1];
    if (term->op == AIR_OP_BR && term->num_targets == 2) {
-      struct air_val *cv = air_get(c, term->operands[0]);
+      struct air_val *cv = air_peek(c, term->operands[0]);
       nir_def *cond = cv && cv->kind == AIR_VAL_SSA ? cv->def : NULL;
       if (cond && cond->num_components == 1 && nir_def_is_const(cond)) {
          bool taken = nir_const_value_as_bool(nir_def_as_load_const(cond)->value[0], cond->bit_size);
@@ -2000,13 +2267,13 @@ edge_live(struct air_ctx *c, const struct air_block *from, const struct air_bloc
       return term->targets[0] == to || term->targets[1] == to;
    }
    if (term->op == AIR_OP_SWITCH) {
-      struct air_val *cv = air_get(c, term->operands[0]);
+      struct air_val *cv = air_peek(c, term->operands[0]);
       nir_def *cond = cv && cv->kind == AIR_VAL_SSA ? cv->def : NULL;
       if (cond && cond->num_components == 1 && nir_def_is_const(cond)) {
          uint64_t sel = nir_const_value_as_uint(nir_def_as_load_const(cond)->value[0], cond->bit_size);
          const struct air_block *dest = term->targets[0];
          for (unsigned k = 0; k + 1 < term->num_targets; k++) {
-            struct air_val *kv = air_get(c, term->operands[1 + k]);
+            struct air_val *kv = air_peek(c, term->operands[1 + k]);
             nir_def *kd = kv && kv->kind == AIR_VAL_SSA ? kv->def : NULL;
             if (kd && nir_def_is_const(kd) &&
                 nir_const_value_as_uint(nir_def_as_load_const(kd)->value[0], kd->bit_size) == sel) {
@@ -2023,6 +2290,39 @@ edge_live(struct air_ctx *c, const struct air_block *from, const struct air_bloc
    return false;
 }
 
+/* more about the error already said: where it was met (false, for the caller to return) */
+static bool
+air_error_more(struct air_ctx *c, const char *format, ...)
+{
+   char more[96];
+   va_list ap;
+
+   va_start(ap, format);
+   vsnprintf(more, sizeof(more), format, ap);
+   va_end(ap);
+   if (strlen(c->error) + strlen(more) < sizeof(c->error))
+      strcat(c->error, more);
+   return false;
+}
+
+/* a pointer into a Metal buffer, constant or device: one kind to the back end (an address in the push constants) */
+static bool
+ptr_is_buffer(const struct air_ptr *p)
+{
+   return (p->class == AIR_PTR_SSBO || p->class == AIR_PTR_UBO) && !p->is_image;
+}
+
+/* V's value if it has one by now (a constant always has), without an error if not: a phi's operand that comes round
+ * a loop is defined further down */
+static struct air_val *
+air_peek(struct air_ctx *c, const struct air_value *v)
+{
+   struct hash_entry *e = _mesa_hash_table_search(c->values, v);
+   if (e)
+      return e->data;
+   return air_value_as_constant(v) ? air_get(c, v) : NULL;
+}
+
 /* two pointers that are one: the same value, or the same handle */
 static bool
 same_pointer(const struct air_val *a, const struct air_val *b)
@@ -2032,7 +2332,7 @@ same_pointer(const struct air_val *a, const struct air_val *b)
    if (a->kind != AIR_VAL_PTR || b->kind != AIR_VAL_PTR)
       return false;
    return a->ptr.class == b->ptr.class && a->ptr.binding == b->ptr.binding &&
-          a->ptr.offset == b->ptr.offset;
+          a->ptr.binding_def == b->ptr.binding_def && a->ptr.offset == b->ptr.offset;
 }
 
 static bool translate_body_blocks(struct air_ctx *c);
@@ -2107,16 +2407,67 @@ translate_body_blocks(struct air_ctx *c)
              * that bring the same one)
              */
             struct air_val *chosen = NULL;
+            bool by_register = false, by_buffer = false, mixed = false;
+            struct air_val *null_edge = NULL;
             for (unsigned k = 0; k < in->num_operands && k < in->num_targets; k++) {
                if (!edge_live(c, in->targets[k], blk))
                   continue;
-               struct air_val *v = air_get(c, in->operands[k]);
-               if (!v)
-                  return false;
-               if (chosen && !same_pointer(chosen, v))
-                  return air_error(c, "instruction: a phi between pointers chosen while the shader runs "
-                                      "(block %u)", bi);
+               struct air_val *v = air_peek(c, in->operands[k]);
+               if (!v) {
+                  /* a pointer that comes round a loop (p = phi [start], [p + n]): defined further down -- through
+                   * the registers (which buffer it stands in is not known yet: that too) */
+                  by_register = true;
+                  by_buffer = true;
+                  continue;
+               }
+               if (v->kind == AIR_VAL_PTR && v->ptr.class == AIR_PTR_NONE) {
+                  /* A NULL POINTER on this edge (MPS's cnnConvArray_8xIn: threadgroup memory or null): nothing may
+                   * be read through it on that road, so the pointer is the one the other edges bring */
+                  null_edge = v;
+                  continue;
+               }
+               if (chosen && !same_pointer(chosen, v)) {
+                  /* PLACES IN ONE BUFFER, chosen by the road taken: the offset goes through a register as any
+                   * other phi's value (stored at the end of every predecessor, below); pointers into different
+                   * buffers are still refused (MPS's kernelComputeStage1) */
+                  if (chosen->kind != AIR_VAL_PTR || v->kind != AIR_VAL_PTR || chosen->ptr.is_image != v->ptr.is_image ||
+                      (chosen->ptr.class != v->ptr.class && !(ptr_is_buffer(&chosen->ptr) && ptr_is_buffer(&v->ptr))))
+                     return air_error(c, "instruction: a phi between pointers of different kinds (%d and %d) chosen while "
+                                         "the shader runs (block %u)", chosen->kind == AIR_VAL_PTR ? (int)chosen->ptr.class : -1,
+                                      v->kind == AIR_VAL_PTR ? (int)v->ptr.class : -1, bi);
+                  if (chosen->ptr.binding != v->ptr.binding || chosen->ptr.binding_def != v->ptr.binding_def ||
+                      chosen->ptr.class != v->ptr.class)
+                     by_buffer = true;       /* TWO BUFFERS (MPS's cnnConvArray_8xIn): the index through a register too */
+                  if (chosen->ptr.class != v->ptr.class)
+                     mixed = true;           /* a constant buffer and a device buffer: read as a device buffer */
+                  by_register = true;
+               }
                chosen = v;
+            }
+            if (!chosen && !by_register && null_edge)
+               chosen = null_edge;          /* (null on every edge) */
+            if (by_register && (!chosen || chosen->kind != AIR_VAL_PTR))
+               return air_error(c, "instruction: a phi between pointers none of which is known where it stands "
+                                   "(block %u)", bi);
+            if (by_register) {
+               nir_def *reg = nir_decl_reg(&entry, 1, 32, 0);
+               struct air_ptr p = chosen->ptr;
+
+               _mesa_hash_table_insert(c->phi_regs, in, reg);
+               p.offset = nir_load_reg(&c->b, reg);
+               if (mixed)
+                  p.class = AIR_PTR_SSBO;
+               if (by_buffer && (p.class == AIR_PTR_SSBO || p.class == AIR_PTR_UBO) && !p.is_image) {
+                  nir_def *breg = nir_decl_reg(&entry, 1, 32, 0);
+
+                  _mesa_hash_table_insert(c->phi_bind_regs, in, breg);
+                  p.binding_def = nir_load_reg(&c->b, breg);
+               } else if (by_buffer && chosen->ptr.binding_def) {
+                  return air_error(c, "instruction: a phi between pointers of this kind chosen while the shader runs "
+                                      "(block %u)", bi);
+               }
+               air_set(c, &in->base, air_val_ptr(c, p));
+               continue;
             }
             if (!chosen) {
                /* a block nothing reaches: any value will do, it never runs */
@@ -2167,7 +2518,7 @@ translate_body_blocks(struct air_ctx *c)
       switch (term->op) {
       case AIR_OP_RET:
          if (!emit_return(c, term))
-            return false;
+            return air_error_more(c, " (the return of block %u)", bi);
          nir_goto(&c->b, c->b.impl->end_block);
          break;
       case AIR_OP_BR:
@@ -2176,7 +2527,7 @@ translate_body_blocks(struct air_ctx *c)
          } else {
             nir_def *cond = air_get_ssa(c, term->operands[0]);
             if (!cond)
-               return false;
+               return air_error_more(c, " (the branch of block %u)", bi);
             if (term->targets[0] == term->targets[1])
                nir_goto(&c->b, nir_block_of(c, term->targets[0]));
             else if (cond->num_components == 1 && nir_def_is_const(cond))
@@ -2263,9 +2614,35 @@ translate_body_blocks(struct air_ctx *c)
             if (!ce)
                continue; /* an edge from a block the entry cannot reach */
             c->b.cursor = *(nir_cursor *)ce->data;
-            nir_def *val = air_get_ssa(c, in->operands[k]);
+            nir_def *val;
+            if (in->base.type->kind == AIR_TYPE_POINTER) {
+               /* a pointer phi's register holds the offset in its one buffer */
+               struct air_val *pv = air_get(c, in->operands[k]);
+               if (!pv)
+                  return air_error_more(c, " (a pointer phi's operand %u, block %u)", k, bi);
+               struct air_val *own = air_peek(c, &in->base);
+               struct hash_entry *be = _mesa_hash_table_search(c->phi_bind_regs, in);
+               if (pv->kind == AIR_VAL_PTR && pv->ptr.class == AIR_PTR_NONE && own && own->kind == AIR_VAL_PTR) {
+                  /* (a null pointer's edge: the register's value is never used on that road) */
+                  if (be)
+                     nir_store_reg(&c->b, nir_imm_int(&c->b, own->ptr.binding), be->data);
+                  nir_store_reg(&c->b, nir_imm_int(&c->b, 0), re->data);
+                  *(nir_cursor *)ce->data = c->b.cursor;
+                  continue;
+               }
+               if (pv->kind != AIR_VAL_PTR || !own || own->kind != AIR_VAL_PTR ||
+                   (pv->ptr.class != own->ptr.class && !(be && ptr_is_buffer(&pv->ptr) && ptr_is_buffer(&own->ptr))) ||
+                   (!be && (pv->ptr.binding != own->ptr.binding || pv->ptr.binding_def)))
+                  return air_error(c, "instruction: a phi between pointers into different buffers chosen while the "
+                                      "shader runs");
+               if (be)
+                  nir_store_reg(&c->b, ptr_binding(c, pv->ptr), be->data);
+               val = pv->ptr.offset ? pv->ptr.offset : nir_imm_int(&c->b, 0);
+            } else {
+               val = air_get_ssa(c, in->operands[k]);
+            }
             if (!val)
-               return false;
+               return air_error_more(c, " (a phi's operand %u of %u, block %u, instruction %u)", k, in->num_operands, bi, i);
             nir_store_reg(&c->b, val, re->data);
             /* later stores into the same block go after this one */
             *(nir_cursor *)ce->data = c->b.cursor;
@@ -2639,7 +3016,8 @@ walk_static_initializer(struct air_ctx *c, const struct air_function *f)
             break;
          }
          if (!translate_instruction(c, in))
-            return false;
+            return air_error_more(c, " (the static initializer %s: block %u, instruction %u, opcode %u)",
+                                  f->base.name ? f->base.name : "?", blk->index, k, in->op);
       }
       if (!term || term->op == AIR_OP_RET)
          return true;
@@ -2812,6 +3190,7 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
    c.blocks = _mesa_pointer_hash_table_create(ctx);
    c.phi_cursors = _mesa_pointer_hash_table_create(ctx);
    c.phi_regs = _mesa_pointer_hash_table_create(ctx);
+   c.phi_bind_regs = _mesa_pointer_hash_table_create(ctx);
    c.num_params = fn->num_args;
    c.params = rzalloc_array(ctx, struct air_val *, MAX2(c.num_params, 1));
 
