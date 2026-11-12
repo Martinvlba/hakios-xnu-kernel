@@ -167,6 +167,11 @@ void hakios_metal_texture_surface_changed(hakios_metal_texture *texture);
 /* the same for a two-plane format (YCbCr8_420_2P, 500) over a '420f' or '420v' surface: CHROMA_OFFSET where the surface's
  * second plane starts in its memory (IOSurfaceGetBaseAddressOfPlane(s, 1) less IOSurfaceGetBaseAddress(s)) and
  * CHROMA_ROW_BYTES its rows; both planes are sampled as one texture. */
+/* a texture over a later PLANE of a planar IOSurface (11-12 night: SpringBoard's over plane 1 of '420f' surfaces): the
+ * plane's first byte PLANE_DELTA bytes past plane 0's, its rows ROW_BYTES long -- the caller's, from IOSurface's own
+ * functions. The Mali core's; nullptr with the reason elsewhere. */
+hakios_metal_texture *hakios_metal_texture_new_iosurface_plane(hakios_metal_device *device, unsigned surface_id, uint64_t plane_delta,
+    unsigned row_bytes, unsigned pixel_format, unsigned width, unsigned height, unsigned usage);
 hakios_metal_texture *hakios_metal_texture_new_iosurface2(hakios_metal_device *device, unsigned surface_id, unsigned plane,
     unsigned pixel_format, unsigned width, unsigned height, unsigned usage, uint64_t chroma_offset, unsigned chroma_row_bytes);
 /* -[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]: a texture over BUFFER's bytes from OFFSET, BYTES_PER_ROW apart

@@ -1,5 +1,6 @@
 # Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
-# Safari opened from the dock and left 60 s (its start page, loaded over Wi-Fi: WebKit's GPU process draws it -- vector
-# paths, images, text), for screenshots from the host (devices/akita TODO 18c).
+# Safari opened from the dock and left 60 s (its page, loaded over Wi-Fi: WebKit's GPU process draws it -- vector
+# paths, images, text; a tap on the status bar 25 s in scrolls it to its top), for screenshots from the host
+# (devices/akita TODO 18c).
 /redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 20
-/redwood/bin/rwtouch tap 0.385 0.93 wait 60 button home wait 3
+/redwood/bin/rwtouch tap 0.385 0.93 wait 25 tap 0.5 0.012 wait 35 button home wait 3
