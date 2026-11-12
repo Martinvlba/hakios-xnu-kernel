@@ -426,6 +426,35 @@ gic_find_redistributor(void)
 }
 
 /* Per-CPU bring-up: every processor calls this for itself, the boot processor first. */
+/*
+ * A core back from a power-down idle (psci_idle_resumed): the CPU interface's registers are the core's and were lost --
+ * set again as gic_v3_irq_cpu_init() sets them (as Linux's gic_cpu_sys_reg_init on CPU_PM_EXIT); the redistributor
+ * kept its configuration, woken if the firmware put it to sleep.
+ */
+void
+gic_v3_irq_cpu_resume(void)
+{
+	int cpu = cpu_number();
+	vm_offset_t gicr = gicr_cpu_base[cpu];
+
+	__builtin_arm_wsr64("ICC_SRE_EL1", __builtin_arm_rsr64("ICC_SRE_EL1") | 1);
+	__builtin_arm_isb(ISB_SY);
+	if (gicr != 0) {
+		uint32_t waker = gic_read32(gicr + GICR_WAKER);
+		if (waker & (GICR_WAKER_PROCSLEEP | GICR_WAKER_CHILDASLEEP)) {
+			gic_write32(gicr + GICR_WAKER, waker & ~GICR_WAKER_PROCSLEEP);
+			while (gic_read32(gicr + GICR_WAKER) & GICR_WAKER_CHILDASLEEP) {
+				/* spin until the redistributor is awake */
+			}
+		}
+	}
+	__builtin_arm_wsr64("ICC_AP1R0_EL1", 0);
+	__builtin_arm_wsr64("ICC_PMR_EL1", 0xff);
+	__builtin_arm_wsr64("ICC_BPR1_EL1", 0);
+	__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
+	__builtin_arm_isb(ISB_SY);
+}
+
 void
 gic_v3_irq_cpu_init(void)
 {
