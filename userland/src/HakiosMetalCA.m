@@ -3441,8 +3441,10 @@ hm_compile_queue(void)
 			hakios_metal_program_set_attachment_format(program, i, (unsigned)[c pixelFormat]);
 			if ([c pixelFormat] == MTLPixelFormatR32Float || [c pixelFormat] == MTLPixelFormatRG16Float ||
 			    [c pixelFormat] == MTLPixelFormatR16Float) {
-				HM_ONCE("a pipeline's colour attachment %u is MTLPixelFormat %lu: blending %s (operations %lu/%lu, factors %lu "
-					"%lu / %lu %lu), write mask 0x%lx (the first such attachment)\n", i, (unsigned long)[c pixelFormat],
+				static _Atomic unsigned hm_float_rt_said;
+				if (hm_float_rt_said++ < 24)
+				hm_print("a pipeline's (%s) colour attachment %u is MTLPixelFormat %lu: blending %s (operations %lu/%lu, factors %lu "
+					"%lu / %lu %lu), write mask 0x%lx\n", [[descriptor label] UTF8String] ?: "no label", i, (unsigned long)[c pixelFormat],
 					[c isBlendingEnabled] ? "on" : "off", (unsigned long)[c rgbBlendOperation],
 					(unsigned long)[c alphaBlendOperation], (unsigned long)[c sourceRGBBlendFactor],
 					(unsigned long)[c destinationRGBBlendFactor], (unsigned long)[c sourceAlphaBlendFactor],
@@ -3977,7 +3979,26 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 		 * driver does not hold it to the usage. A surface's rows are linear, so a render target costs nothing here;
 		 * one is added wherever the core takes it for the format, and the usage asked for is the fallback. */
 		texture = NULL;
-		if ((usage & MTLTextureUsageRenderTarget) == 0) {
+		if (plane != 0 && plane < IOSurfaceGetPlaneCount(surface)) {
+			/* (11-12 night) a later plane of a planar surface ('420f''s CbCr plane, which SpringBoard asks as RGBA8 of
+			 * half its width): the plane's place and rows from the surface itself, the Mali core's texture over them */
+			const uint64_t delta = (uint64_t)((uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface, plane) -
+						      (uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface, 0));
+			texture = hakios_metal_texture_new_iosurface_plane(_gpu, IOSurfaceGetID(surface), delta,
+									   (unsigned)IOSurfaceGetBytesPerRowOfPlane(surface, plane),
+									   (unsigned)[descriptor pixelFormat], (unsigned)[descriptor width],
+									   (unsigned)[descriptor height], (unsigned)(usage | MTLTextureUsageRenderTarget));
+			if (texture != NULL) {
+				usage |= MTLTextureUsageRenderTarget;
+				HM_ONCE("a texture over plane %lu of IOSurface %u: %lux%lu of format %lu, usage %#lx, the plane %zux%zu with rows "
+					"of %zu bytes, %llu bytes past plane 0 (the first)\n", (unsigned long)plane, IOSurfaceGetID(surface),
+					(unsigned long)[descriptor width], (unsigned long)[descriptor height],
+					(unsigned long)[descriptor pixelFormat], (unsigned long)usage, IOSurfaceGetWidthOfPlane(surface, plane),
+					IOSurfaceGetHeightOfPlane(surface, plane), IOSurfaceGetBytesPerRowOfPlane(surface, plane),
+					(unsigned long long)delta);
+			}
+		}
+		if (texture == NULL && (usage & MTLTextureUsageRenderTarget) == 0) {
 			texture = hakios_metal_texture_new_iosurface(_gpu, IOSurfaceGetID(surface), (unsigned)plane, (unsigned)[descriptor pixelFormat],
 								     (unsigned)[descriptor width], (unsigned)[descriptor height],
 								     (unsigned)(usage | MTLTextureUsageRenderTarget));

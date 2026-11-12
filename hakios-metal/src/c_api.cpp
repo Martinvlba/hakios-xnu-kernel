@@ -599,6 +599,12 @@ hakios_metal_texture* hakios_metal_texture_new_iosurface(hakios_metal_device* d,
     return textureOverSurface(d, surfaceId, plane, pixelFormat, width, height, usage, nullptr);
 }
 
+hakios_metal_texture* hakios_metal_texture_new_iosurface_plane(hakios_metal_device*, unsigned surfaceId, uint64_t, unsigned,
+                                                               unsigned, unsigned, unsigned, unsigned) {
+    failed("a texture over a later plane of IOSurface " + std::to_string(surfaceId) + " (the Mali core's)");
+    return nullptr;
+}
+
 hakios_metal_texture* hakios_metal_texture_new_iosurface2(hakios_metal_device* d, unsigned surfaceId, unsigned plane, unsigned pixelFormat, unsigned width,
                                                           unsigned height, unsigned usage, uint64_t chromaOffset, unsigned chromaRowBytes) {
     const Texture::SurfacePlane chroma{chromaOffset, chromaRowBytes};

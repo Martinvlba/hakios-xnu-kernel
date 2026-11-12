@@ -1115,6 +1115,65 @@ raw_float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_meta
 	return st1 == HAKIOS_METAL_COMPLETED && st2 == HAKIOS_METAL_COMPLETED && cleared == 4096 && drawn == 4096;
 }
 
+/* 7b'''. blending INTO an R32Float attachment (11-12 night: WebKit's path pipelines add coverage into one, source ONE,
+ * destination ONE, red alone): cleared to 0.25, the flat draw (red 0x20/255) added twice in one pass and once more in
+ * a pass that loads it: 0.25 + 3 x 0.1255 */
+static int
+raw_blend_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 55, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *add = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc,
+	    tri_flat_fs_bc_len, 55);
+	struct hakios_metal_render_pass pass;
+	static float px[64 * 64];
+	unsigned right1 = 0, right2 = 0;
+	float first1 = 0;
+	int ok;
+	hakios_metal_cb *cb;
+
+	if (t == NULL || add == NULL) {
+		printf("mali_draw_test: blending into R32Float: no texture or program (%s): FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	hakios_metal_program_set_attachment_format(add, 0, 55);
+	hakios_metal_program_set_blend(add, 1, 0, 0, 1, 1, 1, 0, 0x8);
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = 0.25;
+	cb = hakios_metal_cb_new(q);
+	for (int k = 0; k < 2; k++) {
+		/* (the second draw of the pass: the attachment as the first left it -- Load, as the plug-in passes a pass's
+		 * later draws; with Clear again the core takes it for a new pass and clears) */
+		pass.load_action = k == 0 ? 2 : 1;
+		if (hakios_metal_cb_draw(cb, add, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+			printf("mali_draw_test: blending into R32Float: refused: %s\n", hakios_metal_error());
+	}
+	ok = finish(cb, "blending into R32Float");
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	first1 = px[0];
+	for (unsigned i = 0; i < 4096; i++) {
+		float e = px[i] - (0.25f + 2 * 32.0f / 255.0f);
+		right1 += e > -0.004f && e < 0.004f;
+	}
+	pass.load_action = 1;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, add, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: blending into R32Float (loaded): refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "blending into R32Float, loaded") && ok;
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 4096; i++) {
+		float e = px[i] - (0.25f + 3 * 32.0f / 255.0f);
+		right2 += e > -0.004f && e < 0.004f;
+	}
+	printf("mali_draw_test: blending into R32Float: two draws added %u of 4096 right (pixel 0 %d/100000, wanted 50098); a "
+	    "third in a pass that loads it %u of 4096 (pixel 0 %d/100000, wanted 62647): %s\n", right1, (int)(first1 * 100000.0f),
+	    right2, (int)(px[0] * 100000.0f), ok && right1 == 4096 && right2 == 4096 ? "WORK" : "FAILED");
+	hakios_metal_texture_free(t);
+	return ok && right1 == 4096 && right2 == 4096;
+}
+
 /* 7c. layered textures (11-12): a 2D array of 3 layers with 3 levels and a cube -- each layer and face written and read
  * back alone; a draw into layer 1 leaves layers 0 and 2 as they were; a view of layer 2 reads layer 2 */
 static int
@@ -1390,6 +1449,7 @@ main(int argc, char **argv)
 	right = narrow_target_test(d, q, flat) && right;
 	right = float_target_test(d, q, flat) && right;
 	right = raw_float_target_test(d, q, flat) && right;
+	right = raw_blend_test(d, q) && right;
 	right = layered_test(d, q, flat) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;

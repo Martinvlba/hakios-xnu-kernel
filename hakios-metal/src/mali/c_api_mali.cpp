@@ -4892,7 +4892,9 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     bool reads0 = p->blend_reads_dest || (p->fs.rt_read & 1);
     dj.blend[0] = 1u << 9 | (reads0 ? 1u : 0);
     dj.blend[1] = p->blend_equation;
-    dj.blend[2] = (reads0 ? 2u : 1u) | 3 << 3;                // mode, 4 components, RT 0
+    // (a raw target, R32Float: opaque always -- the fixed-function blender does not know it; what the shader read of it
+    // came through LD_TILE, the tile loaded by blend[0]'s bit all the same)
+    dj.blend[2] = (reads0 && !(dj.rt1 & kRtRaw) ? 2u : 1u) | 3 << 3;   // mode, 4 components, RT 0
     dj.blend[3] = rtBlend(dj.rt1);                           // the tile buffer's RGBA8
     dj.rts = rts;
     for (unsigned i = 1; i < rts; i++) {
@@ -4973,7 +4975,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         bool reads = p->more_blend_reads_dest[i - 1] || (p->fs.rt_read & 1u << i);
         m.blend[0] = 1u << 9 | (reads ? 1u : 0);
         m.blend[1] = p->more_blend_equation[i - 1];
-        m.blend[2] = (reads ? 2u : 1u) | 3 << 3 | i << 16;
+        m.blend[2] = (reads && !(m.rt1 & kRtRaw) ? 2u : 1u) | 3 << 3 | i << 16;
         m.blend[3] = rtBlend(m.rt1);
     }
     // Metal's point, line, line strip, triangle, triangle strip as Mali's draw modes (genxml v10 "Draw Mode")
@@ -5003,7 +5005,11 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         dj.dcd0 |= 2u << 2 | 3u << 4;
     }
     dj.dcd1 = 0xffff | 1u << 16;
-    dj.dcd2 = 1u << 12 | 1u << 24 | 1u << 25;
+    // (11-12 night) THE READ MASK: the colour targets the fragment function reads from the tile buffer (framebuffer fetch,
+    // or the blend computed in the shader) -- Mesa's cfg.read_mask = rt_read. Without it two draws over the same pixels
+    // in one pass each read the tile as it was before either: WebKit's path coverage, added into an R32Float target, came
+    // out as noise (mali_draw_test "blending into R32Float": two draws added once)
+    dj.dcd2 = 1u << 12 | 1u << 24 | 1u << 25 | (p->fs.rt_read & 0xffu);
     dj.tiler_flags = dj.mode | 1u << 22 | (dj.vary_spd ? 1u << 18 : 0);   // basic FIFO; the varying shader
     if (ix) {
         // the indices: 16 or 32 bits (Mali's index type 2, 3), primitive restart at the type's all-ones as Metal has it
@@ -5278,6 +5284,36 @@ hakios_metal_texture_mirrored(hakios_metal_texture *t)
         t = t->parent;
     }
     return t != nullptr && t->mirrored;
+}
+
+hakios_metal_texture *
+hakios_metal_texture_new_iosurface_plane(hakios_metal_device *d, unsigned surface_id, uint64_t plane_delta, unsigned row_bytes,
+    unsigned pixel_format, unsigned width, unsigned height, unsigned usage)
+{
+    // a later plane of a planar surface, as a texture of the format and size asked (SpringBoard asks RGBA8 of a '420f'
+    // surface's CbCr plane: its bytes four at a time): the same memory, further on
+    const MaliFormat *f = findFormat(pixel_format);
+    if (f == nullptr || f->bw != 1 || f->bh != 1 || width == 0 || height == 0) {
+        fail("a texture over a plane of IOSurface %u of MTLPixelFormat %u (not served on the Mali yet)", surface_id, pixel_format);
+        return nullptr;
+    }
+    Bo bo;
+    hakios_metal_device::SurfaceInfo info;
+    if (!d->surfaceBo(surface_id, bo, info)) {
+        return nullptr;
+    }
+    const uint64_t offset = info.offset + plane_delta;
+    if ((uint64_t)width * f->bytes > row_bytes || offset + (uint64_t)row_bytes * (height - 1) + (uint64_t)width * f->bytes > info.size ||
+        (row_bytes & 63) || (offset & 63)) {
+        d->surfaceRelease(surface_id);
+        fail("a texture of %u x %u, MTLPixelFormat %u over a plane of IOSurface %u at %llu, rows of %u bytes, in %llu bytes (rows "
+            "and start of multiples of 64 bytes, inside the surface)", width, height, pixel_format, surface_id,
+            (unsigned long long)offset, row_bytes, (unsigned long long)info.size);
+        return nullptr;
+    }
+    hakios_metal_texture *t = textureOver(d, bo, offset, row_bytes, 2, f, pixel_format, width, height, usage, 1);
+    t->surface = surface_id;
+    return t;
 }
 
 hakios_metal_texture *
