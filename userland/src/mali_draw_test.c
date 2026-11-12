@@ -1069,6 +1069,62 @@ float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_pr
 	return ok;
 }
 
+/* 7b*. A BLEND THE SHADER COMPUTES, INTO HALF FLOATS (11-13): the blend colour's factors (fixed function has none: the
+ * shader reads the target and blends) into an RG16Float and an RGBA16Float cleared to 0.5 -- red 0.1255 x 0.25 + 0.5 x
+ * 0.75 = 0.4064, green 0.251 x 0.5 + 0.5 x 0.5 = 0.3755, as "blend colour" has them in 8 bits */
+static int
+float_shader_blend_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	static const struct { unsigned format, n; const char *name; } kinds[2] = { { 65, 2, "RG16Float" }, { 115, 4, "RGBA16Float" } };
+	int ok = 1;
+
+	for (int k = 0; k < 2; k++) {
+		const unsigned n = kinds[k].n;
+		hakios_metal_texture *t = hakios_metal_texture_new(d, 2, kinds[k].format, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+		hakios_metal_program *bl = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc,
+		    tri_flat_fs_bc_len, kinds[k].format);
+		struct hakios_metal_render_pass pass;
+		static uint16_t px[64 * 64 * 4];
+		unsigned right = 0;
+		int good;
+		hakios_metal_cb *cb;
+
+		if (t == NULL || bl == NULL) {
+			printf("mali_draw_test: a shader's blend into %s: no texture or program (%s): FAILED\n", kinds[k].name, hakios_metal_error());
+			ok = 0;
+			continue;
+		}
+		hakios_metal_program_set_attachment_format(bl, 0, kinds[k].format);
+		hakios_metal_program_set_blend(bl, 1, 0, 0, 11, 12, 13, 14, 0xf);
+		memset(&pass, 0, sizeof(pass));
+		pass.color0 = t;
+		pass.load_action = 2;
+		pass.store_action = 1;
+		pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+		pass.clear_color[3] = 1;
+		pass.blend_color[0] = 0.25f;
+		pass.blend_color[1] = 0.5f;
+		pass.blend_color[2] = 0.75f;
+		pass.blend_color[3] = 1;
+		cb = hakios_metal_cb_new(q);
+		if (hakios_metal_cb_draw(cb, bl, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+			printf("mali_draw_test: a shader's blend into %s: refused: %s\n", kinds[k].name, hakios_metal_error());
+		good = finish(cb, "a shader's blend into half floats");
+		memset(px, 0xee, sizeof(px));
+		hakios_metal_texture_read(t, 0, 0, 64, 64, px, 64 * 2 * n);
+		for (unsigned i = 0; i < 4096; i++) {
+			float r = half_value(px[i * n]) - 0.4064f, g = half_value(px[i * n + 1]) - 0.3755f;
+			right += r > -0.006f && r < 0.006f && g > -0.006f && g < 0.006f;
+		}
+		good = good && right == 4096;
+		printf("mali_draw_test: a shader's blend into %s: %u of 4096 near (0.4064, 0.3755), the first %d %d /10000: %s\n",
+		    kinds[k].name, right, (int)(half_value(px[0]) * 10000.0f), (int)(half_value(px[1]) * 10000.0f), good ? "WORK" : "FAILED");
+		ok = ok && good;
+		hakios_metal_texture_free(t);
+	}
+	return ok;
+}
+
 /* 7b+. A WIDE TARGET AMONG OTHERS (11-13): RGBA8, RGBA16Float, RGBA8 cleared in one pass -- the RGBA16Float takes two of
  * the tile buffer's kilobytes, so the third target's part starts further on: each must come back its own clear */
 static int
@@ -1513,6 +1569,7 @@ main(int argc, char **argv)
 	right = raw_float_target_test(d, q, flat) && right;
 	right = raw_blend_test(d, q) && right;
 	right = wide_among_test(d, q) && right;
+	right = float_shader_blend_test(d, q) && right;
 	right = layered_test(d, q, flat) && right;
 	pass_bench(d, q, flat);
 	right = recovery_tests(d, q, flat) && right;

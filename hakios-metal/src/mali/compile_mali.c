@@ -291,7 +291,10 @@ lower_draw_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
 		unsigned rt = nir_intrinsic_base(in);
 		unsigned format = blend_formats != NULL && rt < 4 ? blend_formats->format[rt] : 0;
 
-		value = nir_imm_int(b, format == 55 ? (167 << 12 | 16) : 237 << 12);
+		/* (a half-float format is told only for a target whose blend is computed in the shader: its tile holds
+		 * the floats) */
+		value = nir_imm_int(b, format == 55 ? (167 << 12 | 16) : format == 25 ? 199 << 12 : format == 65 ? 207 << 12 :
+		    format == 115 ? 223 << 12 : 237 << 12);
 		break;
 	}
 	default:
@@ -640,7 +643,8 @@ lower_shader_blend(nir_shader *s, const struct mali_shader_blend *blend, struct 
 
 		rt->format = blend->format[i < 4 ? i : 0] == 55 && i < 4 ? PIPE_FORMAT_R32_FLOAT :
 		    i < 4 && blend->format[i] == 25 ? PIPE_FORMAT_R16_FLOAT :
-		    i < 4 && blend->format[i] == 65 ? PIPE_FORMAT_R16G16_FLOAT : PIPE_FORMAT_R8G8B8A8_UNORM;
+		    i < 4 && blend->format[i] == 65 ? PIPE_FORMAT_R16G16_FLOAT :
+		    i < 4 && blend->format[i] == 115 ? PIPE_FORMAT_R16G16B16A16_FLOAT : PIPE_FORMAT_R8G8B8A8_UNORM;
 		rt->colormask = 0xf;
 		rt->rgb = (nir_lower_blend_channel){ PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO };
 		rt->alpha = rt->rgb;

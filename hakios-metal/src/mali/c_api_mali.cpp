@@ -477,6 +477,7 @@ struct hakios_metal_program {
     // again with mali_fragment_compile; their equation is a replace that reads the tile buffer)
     mali_shader_blend shader_blend = {};
     bool rt_blend_on[4] = {};                   // blending enabled at colour attachment n (hakios_metal_program_set_blend*)
+    unsigned rt_format[4] = {};                 // colour attachment n's MTLPixelFormat (hakios_metal_program_set_attachment_format)
     std::string fetch_refusal;
     bool blend_reads_dest = false;
     std::string blend_refusal;
@@ -4206,7 +4207,17 @@ namespace {
 void
 rawBlend(hakios_metal_program *p, unsigned i)
 {
-    if (i > 3 || p->shader_blend.format[i] != 55 || !p->rt_blend_on[i]) {
+    if (i > 3) {
+        return;
+    }
+    // WHAT THE COMPILE IS TOLD OF THE ATTACHMENT'S FORMAT (11-13): R32Float always (the fetch's conversion); a half-float
+    // one only when its blend is computed in the shader (nir_lower_blend then reads and writes it as the floats it holds
+    // -- it took every target for RGBA8, clamped to 0..1) -- told otherwise, the program takes the shader-blend compile
+    // for nothing
+    const unsigned f = p->rt_format[i];
+    static const bool told_always = bootArg("metal_rtfmt=1");   // (a test: every float attachment's format told)
+    p->shader_blend.format[i] = f == 55 || ((told_always || (p->shader_blend.mask & 1u << i)) && (f == 25 || f == 65 || f == 115)) ? f : 0;
+    if (f != 55 || !p->rt_blend_on[i]) {
         return;
     }
     p->shader_blend.mask |= 1u << i;
@@ -4230,10 +4241,7 @@ hakios_metal_program_set_attachment_format(hakios_metal_program *p, unsigned ind
     if (p == nullptr || index > 3) {
         return;
     }
-    // (R32Float alone: the half-float targets read back right with the tile buffer's RGBA8 conversion as before, and
-    // a format here sends the program through the compile that blending in the shader takes -- with RG16Float told,
-    // the Weather widget went black, webkit1/webkit2)
-    p->shader_blend.format[index] = pixel_format == 55 ? pixel_format : 0;
+    p->rt_format[index] = pixel_format;
     rawBlend(p, index);
 }
 
@@ -6332,6 +6340,7 @@ hakios_metal_program_specialize(hakios_metal_program *base, const void *fs_bitco
         p->fetch_described = base->fetch_described;
         p->shader_blend = base->shader_blend;
         for (unsigned i = 0; i < 4; i++) p->rt_blend_on[i] = base->rt_blend_on[i];
+        for (unsigned i = 0; i < 4; i++) p->rt_format[i] = base->rt_format[i];
         p->blend_reads_dest = base->blend_reads_dest;
         p->blend_refusal = base->blend_refusal;
         for (unsigned i = 0; i < 3; i++) {
