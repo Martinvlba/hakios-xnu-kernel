@@ -1,0 +1,5 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Maps opened from the home screen and left 70 s (its map is VectorKit's, drawn with Metal in the application), the
+# sheet dragged down 40 s in to show more of the map -- for screenshots from the host (devices/akita TODO 18c).
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 20
+/redwood/bin/rwtouch tap 0.615 0.60 wait 40 swipe 0.5 0.55 0.5 0.9 300 wait 30 button home wait 3
