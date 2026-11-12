@@ -427,6 +427,20 @@ gic_find_redistributor(void)
 
 /* Per-CPU bring-up: every processor calls this for itself, the boot processor first. */
 /*
+ * This core's SGIs and PPIs as its redistributor has them: pending (GICR_ISPENDR0) and enabled (GICR_ISENABLER0). The
+ * Pixel 8a's firmware cancels a CPU_SUSPEND (-2) while an SGI -- bits 0-15 -- is pending there (psci_idle_enter keeps
+ * what it finds after a refusal).
+ */
+void
+gic_v3_irq_cpu_sgi_ppi(uint32_t *pending, uint32_t *enabled)
+{
+	vm_offset_t gicr = gicr_cpu_base[cpu_number()];
+
+	*pending = gicr ? gic_read32(gicr + GICR_SGI_BASE + 0x0200) : 0;
+	*enabled = gicr ? gic_read32(gicr + GICR_ISENABLER0) : 0;
+}
+
+/*
  * A core back from a power-down idle (psci_idle_resumed): the CPU interface's registers are the core's and were lost --
  * set again as gic_v3_irq_cpu_init() sets them (as Linux's gic_cpu_sys_reg_init on CPU_PM_EXIT); the redistributor
  * kept its configuration, woken if the firmware put it to sleep.

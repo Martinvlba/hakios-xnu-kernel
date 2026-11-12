@@ -39,6 +39,7 @@ extern bool             psci_idle_enter(struct cpu_data *cdp);
 extern void             psci_idle_resumed(void);
 extern void             psci_idle_totals(uint64_t *tries, uint64_t *downs, uint64_t *back, uint64_t *refused);
 extern int64_t          psci_idle_error(void);
+extern void             psci_idle_core(int cpu, uint64_t *downs, uint64_t *refused, uint32_t *pending, uint32_t *enabled);
 extern uint32_t         psci_idle_states(uint32_t *taken);
 
 /* osfmk/arm64/gic_v3_irq.c */
