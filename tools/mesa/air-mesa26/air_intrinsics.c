@@ -173,6 +173,30 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
       nir_def *at_origin =
          nir_bcsel(&c->b, nir_ilt_imm(&c->b, y, 0), nir_fneg(&c->b, mag), mag);
       r = nir_bcsel(&c->b, origin, at_origin, nir_atan2(&c->b, y, x));
+   } else if (!strcmp(op, "fast_tanh") || !strcmp(op, "tanh") ||
+              !strcmp(op, "fast_sinh") || !strcmp(op, "sinh") ||
+              !strcmp(op, "fast_cosh") || !strcmp(op, "cosh")) {
+      /* the hyperbolic ones from the exponential (MPS's batch normalisation with a tanh activation,
+       * TARR_batchnorm_inference_kernel, was refused for air.fast_tanh.v4f32: mediaanalysisd on the Pixel 8a,
+       * 11-13). tanh = (e^2x - 1) / (e^2x + 1) with x held to +-10, where a float's tanh is 1 already and e^2x
+       * still far from infinity (and from a half's: 4.8e8 does not fit one, so a half is held to +-5) */
+      if (strstr(op, "tanh")) {
+         const double lim = a[0]->bit_size == 16 ? 5.0 : 10.0;
+         nir_def *x = nir_fmin(&c->b, nir_fmax(&c->b, a[0], nir_imm_floatN_t(&c->b, -lim, a[0]->bit_size)),
+                               nir_imm_floatN_t(&c->b, lim, a[0]->bit_size));
+         nir_def *e = nir_fexp2(&c->b, nir_fmul_imm(&c->b, x, 2.0 * M_LOG2E));
+         r = nir_fdiv(&c->b, nir_fadd_imm(&c->b, e, -1.0), nir_fadd_imm(&c->b, e, 1.0));
+      } else {
+         nir_def *e = nir_fexp2(&c->b, nir_fmul_imm(&c->b, a[0], M_LOG2E));
+         nir_def *n = nir_fexp2(&c->b, nir_fmul_imm(&c->b, a[0], -M_LOG2E));
+         r = nir_fmul_imm(&c->b, strstr(op, "sinh") ? nir_fsub(&c->b, e, n) : nir_fadd(&c->b, e, n), 0.5);
+      }
+   } else if (!strcmp(op, "fast_asin") || !strcmp(op, "asin")) {
+      r = nir_asin(&c->b, a[0]);
+   } else if (!strcmp(op, "fast_acos") || !strcmp(op, "acos")) {
+      r = nir_acos(&c->b, a[0]);
+   } else if (!strcmp(op, "fast_atan") || !strcmp(op, "atan")) {
+      r = nir_atan(&c->b, a[0]);
    } else if (!strcmp(op, "fast_exp") || !strcmp(op, "exp")) {
       /* the natural one: Apple's compiler names exp and exp2 separately */
       r = nir_fexp2(&c->b, nir_fmul_imm(&c->b, a[0], M_LOG2E));

@@ -4064,6 +4064,26 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 							    (unsigned long)[descriptor mipmapLevelCount], (unsigned long)[descriptor sampleCount],
 							    (unsigned long)[descriptor arrayLength]]);
 	}
+	if (hm_boot_arg_set("metal_surfsay")) {
+		/* (metal_surfsay=1: every texture asked over a surface -- what the surface is, plane by plane, and what is asked
+		 * of it; Fitness' Trends video drew as streaks, 11-13) */
+		const uint32_t cc = IOSurfaceGetPixelFormat(surface);
+		const size_t planes = IOSurfaceGetPlaneCount(surface);
+		char each[200] = "";
+		int at = 0;
+
+		for (size_t i = 0; i < planes && i < 4 && at < (int)sizeof(each) - 48; i++) {
+			at += snprintf(each + at, sizeof(each) - (size_t)at, " [%zu: %zux%zu rows %zu at +%ld]", i, IOSurfaceGetWidthOfPlane(surface, i),
+				       IOSurfaceGetHeightOfPlane(surface, i), IOSurfaceGetBytesPerRowOfPlane(surface, i),
+				       (long)((uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface, i) - (uintptr_t)IOSurfaceGetBaseAddress(surface)));
+		}
+		hm_print("surfsay: a texture %lux%lu format %lu usage %#lx plane %lu over IOSurface %u: '%c%c%c%c' (%#x) %zux%zu rows %zu, "
+			 "%zu bytes, %zu planes%s\n", (unsigned long)[descriptor width], (unsigned long)[descriptor height],
+			 (unsigned long)[descriptor pixelFormat], (unsigned long)[descriptor usage], (unsigned long)plane, IOSurfaceGetID(surface),
+			 (cc >> 24) >= 32 ? (int)(cc >> 24) : '?', ((cc >> 16) & 255) >= 32 ? (int)((cc >> 16) & 255) : '?',
+			 ((cc >> 8) & 255) >= 32 ? (int)((cc >> 8) & 255) : '?', (cc & 255) >= 32 ? (int)(cc & 255) : '?', cc, IOSurfaceGetWidth(surface),
+			 IOSurfaceGetHeight(surface), IOSurfaceGetBytesPerRow(surface), IOSurfaceGetAllocSize(surface), planes, each);
+	}
 	usage = [descriptor usage];
 	if (usage == MTLTextureUsageUnknown) {
 		usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
