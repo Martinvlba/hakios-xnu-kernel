@@ -4,7 +4,7 @@
 <dict>
 	<key>Label</key>
 	<string>com.hakios.klogsave</string>
-	<!-- the kernel's log kept in /private/var/log/hakios-klog (src/klogsave.c): for crashes that take pstore with them; at its start the end of the boot before's file goes to the console. As root (kern.msgbuf). -->
+	<!-- the kernel's log kept in /private/var/mobile/Media/hakios-klog (src/klogsave.c): for crashes that take pstore with them; at its start the end of the boot before's file goes to the console. As root (kern.msgbuf). -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>/redwood/bin/klogsave</string>
