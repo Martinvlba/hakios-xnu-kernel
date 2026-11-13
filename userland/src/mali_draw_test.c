@@ -15,6 +15,7 @@
 
 #include "hakios-metal/hakios_metal.h"
 #include "mali_draw_bc.h"
+#include "cover1_bc.h"
 
 static const char *
 colour(uint32_t p)
@@ -1346,6 +1347,105 @@ srgb_target_test(hakios_metal_device *d, hakios_metal_queue *q)
 	return ok;
 }
 
+/* 7e. ONE TRIANGLE OVER THE TARGET, A TEXTURE THROUGH A BOUND SAMPLER (11-13: tri_cover_vs/fs, the shape of a GL
+ * layer's blit -- WebKit's WebGL through ANGLE left its canvas empty): a 64x64 texture of four quadrants (red, green /
+ * blue, white) drawn 1:1 into a 64x64 target cleared to grey, the coordinates (0,0) (2,0) (0,2) from the buffer both
+ * stages read */
+static int
+cover_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	const unsigned rt = 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET;
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 64, 64, rt), *from = hakios_metal_texture_new(d, 2, 70, 64, 64, 1);
+	hakios_metal_program *p = hakios_metal_program_new_bitcode(tri_cover_vs_bc, tri_cover_vs_bc_len, tri_cover_fs_bc, tri_cover_fs_bc_len, 70);
+	hakios_metal_buffer *params = hakios_metal_buffer_new(d, 4096);
+	struct hakios_metal_sampler_desc sd;
+	hakios_metal_sampler *smp;
+	struct hakios_metal_render_pass pass;
+	static uint32_t px[64 * 64], want[64 * 64];
+	unsigned right = 0, grey = 0;
+	int ok;
+	hakios_metal_cb *cb;
+
+	memset(&sd, 0, sizeof(sd));
+	sd.normalized_coordinates = 1;
+	sd.lod_max_clamp = 1000.0f;
+	sd.max_anisotropy = 1;
+	smp = hakios_metal_sampler_new(d, &sd);
+	if (t == NULL || from == NULL || p == NULL || params == NULL || smp == NULL) {
+		printf("mali_draw_test: a covering triangle: not made (%s): FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	for (unsigned i = 0; i < 4096; i++) {
+		unsigned x = i % 64, y = i / 64;
+		want[i] = y < 32 ? (x < 32 ? 0xff0000ffu : 0xff00ff00u) : (x < 32 ? 0xffff0000u : 0xffffffffu);
+	}
+	hakios_metal_texture_replace(from, 0, 0, 64, 64, want, 256);
+	{
+		float *f = hakios_metal_buffer_contents(params);
+
+		memset(f, 0, 48);
+		f[2] = 2.0f;            /* uv[1] = (2, 0) */
+		f[5] = 2.0f;            /* uv[2] = (0, 2) */
+	}
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+	pass.clear_color[3] = 1;
+	cb = hakios_metal_cb_new(q);
+	{
+		hakios_metal_buffer *bufs[1] = { params };
+		uint64_t offs[1] = { 0 };
+		hakios_metal_texture *texs[1] = { from };
+		hakios_metal_sampler *smps[1] = { smp };
+
+		if (hakios_metal_cb_draw2(cb, p, &pass, NULL, NULL, 3, 0, 3, 1, bufs, offs, 1, bufs, offs, 1, texs, 1, smps, 1) != 0)
+			printf("mali_draw_test: a covering triangle: refused: %s\n", hakios_metal_error());
+	}
+	ok = finish(cb, "a covering triangle");
+	memset(px, 0xee, sizeof(px));
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 4096; i++) {
+		right += px[i] == want[i];
+		grey += px[i] == 0xff808080u;
+	}
+	/* (finding what stops it, 11-13: the switches the other way, and corners inside clip space) */
+	{
+		extern unsigned char tri_cover1_vs_bc[];
+		extern unsigned int tri_cover1_vs_bc_len;
+		hakios_metal_program *p1 = hakios_metal_program_new_bitcode(tri_cover1_vs_bc, tri_cover1_vs_bc_len, tri_cover_fs_bc, tri_cover_fs_bc_len, 70);
+
+		for (int v = 0; v < 6; v++) {
+			unsigned char *b8 = hakios_metal_buffer_contents(params);
+			hakios_metal_buffer *bufs[1] = { params };
+			uint64_t offs[1] = { 0 };
+			hakios_metal_texture *texs[1] = { from };
+			hakios_metal_sampler *smps[1] = { smp };
+			unsigned drawn = 0;
+
+			b8[32] = (v % 3) == 2;          /* flip_x */
+			b8[33] = (v % 3) == 1;          /* flip_y */
+			cb = hakios_metal_cb_new(q);
+			if (hakios_metal_cb_draw2(cb, v < 3 ? p : p1, &pass, NULL, NULL, 3, 0, 3, 1, bufs, offs, 1, bufs, offs, 1, texs, 1, smps, 1) != 0)
+				printf("mali_draw_test: a covering triangle, variant %d: refused: %s\n", v, hakios_metal_error());
+			finish(cb, "a covering triangle's variant");
+			hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+			for (unsigned i = 0; i < 4096; i++) drawn += px[i] != 0xff808080u;
+			printf("mali_draw_test: a covering triangle, variant %d (%s corners, flip_x %d flip_y %d): %u of 4096 drawn, pixels 0 63 "
+			    "4032 4095: 0x%08x 0x%08x 0x%08x 0x%08x\n", v, v < 3 ? "3.0" : "1.0", b8[32], b8[33], drawn, px[0], px[63], px[4032], px[4095]);
+			b8[32] = b8[33] = 0;
+		}
+	}
+	ok = ok && right == 4096;
+	printf("mali_draw_test: a covering triangle with a texture through a bound sampler: %u of 4096 the texture's, %u still the "
+	    "clear's (pixels 0, 63, 4032, 4095: 0x%08x 0x%08x 0x%08x 0x%08x): %s\n", right, grey, px[0], px[63], px[4032], px[4095],
+	    ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(t);
+	hakios_metal_texture_free(from);
+	return ok;
+}
+
 /* 7b+. A WIDE TARGET AMONG OTHERS (11-13): RGBA8, RGBA16Float, RGBA8 cleared in one pass -- the RGBA16Float takes two of
  * the tile buffer's kilobytes, so the third target's part starts further on: each must come back its own clear */
 static int
@@ -1824,6 +1924,7 @@ main(int argc, char **argv)
 	right = raw_float_target_test(d, q, flat) && right;
 	right = packed_float_target_test(d, q, flat) && right;
 	right = srgb_target_test(d, q) && right;
+	right = cover_test(d, q) && right;
 	right = map_pass_test(d, q, 1) && right;
 	right = map_pass_test(d, q, 4) && right;
 	right = raw_blend_test(d, q) && right;

@@ -31,6 +31,9 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_air.h"
+#ifdef AIR_MESA_NEW_NIR
+#define nir_copy_prop nir_opt_copy_prop        /* (Mesa 26: the pass was renamed) */
+#endif
 #include "air_module.h"
 #include "util/ralloc.h"
 
