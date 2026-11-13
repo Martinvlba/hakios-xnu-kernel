@@ -149,6 +149,8 @@ static struct {
 	bool                            busy;           /* being cleared right now */
 	uint64_t                        since;          /* when it was kept */
 } gSurfaceKept[SURFACE_KEPT];
+static uint64_t         gSurfaceHeldBytes;      /* memory of surfaces gone that somebody else still had then: bytes, how many */
+static uint32_t         gSurfaceHeldCount;
 static uint32_t         gSurfacesNotKept[2];    /* memory not kept: somebody else had it too; it put out a piece kept longer */
 static IOLock *         gSurfaceKeptLock;
 static thread_call_t    gSurfaceClearing;
@@ -233,6 +235,11 @@ surfaceMemoryBack(IOBufferMemoryDescriptor * memory)
 
 	if (memory->getCapacity() >= SURFACE_KEEP_FROM && memory->getRetainCount() != 1) {
 		OSIncrementAtomic(&gSurfacesNotKept[0]);
+	}
+	if (memory->getRetainCount() != 1) {
+		/* (11-13: somebody else still has a gone surface's memory -- all of them, in bytes, for the memory report) */
+		OSAddAtomic64((SInt64) memory->getCapacity(), (SInt64 *) &gSurfaceHeldBytes);
+		OSIncrementAtomic(&gSurfaceHeldCount);
 	}
 	if (memory->getCapacity() >= SURFACE_KEEP_FROM && memory->getRetainCount() == 1 && gSurfaceKeptLock != NULL) {
 		int oldest = -1;
@@ -802,6 +809,13 @@ MiniIOSurfaceCopy(uint32_t sid)
 }
 
 /* How many surfaces there are and how much (wired) memory they hold: for the kernel's memory report. */
+extern "C" void
+MiniIOSurfaceHeld(uint32_t * count, uint64_t * bytes)
+{
+	*count = gSurfaceHeldCount;
+	*bytes = gSurfaceHeldBytes;
+}
+
 extern "C" void
 MiniIOSurfaceUsage(uint32_t * count, uint64_t * bytes)
 {

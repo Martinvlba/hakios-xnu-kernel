@@ -116,6 +116,7 @@ struct Bo {
     uint32_t handle = 0;
     uint64_t size = 0, va = 0;
     void *cpu = nullptr;
+    bool driver_mapped = false;         // mapped by HakiosGPU (0x7c): undone by GEM_CLOSE, not by IOConnectUnmapMemory64
 };
 
 struct hakios_metal_device {
@@ -177,12 +178,24 @@ struct hakios_metal_device {
     // a buffer the kernel holds (HANDLE, SIZE) mapped for the CPU and bound into the GPU's address space (lock held)
     bool mapAndBind(Bo &bo, uint32_t handle, uint64_t size, uint32_t bind_flags)
     {
+        // HakiosGPU's 0x7c: mapped by the driver, which keeps the mapping and undoes it at GEM_CLOSE. NOT
+        // IOConnectMapMemory64/IOConnectUnmapMemory64: for an IOSurface's buffer the unmap found the program's own
+        // IOSurface mapping of the same memory instead and the buffer's stayed -- every surface a program had
+        // drawn or sampled kept its memory wired until the program ended (backboardd: never; 11-13, the tester's
+        // Speedometer run took the phone down at 4.6 GB wired). A kernel without 0x7c: as before.
         mach_vm_address_t address = 0;
-        mach_vm_size_t mapped = size;
-        if (IOConnectMapMemory64(connection, handle, mach_task_self(), &address, &mapped, kIOMapAnywhere) != KERN_SUCCESS) {
-            fail("a buffer could not be mapped");
-            return false;
+        struct { uint32_t handle, pad; uint64_t address, size; } m = { handle, 0, 0, 0 };
+        bool own = call(0x7c, &m, sizeof(m)) == 0 && m.address != 0;
+        if (own) {
+            address = m.address;
+        } else {
+            mach_vm_size_t mapped = size;
+            if (IOConnectMapMemory64(connection, handle, mach_task_self(), &address, &mapped, kIOMapAnywhere) != KERN_SUCCESS) {
+                fail("a buffer could not be mapped");
+                return false;
+            }
         }
+        bo.driver_mapped = own;
         bo.handle = handle;
         bo.size = size;
         bo.cpu = (void *)(uintptr_t)address;
@@ -306,7 +319,9 @@ struct hakios_metal_device {
         op.size = bo.size;
         vm_bind b = { vm, 0, { sizeof(op), 1, (uint64_t)(uintptr_t)&op } };
         call(VM_BIND, &b, sizeof(b));
-        IOConnectUnmapMemory64(connection, bo.handle, mach_task_self(), (mach_vm_address_t)(uintptr_t)bo.cpu);
+        if (!bo.driver_mapped) {
+            IOConnectUnmapMemory64(connection, bo.handle, mach_task_self(), (mach_vm_address_t)(uintptr_t)bo.cpu);
+        }
         gem_close gc = { bo.handle, 0 };
         call(GEM_CLOSE, &gc, sizeof(gc));
         bo = Bo();

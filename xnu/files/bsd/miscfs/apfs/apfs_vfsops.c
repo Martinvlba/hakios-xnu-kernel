@@ -492,7 +492,7 @@ static int
 sysctl_hakios_memory SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	char line[256];
+	char line[320];
 
 	hakios_memory_line(line, sizeof(line));
 	return SYSCTL_OUT(req, line, strlen(line) + 1);

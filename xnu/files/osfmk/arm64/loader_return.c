@@ -580,6 +580,7 @@ extern unsigned int memorystatus_available_pages, memorystatus_available_pages_c
 extern uint32_t c_segment_pages_compressed;
 extern _Atomic uint64_t ramfs_pages_in_use;
 extern void MiniIOSurfaceUsage(uint32_t *count, uint64_t *bytes);
+extern void MiniIOSurfaceHeld(uint32_t *count, uint64_t *bytes);
 
 /*
  * Where the memory is, in megabytes: for reading a session's log afterwards. "available" is what
@@ -597,11 +598,15 @@ hakios_memory_line(char *buf, size_t len)
 	uint32_t surfaces = 0;
 	uint64_t surface_bytes = 0;
 
+	uint32_t held = 0;
+	uint64_t held_bytes = 0;
+
 	MiniIOSurfaceUsage(&surfaces, &surface_bytes);
-	snprintf(buf, len, "memory: free %u, files %u, programs %u, wired %u (%u surfaces %u, ramfs %u), compressor %u "
-	    "(holding %u) MB; available %u, kills below %u (the idle) and %u (anybody)\n",
+	MiniIOSurfaceHeld(&held, &held_bytes);  /* (11-13: surfaces gone whose memory somebody else still had, so far) */
+	snprintf(buf, len, "memory: free %u, files %u, programs %u, wired %u (%u surfaces %u; %u gone ones' %u still had by "
+	    "somebody then; ramfs %u), compressor %u (holding %u) MB; available %u, kills below %u (the idle) and %u (anybody)\n",
 	    MB(vm_page_free_count), MB(vm_page_pageable_external_count), MB(vm_page_pageable_internal_count),
-	    MB(vm_page_wire_count), surfaces, (unsigned int)(surface_bytes >> 20),
+	    MB(vm_page_wire_count), surfaces, (unsigned int)(surface_bytes >> 20), held, (unsigned int)(held_bytes >> 20),
 	    MB(os_atomic_load(&ramfs_pages_in_use, relaxed)),
 	    MB(VM_PAGE_COMPRESSOR_COUNT), MB(c_segment_pages_compressed),
 	    MB(memorystatus_available_pages),
@@ -612,7 +617,7 @@ hakios_memory_line(char *buf, size_t len)
 static void
 memory_report(void)
 {
-	char line[256];
+	char line[320];
 
 	hakios_memory_line(line, sizeof(line));
 	printf("%s", line);
