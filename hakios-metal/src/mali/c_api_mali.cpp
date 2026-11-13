@@ -112,6 +112,10 @@ constexpr uint64_t RUN_COMPUTE = 4ULL << 56 | 1, WAIT_ALL = 3ULL << 56 | 0xffffU
 
 }  // namespace
 
+namespace {
+bool bootArg(const char *word);         // (a word in the boot-args: defined below)
+}  // namespace
+
 struct Bo {
     uint32_t handle = 0;
     uint64_t size = 0, va = 0;
@@ -185,7 +189,8 @@ struct hakios_metal_device {
         // Speedometer run took the phone down at 4.6 GB wired). A kernel without 0x7c: as before.
         mach_vm_address_t address = 0;
         struct { uint32_t handle, pad; uint64_t address, size; } m = { handle, 0, 0, 0 };
-        bool own = call(0x7c, &m, sizeof(m)) == 0 && m.address != 0;
+        static const bool old_map = bootArg("metal_oldmap");    // (metal_oldmap=1: IOConnectMapMemory64 as before, to compare)
+        bool own = !old_map && call(0x7c, &m, sizeof(m)) == 0 && m.address != 0;
         if (own) {
             address = m.address;
         } else {
