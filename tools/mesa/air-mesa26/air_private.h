@@ -177,6 +177,11 @@ struct air_ctx {
    /* module-scope variables, by their air_global */
    struct hash_table *globals;
 
+   /* where constants are made (air_get): in the function's first block, after its globals -- a place every later use
+    * is dominated by. const_at_set is false until that place exists. */
+   nir_cursor const_at;
+   bool const_at_set;
+
    char error[256];
 };
 

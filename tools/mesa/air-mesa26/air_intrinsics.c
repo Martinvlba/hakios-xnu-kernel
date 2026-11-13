@@ -333,7 +333,11 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
       nir_def *x = a[0];
       if (!src_float && air_type_bit_size(air_type_scalar(st)) == 1)
          x = src_signed ? nir_ineg(&c->b, nir_b2i32(&c->b, x)) : nir_b2i32(&c->b, x);
-      if (dst_float && src_float)
+      if (!dst_float && bits == 1)
+         /* to bool (air.convert.u.v2i1.s.v2i32: Metal's bool2(int2)): not zero. It was i2i1 / f2u1, conversions NIR has
+          * no instruction for on the Mali -- "Unhandled ALU op i2i1", CoreAnimation's uber_fragment (11-13) */
+         r = src_float ? nir_fneu_imm(&c->b, x, 0.0) : nir_ine_imm(&c->b, x, 0);
+      else if (dst_float && src_float)
          r = nir_f2fN(&c->b, x, bits);
       else if (dst_float)
          r = src_signed ? nir_i2fN(&c->b, x, bits) : nir_u2fN(&c->b, x, bits);
