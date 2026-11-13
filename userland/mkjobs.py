@@ -293,6 +293,13 @@ for label in labels:
     job.pop('_LimitLoadToDeviceTree', None)
     if 'all' in oslog or label in oslog:
         job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
+    # (11-13) THE WINDOW SERVER GIVES THE DISPLAY NO LAYER OF AN APPLICATION'S OWN ("detached": Maps' and Weather's map,
+    # full screen and opaque, went to the framebuffer as layer 0 with the interface over it as layer 1). The display
+    # driver here puts one layer over another without blending -- the interface's clear pixels covered the map with black,
+    # and the swaps going between one layer and two flickered. CoreAnimation composes everything itself instead, on
+    # the GPU, as it does for every other application. DETACHED=1 builds without this.
+    if label == 'com.apple.backboardd' and os.environ.get('DETACHED', '0') == '0':
+        job.setdefault('EnvironmentVariables', {})['CA_DISABLE_DETACHED'] = '1'
     with open(f'{dest}/{label}.plist', 'wb') as f:
         plistlib.dump(job, f, fmt=plistlib.FMT_BINARY)
     program = job.get('Program') or job['ProgramArguments'][0]

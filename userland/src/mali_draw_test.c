@@ -1074,6 +1074,96 @@ packed_float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_m
 	return ok;
 }
 
+/* 7d. A MAP'S PASS (11-13: VectorKit's, black on the phone): into a BGRA8 sRGB target with depth+stencil (260), 1 or 4
+ * samples, nothing loaded and depth/stencil not stored, as Maps asks -- (1) the flat quad, depth Always and written,
+ * stencil Always/Replace reference 128; (2) the colour quad, depth LessEqual unwritten, stencil Equal 128 under read
+ * mask 0x80: drawn everywhere; (3) the flat quad again with colour write mask 0, no stencil: changes nothing. Told
+ * apart by what a pass of (1) alone leaves. */
+static int
+map_pass_test(hakios_metal_device *d, hakios_metal_queue *q, unsigned samples)
+{
+	const unsigned rt = 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET;
+	hakios_metal_texture *shown = hakios_metal_texture_new(d, 2, 81, 64, 64, rt);
+	hakios_metal_texture *t = samples > 1 ? hakios_metal_texture_new_multisample(d, 81, 64, 64, samples, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET) : shown;
+	hakios_metal_texture *z = samples > 1 ? hakios_metal_texture_new_multisample(d, 260, 64, 64, samples, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET)
+	    : hakios_metal_texture_new_levels(d, 2, 260, 64, 64, 1, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *flat = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc, tri_flat_fs_bc_len, 81);
+	hakios_metal_program *masked = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc, tri_flat_fs_bc_len, 81);
+	hakios_metal_program *col = hakios_metal_program_new_bitcode(tri_color_vs_bc, tri_color_vs_bc_len, tri_color_fs_bc, tri_color_fs_bc_len, 81);
+	static uint32_t base[64 * 64], px[64 * 64];
+	unsigned counts[3] = { 0, 0, 0 };
+	int ok = 1;
+
+	if (shown == NULL || t == NULL || z == NULL || flat == NULL || masked == NULL || col == NULL) {
+		printf("mali_draw_test: a map's pass, %u sample(s): not made (%s): FAILED\n", samples, hakios_metal_error());
+		return 0;
+	}
+	if (samples > 1) {
+		hakios_metal_program_set_samples(flat, samples);
+		hakios_metal_program_set_samples(masked, samples);
+		hakios_metal_program_set_samples(col, samples);
+	}
+	hakios_metal_program_set_blend(masked, 0, 0, 0, 1, 0, 1, 0, 0);          /* (no blending, write mask 0) */
+	/* stage 0: (1) alone; stage 1: (1) (2); stage 2: (1) (2) (3) -- each in one command buffer, as one pass */
+	for (int stage = 0; stage < 3; stage++) {
+		struct hakios_metal_render_pass pass;
+		hakios_metal_cb *cb = hakios_metal_cb_new(q);
+		int asked;
+
+		memset(&pass, 0, sizeof(pass));
+		pass.color0 = t;
+		pass.load_action = 0;
+		pass.store_action = 1;
+		pass.depth = z;
+		pass.stencil = z;
+		pass.depth_state_set = 1;
+		pass.depth_compare = 7;
+		pass.depth_write = 1;
+		pass.stencil_state_set = 1;
+		pass.stencil_front.compare = pass.stencil_back.compare = 7;
+		pass.stencil_front.pass = pass.stencil_back.pass = 2;
+		pass.stencil_front.depth_fail = pass.stencil_back.depth_fail = 2;
+		pass.stencil_front.read_mask = pass.stencil_back.read_mask = 0;
+		pass.stencil_front.write_mask = pass.stencil_back.write_mask = 0xff;
+		pass.stencil_front_reference = pass.stencil_back_reference = 128;
+		asked = hakios_metal_cb_draw(cb, flat, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) == 0;
+		pass.load_action = pass.depth_load_action = pass.stencil_load_action = 1;
+		if (stage >= 1) {
+			pass.depth_compare = 3;
+			pass.depth_write = 0;
+			pass.stencil_front.compare = pass.stencil_back.compare = 2;
+			pass.stencil_front.pass = pass.stencil_back.pass = 0;
+			pass.stencil_front.depth_fail = pass.stencil_back.depth_fail = 0;
+			pass.stencil_front.read_mask = pass.stencil_back.read_mask = 0x80;
+			pass.stencil_front.write_mask = pass.stencil_back.write_mask = 0;
+			asked = asked && hakios_metal_cb_draw(cb, col, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) == 0;
+		}
+		if (stage >= 2) {
+			pass.depth_compare = 7;
+			pass.stencil_state_set = 0;
+			asked = asked && hakios_metal_cb_draw(cb, masked, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) == 0;
+		}
+		if (!asked) {
+			printf("mali_draw_test: a map's pass, %u sample(s), stage %d: refused: %s\n", samples, stage, hakios_metal_error());
+			ok = 0;
+		}
+		if (samples > 1) hakios_metal_cb_blit(cb, t, 0, 0, 0, 64, 64, shown, 0, 0, 0, 64, 64, 0);
+		ok = finish(cb, "a map's pass") && ok;
+		hakios_metal_texture_read(shown, 0, 0, 64, 64, stage == 0 ? base : px, 256);
+		for (unsigned i = 0; i < 4096; i++) {
+			counts[stage] += stage == 0 ? base[i] == base[0] : px[i] != base[i];
+		}
+	}
+	ok = ok && counts[0] == 4096 && counts[1] == 4096 && counts[2] == 4096;
+	printf("mali_draw_test: a map's pass, %u sample(s): the flat quad alone one colour over %u of 4096 (0x%08x); the colour quad "
+	    "through the stencil it wrote: %u of 4096 drawn; a masked quad after it: %u of 4096 still the colour quad's (pixel 0 "
+	    "0x%08x): %s\n", samples, counts[0], base[0], counts[1], counts[2], px[0], ok ? "WORK" : "FAILED");
+	if (t != shown) hakios_metal_texture_free(t);
+	hakios_metal_texture_free(shown);
+	hakios_metal_texture_free(z);
+	return ok;
+}
+
 static int
 float_target_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *flat)
 {
@@ -1677,6 +1767,8 @@ main(int argc, char **argv)
 	right = float_target_test(d, q, flat) && right;
 	right = raw_float_target_test(d, q, flat) && right;
 	right = packed_float_target_test(d, q, flat) && right;
+	right = map_pass_test(d, q, 1) && right;
+	right = map_pass_test(d, q, 4) && right;
 	right = raw_blend_test(d, q) && right;
 	right = wide_among_test(d, q) && right;
 	right = float_shader_blend_test(d, q) && right;
