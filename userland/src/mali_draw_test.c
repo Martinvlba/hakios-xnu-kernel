@@ -590,6 +590,48 @@ cube_sample_test(hakios_metal_device *d, hakios_metal_queue *q, unsigned size, u
 	return ok;
 }
 
+/* 6a6. what a buffer costs (11-13: WebKit's WebGL makes and frees one for every draw; the aquarium's 618 a frame took
+ * seconds): COUNT buffers of BYTES made, then freed -- microseconds each. With IDLE 0 a command buffer is at work
+ * meanwhile (a clear of a 1024x1024 target every round). Not a check: said. */
+static void
+buffer_cost(hakios_metal_device *d, hakios_metal_queue *q, unsigned count, uint64_t bytes, int busy)
+{
+	hakios_metal_buffer **b = calloc(count, sizeof(*b));
+	hakios_metal_texture *t = busy ? hakios_metal_texture_new(d, 2, 70, 1024, 1024, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET) : NULL;
+	struct timespec t0, t1, t2;
+	unsigned made = 0;
+
+	if (b == NULL) return;
+	clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
+	for (unsigned i = 0; i < count; i++) {
+		if (busy && t != NULL && i % 16 == 0) {
+			struct hakios_metal_render_pass pass;
+			hakios_metal_cb *cb = hakios_metal_cb_new(q);
+
+			memset(&pass, 0, sizeof(pass));
+			pass.color0 = t;
+			pass.load_action = 2;
+			pass.store_action = 1;
+			hakios_metal_cb_clear(cb, &pass);
+			hakios_metal_cb_commit(cb, NULL, NULL);
+			hakios_metal_cb_free(cb);
+		}
+		b[i] = hakios_metal_buffer_new(d, bytes);
+		made += b[i] != NULL;
+	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
+	for (unsigned i = 0; i < count; i++) {
+		if (b[i] != NULL) hakios_metal_buffer_free(b[i]);
+	}
+	clock_gettime(CLOCK_MONOTONIC_RAW, &t2);
+	printf("mali_draw_test: what a buffer costs: %u of %llu bytes%s: %.0f us each to make, %.0f us each to free\n", made,
+	    (unsigned long long)bytes, busy ? ", command buffers at work meanwhile" : "",
+	    ((t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3) / count,
+	    ((t2.tv_sec - t1.tv_sec) * 1e6 + (t2.tv_nsec - t1.tv_nsec) / 1e3) / count);
+	if (t != NULL) hakios_metal_texture_free(t);
+	free(b);
+}
+
 /* 6b. stencil (Depth32Float_Stencil8; LEVEL 1: level 1 of a 128x128 one of two levels): the lower-left half writes
  * stencil 1 (compare Always, Replace) and draws flat; tri_color over the whole target where stencil Equal 1 -- the
  * lower-left half all tri_color, the rest the grey clear; then, a new command buffer with the stencil loaded, flat where
@@ -2162,6 +2204,10 @@ main(int argc, char **argv)
 	right = cube_sample_test(d, q, 64, 0) && right;
 	right = cube_sample_test(d, q, 512, 2) && right;
 	right = cube_sample_test(d, q, 16, 0) && right;
+	buffer_cost(d, q, 400, 40000, 0);
+	buffer_cost(d, q, 400, 4096, 0);
+	buffer_cost(d, q, 100, 1 << 20, 0);
+	buffer_cost(d, q, 400, 40000, 1);
 	right = stencil_test(d, q, flat, col, 0) && right;
 	right = stencil_test(d, q, flat, col, 1) && right;
 	right = blend_test(d, q) && right;
