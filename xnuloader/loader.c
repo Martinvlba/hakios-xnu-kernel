@@ -575,6 +575,8 @@ firmware_epoch(void)
 }
 
 /* A string in a field of fixed size, the rest zeros. */
+
+static const void *firmware_root_prop(const char *name, uint32_t *len);   /* (below: the firmware's own device tree) */
 static void
 dt_prop_padded(struct dt_writer *w, const char *name, const char *value, uint32_t size)
 {
@@ -3756,8 +3758,74 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_identity(&w, identity_root, sizeof(identity_root) / sizeof(identity_root[0]), identity_root_data);
 	dt_prop_str(&w, "platform-name", "t8015");
 	/* what iBoot takes from the factory configuration of a real phone; fixed size fields */
-	dt_prop_padded(&w, "serial-number", "RDW00POCOX5P", 32);
-	dt_prop_padded(&w, "mlb-serial-number", "RDW00POCOX5PMLB00", 32);
+	/*
+	 * THE PHONE'S OWN NUMBERS (11-13). Every phone this loader started was the same iPhone to the world: redwood's
+	 * serial number, chip ID and the two addresses (and so one UDID for all of them, and one Wi-Fi address on the air --
+	 * two such phones in one network would have been one station). redwood keeps the numbers it has; any other device
+	 * gets its own, made from the device's name and, where the firmware hands one over, the phone's serial number (a
+	 * hash of it: the number itself is not shown) -- the same at every start, different from phone to phone.
+	 */
+	char id_serial[13] = "RDW00POCOX5P", id_mlb[18] = "RDW00POCOX5PMLB00";
+	uint64_t id_chip = 0x000052445730001ULL;
+	uint8_t id_wifi[6] = { 0x02, 0x52, 0x44, 0x57, 0x00, 0x01 }, id_bluetooth[6] = { 0x02, 0x52, 0x44, 0x57, 0x00, 0x02 };
+	uint8_t id_manifest[48] = { 0x72, 0x65, 0x64, 0x77, 0x6f, 0x6f, 0x64 };
+	{
+		static const char redwood[] = "redwood", digits[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+		const char *name = plat->name;
+		int is_redwood = 1;
+
+		for (unsigned i = 0; i < sizeof(redwood); i++) {
+			if (name[i] != redwood[i]) {
+				is_redwood = 0;
+				break;
+			}
+		}
+		if (!is_redwood) {
+			uint32_t len = 0;
+			const char *sn = firmware_root_prop("serial-number", &len);
+			uint64_t h = 0xcbf29ce484222325ULL, g, v;
+			unsigned n = 0;
+
+			for (const char *c = name; *c != 0; c++) {
+				h = (h ^ (uint8_t)*c) * 0x100000001b3ULL;
+			}
+			for (uint32_t i = 0; sn != NULL && i < len && i < 32 && sn[i] != 0; i++) {
+				h = (h ^ (uint8_t)sn[i]) * 0x100000001b3ULL;
+			}
+			g = h ^ (h >> 33);
+			g *= 0xff51afd7ed558ccdULL;
+			g ^= g >> 33;
+			g *= 0xc4ceb9fe1a85ec53ULL;
+			g ^= g >> 33;
+			/* the serial number: the device's first three letters, then nine of the hash */
+			for (unsigned i = 0; i < 3; i++) {
+				char c = name[n] != 0 ? name[n++] : 'x';
+				id_serial[i] = c >= 'a' && c <= 'z' ? (char)(c - 32) : c;
+			}
+			v = g;
+			for (unsigned i = 3; i < 12; i++) {
+				id_serial[i] = digits[v % 34];
+				v /= 34;
+			}
+			id_serial[12] = 0;
+			for (unsigned i = 0; i < 12; i++) {
+				id_mlb[i] = id_serial[i];
+			}
+			id_chip = 0x0001000000000000ULL | (h & 0x0000ffffffffffffULL);
+			/* the addresses: locally administered, one station each; Bluetooth's the next one, as Apple's are */
+			id_wifi[0] = id_bluetooth[0] = 0x02;
+			for (unsigned i = 1; i < 6; i++) {
+				id_wifi[i] = id_bluetooth[i] = (uint8_t)(g >> (8 * i));
+			}
+			id_wifi[5] &= 0xfe;
+			id_bluetooth[5] = id_wifi[5] | 1;
+			for (unsigned i = 0; i < sizeof(id_manifest); i++) {
+				id_manifest[i] = i < n ? (uint8_t)name[i] : i < 8 ? 0 : (uint8_t)((i & 8 ? g : h) >> (8 * (i & 7)));
+			}
+		}
+	}
+	dt_prop_padded(&w, "serial-number", id_serial, 32);
+	dt_prop_padded(&w, "mlb-serial-number", id_mlb, 32);
 	dt_prop_padded(&w, "model-number", "MQAC2", 32);
 	dt_prop_padded(&w, "region-info", "LL/A", 32);
 	dt_prop_padded(&w, "regulatory-model-number", "A1865", 32);
@@ -3793,16 +3861,13 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * (UDID) from the serial number, the chip ID and the two addresses; when one is missing it
 	 * asks its helper for the factory data, is refused and waits forever (and lsd with it).
 	 */
-	static const uint8_t wifi_address[6] = { 0x02, 0x52, 0x44, 0x57, 0x00, 0x01 };
-	static const uint8_t bluetooth_address[6] = { 0x02, 0x52, 0x44, 0x57, 0x00, 0x02 };
-	static const uint8_t manifest_hash[48] = { 0x72, 0x65, 0x64, 0x77, 0x6f, 0x6f, 0x64 };
 	static const uint8_t no_behavior[16];
-	dt_prop_u64(&w, "unique-chip-id", 0x000052445730001ULL);
+	dt_prop_u64(&w, "unique-chip-id", id_chip);         /* (the phone's own numbers: see the serial number above) */
 	dt_prop_u32(&w, "chip-id", 0x8015);
 	dt_prop_u32(&w, "board-id", 0x06);
-	dt_prop(&w, "mac-address-wifi0", wifi_address, sizeof(wifi_address));
-	dt_prop(&w, "mac-address-bluetooth0", bluetooth_address, sizeof(bluetooth_address));
-	dt_prop(&w, "boot-manifest-hash", manifest_hash, sizeof(manifest_hash));
+	dt_prop(&w, "mac-address-wifi0", id_wifi, sizeof(id_wifi));
+	dt_prop(&w, "mac-address-bluetooth0", id_bluetooth, sizeof(id_bluetooth));
+	dt_prop(&w, "boot-manifest-hash", id_manifest, sizeof(id_manifest));
 	dt_prop(&w, "software-behavior", no_behavior, sizeof(no_behavior));
 	dt_prop_str(&w, "firmware-version", "iBoot-8422.100.650");
 	dt_prop_u32(&w, "certificate-production-status", 1);
