@@ -213,8 +213,11 @@ import sys
 # for ever, see «Sileo» in README.md.)
 # (mediaserverd is not among them, for all that there is neither sound nor a camera:
 # it is where VideoToolbox decodes for every other process, a HEIC picture included; see src/inject_media.c.)
+# (keybagd is NOT among them since 11-13: Settings sets, changes and removes the passcode through it -- the kernel's
+# AppleKeyStore has a keybag now, and the device tree says no-effaceable-storage, so it keeps its copy without one.
+# Started on demand; it asks the key store and goes away.)
 DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'locationd', 'softwareupdate',
-        'datamigrator', 'backupd', 'thermalmonitord', 'keybagd', 'nfcd', 'biometrickitd', 'pearld',
+        'datamigrator', 'backupd', 'thermalmonitord', 'nfcd', 'biometrickitd', 'pearld',
         'obliterat', 'storage_mounter', 'com.apple.fud', 'sepd', 'seputil', 'camera', 'ReportCrash',
         'osanalytics', 'lockdown', 'audio', 'jetsamproperties',
         'purplebuddy', 'restore', 'usb', 'accessoryd',
