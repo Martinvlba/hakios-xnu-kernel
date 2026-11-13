@@ -1,0 +1,12 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Settings > Face ID & Passcode (RC_JOBS=rc.jobs.passcode, with ALLOW=keybagd OSLOG=keybagd and aks_say=1): the home
+# screen unlocked, the pane opened by its URL (asked again later: SpringBoard refuses while the applications are still
+# "Waiting..." after a boot), left for the host's screenshots -- what the key store is asked for when a passcode is to
+# be set.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 70
+/redwood/bin/battery_test open prefs:root=PASSCODE
+/redwood/bin/rwtouch wait 25
+/redwood/bin/battery_test open prefs:root=General
+/redwood/bin/rwtouch wait 20
+/redwood/bin/battery_test open prefs:root=PASSCODE
+/redwood/bin/rwtouch wait 200
