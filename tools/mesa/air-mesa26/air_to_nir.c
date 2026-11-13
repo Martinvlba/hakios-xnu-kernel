@@ -131,12 +131,48 @@ air_set(struct air_ctx *c, const struct air_value *v, struct air_val *val)
    _mesa_hash_table_insert(c->values, v, val);
 }
 
+/* AN INTEGER OF A WIDTH NIR HAS NO SIZE FOR (11-13) -- i3: LLVM's switch over a handful of cases, in CoreAnimation's
+ * uber_fragment -- is held in the next size up, its bits above the width zero. It went into NIR as a 3-bit value, which
+ * no pass and no back end takes; the shaders that had one compiled only where a wrong fold removed the block.
+ * odd_width: the width, 0 for a size NIR has (and for what is no integer).
+ */
+static unsigned
+odd_width(const struct air_type *t)
+{
+   t = t ? air_type_scalar(t) : NULL;
+   if (!t || t->kind != AIR_TYPE_INT)
+      return 0;
+   const unsigned b = t->bits;
+   return b <= 1 || b == 8 || b == 16 || b == 32 || b >= 64 ? 0 : b;
+}
+
+static unsigned
+held_bits(unsigned b)
+{
+   return b <= 1 ? b : b <= 8 ? 8 : b <= 16 ? 16 : b <= 32 ? 32 : 64;
+}
+
+/* the value kept to its WIDTH bits, and read as a signed number of that width */
+static nir_def *
+odd_mask(struct air_ctx *c, nir_def *x, unsigned width)
+{
+   return width && width < x->bit_size ? nir_iand_imm(&c->b, x, BITFIELD64_MASK(width)) : x;
+}
+
+static nir_def *
+odd_sext(struct air_ctx *c, nir_def *x, unsigned width)
+{
+   if (!width || width >= x->bit_size)
+      return x;
+   return nir_ishr_imm(&c->b, nir_ishl_imm(&c->b, x, x->bit_size - width), x->bit_size - width);
+}
+
 unsigned
 air_nir_bit_size(struct air_ctx *c, const struct air_type *t)
 {
    unsigned bits = air_type_bit_size(air_type_scalar(t));
    /* NIR has no i1 in SSA: booleans are 1-bit defs, which it does have */
-   return bits;
+   return odd_width(t) ? held_bits(bits) : bits;
 }
 
 unsigned
@@ -155,16 +191,24 @@ air_get(struct air_ctx *c, const struct air_value *v)
       return e->data;
    const struct air_constant *k = air_value_as_constant(v);
    if (k) {
-      /* KNOWN, NOT FIXED (11-13; devices/akita TODO 18c): the constant is made at its first use and kept, its
-       * load_const in whatever block that use was in. A later use on a path not through that block -- `if (a) x = -x;
-       * if (b) y = -y;`, both negations LLVM's `fsub -0.0, v` (ANGLE's blit vertex function) -- gets, from
-       * nir_repair_ssa, a phi of the constant and UNDEFINED. The Mali reads undefined as 0, so -0.0 and 0 survive it
-       * and any other constant would not. Making it anew at each use, or once at the function's start, both stopped
-       * the compile of CoreAnimation's uber_fragment for the Calendar widget ("Unhandled ALU op i2i1": a block with
-       * integers of 3 bits, which this translator does not really serve, is then no longer folded away) -- so the
-       * integers of odd widths first.
+      /* (11-13) A CONSTANT IS MADE AT THE FUNCTION'S START, once, where every use is dominated by it. It was made at
+       * its first use, in whatever block that was: a later use on a path not through that block -- `if (a) x = -x;
+       * if (b) y = -y;`, both negations LLVM's `fsub -0.0, v` -- got, from nir_repair_ssa, a phi of the constant and
+       * UNDEFINED (ANGLE's blit vertex function; CoreAnimation's uber_fragment was full of them: `phi b36: 2, b37:
+       * undefined`). One def a constant still: the folding of branches on known values tells by it.
        */
-      struct air_val *val = air_constant_val(c, k);
+      struct air_val *val;
+      if (c->const_at_set && !c->in_static_init) {
+         nir_cursor here = c->b.cursor;
+         const bool same = nir_cursors_equal(here, c->const_at);
+         c->b.cursor = c->const_at;
+         val = air_constant_val(c, k);
+         c->const_at = c->b.cursor;
+         if (!same)
+            c->b.cursor = here;
+      } else {
+         val = air_constant_val(c, k);
+      }
       if (val)
          air_set(c, v, val);
       return val;
@@ -220,6 +264,10 @@ scalar_constant(struct air_ctx *c, const struct air_type *t, uint64_t bits)
    unsigned n = air_type_bit_size(t);
    if (t->kind == AIR_TYPE_INT && t->bits == 1)
       return nir_imm_bool(&c->b, bits & 1);
+   if (odd_width(t)) {
+      bits &= BITFIELD64_MASK(n);       /* (held in the next size up, the bits above its width zero) */
+      n = held_bits(n);
+   }
    if (air_type_is_float(t)) {
       switch (n) {
       case 16: return nir_imm_intN_t(&c->b, bits, 16);
@@ -1097,6 +1145,13 @@ translate_binop(struct air_ctx *c, const struct air_inst *in)
       return false;
    bool is_float = air_type_is_float(air_type_scalar(in->base.type));
    nir_def *res;
+   /* (an integer of an odd width: signed operations on it read as that width, the result kept to it) */
+   const unsigned ow = is_float ? 0 : odd_width(in->base.type);
+   if (ow && (in->sub == AIR_BINOP_SDIV || in->sub == AIR_BINOP_SREM || in->sub == AIR_BINOP_ASHR)) {
+      x = odd_sext(c, x, ow);
+      if (in->sub != AIR_BINOP_ASHR)
+         y = odd_sext(c, y, ow);
+   }
 
    /* Metal compiles with fast math on, and the modules say so per
     * instruction. Without the flags the arithmetic must not be reassociated,
@@ -1125,6 +1180,8 @@ translate_binop(struct air_ctx *c, const struct air_inst *in)
       return air_error(c, "instruction: binary operator %u", in->sub);
    }
    AIR_B_SET_EXACT(c->b, was_exact);
+   if (ow)
+      res = odd_mask(c, res, ow);
    air_set(c, &in->base, air_val_ssa(c, res));
    return true;
 }
@@ -1150,6 +1207,10 @@ translate_cast(struct air_ctx *c, const struct air_inst *in)
       return false;
    unsigned bits = air_nir_bit_size(c, dt);
    nir_def *res;
+   /* (integers of odd widths: the source read as its width where its sign counts, the result kept to its own) */
+   const unsigned src_odd = odd_width(st), dst_odd = odd_width(dt);
+   if (src_odd && (in->sub == AIR_CAST_SEXT || in->sub == AIR_CAST_SITOFP))
+      x = odd_sext(c, x, src_odd);
    switch (in->sub) {
    case AIR_CAST_TRUNC:
       res = bits == 1 ? nir_i2b(&c->b, nir_iand_imm(&c->b, x, 1)) : nir_u2uN(&c->b, x, bits);
@@ -1194,6 +1255,8 @@ translate_cast(struct air_ctx *c, const struct air_inst *in)
    default:
       return air_error(c, "instruction: cast %u", in->sub);
    }
+   if (dst_odd && in->sub != AIR_CAST_BITCAST)
+      res = odd_mask(c, res, dst_odd);
    air_set(c, &in->base, air_val_ssa(c, res));
    return true;
 }
@@ -1206,6 +1269,14 @@ translate_cmp(struct air_ctx *c, const struct air_inst *in)
    if (!x || !y)
       return false;
    nir_def *res;
+   {
+      /* (integers of an odd width compare signed as numbers of that width) */
+      const unsigned ow = odd_width(in->operands[0]->type);
+      if (ow && (in->sub == AIR_ICMP_SGT || in->sub == AIR_ICMP_SGE || in->sub == AIR_ICMP_SLT || in->sub == AIR_ICMP_SLE)) {
+         x = odd_sext(c, x, ow);
+         y = odd_sext(c, y, ow);
+      }
+   }
    switch (in->sub) {
    /* NaN never appears in these shaders (nnan is set on every one), so the
     * ordered and unordered forms of a comparison are the same comparison;
@@ -2099,6 +2170,10 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
 
    /* this function's own globals, built in its own builder */
    materialise_globals(c);
+   const nir_cursor saved_const_at = c->const_at;
+   const bool saved_const_at_set = c->const_at_set;
+   c->const_at = nir_after_instr(nir_def_instr(nir_imm_int(&c->b, 0)));    /* (after an instruction of its own: a place that stays) */
+   c->const_at_set = true;
 
    bool ok = true;
    if (agg_ret) {
@@ -2150,6 +2225,8 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
       ok = translate_body(c);
 
    c->b = saved_b;
+   c->const_at = saved_const_at;
+   c->const_at_set = saved_const_at_set;
    c->fn = saved_fn;
    c->values = sv;
    c->blocks = sb;
@@ -3471,6 +3548,12 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
    }
    if (!c.error[0])
       materialise_globals(&c);
+   if (!c.error[0]) {
+      /* (constants: after the globals, before everything else -- air_get; after an instruction of its own, a place
+       * that stays where it is as the block grows) */
+      c.const_at = nir_after_instr(nir_def_instr(nir_imm_int(&c.b, 0)));
+      c.const_at_set = true;
+   }
    if (!c.error[0])
       store_global_initialisers(&c);
    if (!c.error[0])
