@@ -803,6 +803,11 @@ rtClear(uint32_t rt1, const double *k)
         uint32_t r = halfOf(k[0]);
         return ((rt1 >> 3) & 31) == 16 ? r | r << 16 : r | halfOf(k[1]) << 16;
     }
+    if (rt1 & 1u << 14) {
+        // (11-13) an sRGB target's clear colour is linear, as a shader's output is: encoded here (alpha is not)
+        auto enc = [](double v) { v = v < 0 ? 0 : v > 1 ? 1 : v; return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055; };
+        return unorm8(enc(k[0])) | unorm8(enc(k[1])) << 8 | unorm8(enc(k[2])) << 16 | (uint32_t)unorm8(k[3]) << 24;
+    }
     return unorm8(k[0]) | unorm8(k[1]) << 8 | unorm8(k[2]) << 16 | (uint32_t)unorm8(k[3]) << 24;
 }
 // the clear's second word (the render target's clear is four words: a pixel of 8 bytes twice, one of 4 or less four
@@ -1298,6 +1303,10 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     rt[12] = rt[14] = dj.clear;
     rt[13] = rt[15] = (dj.rt1 & kRtWide) ? dj.clear_high : dj.clear;
     memcpy(bl, dj.blend, 16);
+    // (11-13) the blend descriptor's sRGB bit (10) for an sRGB target: the fixed-function blender decodes what it reads
+    // of the tile buffer and encodes what it writes -- without it a blended or masked draw wrote linear values there
+    // (opaque mode converts by the memory format alone: rtBlend)
+    if (dj.rt1 & 1u << 14) bl[0] |= 1u << 10;
     uint32_t tile_at = rtKilobytes(dj.rt1) * 1024;      // where the next target's part of the tile buffer starts
     for (unsigned i = 1; i < dj.rts; i++) {
         // target i: its kilobyte of the tile buffer (internal buffer offset, 16-byte units), its own clear and memory
@@ -1312,6 +1321,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         r[12] = r[14] = m.clear;
         r[13] = r[15] = (m.rt1 & kRtWide) ? m.clear_high : m.clear;
         memcpy(bl + 4 * i, m.blend, 16);
+        if (m.rt1 & 1u << 14) bl[4 * i] |= 1u << 10;
     }
     memcpy(area + vs_at, dj.vs_fau.data(), dj.vs_fau.size() * 4);
     memcpy(area + fs_at, dj.fs_fau.data(), dj.fs_fau.size() * 4);
@@ -4298,7 +4308,8 @@ rawBlend(hakios_metal_program *p, unsigned i)
     // for nothing
     const unsigned f = p->rt_format[i];
     static const bool told_always = bootArg("metal_rtfmt=1");   // (a test: every float attachment's format told)
-    p->shader_blend.format[i] = f == 55 || ((told_always || (p->shader_blend.mask & 1u << i)) && (f == 25 || f == 65 || f == 115 || f == 92)) ? f : 0;
+    p->shader_blend.format[i] = f == 55 || ((told_always || (p->shader_blend.mask & 1u << i)) && (f == 25 || f == 65 || f == 115 || f == 92)) ||
+        f == 71 || f == 81 ? f : 0;       // (an sRGB target's always: a framebuffer fetch from it must decode, 11-13)
     if (f != 55 || !p->rt_blend_on[i]) {
         return;
     }

@@ -1290,6 +1290,62 @@ float_shader_blend_test(hakios_metal_device *d, hakios_metal_queue *q)
 	return ok;
 }
 
+/* 7b**. AN sRGB TARGET (11-13; RGBA8Unorm_sRGB, 71): what a shader or a clear gives is linear and the memory holds it
+ * encoded -- a clear to (0.125, 0.25, 0.5) is 0x63 0x89 0xbc; a blend the shader computes over a clear to 0.5 (it reads
+ * the target back decoded): 0.4064, 0.3755, 0.5015 linear, 171 165 188 encoded */
+static int
+srgb_target_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 71, 64, 64, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *bl = hakios_metal_program_new_bitcode(tri_flat_vs_bc, tri_flat_vs_bc_len, tri_flat_fs_bc, tri_flat_fs_bc_len, 71);
+	struct hakios_metal_render_pass pass;
+	static uint32_t px[64 * 64];
+	unsigned cleared = 0, blended = 0;
+	uint32_t first;
+	int ok;
+	hakios_metal_cb *cb;
+
+	if (t == NULL || bl == NULL) {
+		printf("mali_draw_test: an sRGB target: no texture or program (%s): FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[0] = 0.125;
+	pass.clear_color[1] = 0.25;
+	pass.clear_color[2] = 0.5;
+	pass.clear_color[3] = 1;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_clear(cb, &pass) != 0) printf("mali_draw_test: an sRGB target: the clear refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "an sRGB target's clear");
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 4096; i++) cleared += px[i] == 0xffbc8963u;
+	first = px[0];
+	hakios_metal_program_set_attachment_format(bl, 0, 71);
+	hakios_metal_program_set_blend(bl, 1, 0, 0, 11, 12, 13, 14, 0xf);
+	pass.clear_color[0] = pass.clear_color[1] = pass.clear_color[2] = 0.5;
+	pass.blend_color[0] = 0.25f;
+	pass.blend_color[1] = 0.5f;
+	pass.blend_color[2] = 0.75f;
+	pass.blend_color[3] = 1;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, bl, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: an sRGB target: the blended draw refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "an sRGB target's shader blend") && ok;
+	hakios_metal_texture_read(t, 0, 0, 64, 64, px, 256);
+	for (unsigned i = 0; i < 4096; i++) {
+		int r = (int)(px[i] & 0xff) - 171, g = (int)(px[i] >> 8 & 0xff) - 165, b = (int)(px[i] >> 16 & 0xff) - 188;
+		blended += r >= -3 && r <= 3 && g >= -3 && g <= 3 && b >= -3 && b <= 3;
+	}
+	ok = ok && cleared == 4096 && blended == 4096;
+	printf("mali_draw_test: an sRGB target: cleared %u of 4096 to 0xffbc8963 (pixel 0 0x%08x); a shader's blend over it %u of 4096 "
+	    "near 171 165 188 (pixel 0 0x%08x): %s\n", cleared, first, blended, px[0], ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(t);
+	return ok;
+}
+
 /* 7b+. A WIDE TARGET AMONG OTHERS (11-13): RGBA8, RGBA16Float, RGBA8 cleared in one pass -- the RGBA16Float takes two of
  * the tile buffer's kilobytes, so the third target's part starts further on: each must come back its own clear */
 static int
@@ -1767,6 +1823,7 @@ main(int argc, char **argv)
 	right = float_target_test(d, q, flat) && right;
 	right = raw_float_target_test(d, q, flat) && right;
 	right = packed_float_target_test(d, q, flat) && right;
+	right = srgb_target_test(d, q) && right;
 	right = map_pass_test(d, q, 1) && right;
 	right = map_pass_test(d, q, 4) && right;
 	right = raw_blend_test(d, q) && right;

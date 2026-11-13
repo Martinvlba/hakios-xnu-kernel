@@ -1,0 +1,4 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Weather's radar map (VectorKit in WeatherMaps, with the precipitation overlay; devices/akita TODO 18c): the home
+# screen unlocked, Weather opened by its widget (top left), its map by the map button (bottom left), left 50 s.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8 tap 0.29 0.18 wait 20 tap 0.09 0.925 wait 50 button home wait 3
