@@ -418,7 +418,7 @@ aksOpenClasses(const uint8_t key[32])
 	}
 }
 
-/* aks_tell=N (tests; see where the messages go out): bit 0 the first unlock told, bit 1 every lock and unlock */
+/* aks_tell=N (tests; see where the messages go out): 2 every lock and unlock told too, 4 the first unlock not told */
 static uint32_t
 aksTell(void)
 {
@@ -443,7 +443,11 @@ aksUnlock(const uint8_t * passcode, size_t length)
 			IOLog("MiniAppleKeyStore: unlocked%s\n", gAKSBeenUnlocked ? "" : " (the first time since the start)");
 		}
 		/* (NOT TOLD of an unlock or a lock it asked for itself -- see where the messages go out) */
-		if (aksTell() & 1) {
+		/* THE FIRST UNLOCK IS TOLD (both messages; aks_tell=4: not): with a passcode the phone starts locked, and
+		 * what waits for the first unlock -- the installer of the system's deletable applications among them: their
+		 * icons stayed "Waiting..." -- waits for this. (It had been taken out while the side button's lock was
+		 * looked into; it was not that.) */
+		if (!(aksTell() & 4)) {
 			gAKSChanged |= !gAKSBeenUnlocked;
 			gAKSFirstUnlock |= !gAKSBeenUnlocked;
 		}
