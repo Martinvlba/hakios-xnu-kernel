@@ -1,0 +1,6 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# A file stored, mapped and shared as WebKit's network cache does it (RC_JOBS=rc.jobs.filemap; src/filemap_test.c),
+# on the data volume and in /private/var/tmp, twice (the second run finds the first's files).
+/redwood/bin/rwtouch wait 20
+/redwood/bin/filemap_test
+/redwood/bin/rwtouch wait 5
