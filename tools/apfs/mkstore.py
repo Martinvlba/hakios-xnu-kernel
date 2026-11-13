@@ -22,7 +22,7 @@ usage: mkstore.py -o IMAGE [--slot-bytes N] [--slots N] [--dense]
 
 The image is a whole container and goes onto the flash as one: into the free space of the
 partition darwin, past the blocks the loader and the kernel both refuse to write before
-(BLOCK_WRITE_FIRST / UFS_WRITE_FIRST, block 2042368).  Writing it there is a once-only step from
+(BLOCK_WRITE_FIRST / UFS_WRITE_FIRST, block 2097152).  Writing it there is a once-only step from
 Android with tools/darwin-write.py and it destroys whatever the store held before, so the image
 is made once and kept.
 

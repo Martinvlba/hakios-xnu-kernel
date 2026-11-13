@@ -31,6 +31,7 @@ The whole root is 7.9 GB and the kernel on the phone has about 4 GB of RAM for e
     without them every string comes out as its key.
 """
 import re
+import os
 import stat
 import sys
 
@@ -41,11 +42,14 @@ WHOLE = ('usr/libexec/', 'usr/sbin/', 'usr/bin/', 'usr/lib/', 'usr/share/', 'sbi
 # News refuses to start without its own -- "a legal requirement"; nor Health, the plug-ins the Health
 # application and its daemon are made of: both stop with a fatal error when the directory is not there.
 # Of Health only the pictures and films of the activity awards are left out, see SKIP_PREFIX and HEALTH)
+# NOT LEFT OUT ANY MORE BY DEFAULT (2026-11-13, the Pixel 8a's tester: every library of the system in): the list
+# holds only with SKIP_SYSTEM_LIBRARY=1 in the environment, for a system image that has to fit a phone's memory
+# (redwood's, QEMU's). A phone whose root is Apple's whole volume on its flash (FLASHBOOT=1) never went by it.
 SKIP_SYSTEM_LIBRARY = ('LinguisticData', 'PreinstalledAssetsV2', 'NanoTimeKit', 'Audio',
                        'Assistant', 'AccessibilityBundles',
                        'VideoProcessors', 'ScreenReader', 'Photos', 'Carrier Bundles', 'NanoPreferenceBundles',
                        'ImagingNetworks', 'ProductDocuments', 'AppPlaceholders', 'UserNotifications',
-                       'Caches')
+                       'Caches') if os.environ.get('SKIP_SYSTEM_LIBRARY') == '1' else ()
 FRAMEWORKS = ('System/Library/Frameworks/', 'System/Library/PrivateFrameworks/')
 SMALL = 4 << 20
 # never from frameworks: machine-learning models, shader libraries, sound and video, big tables.

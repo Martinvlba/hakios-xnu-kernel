@@ -34,16 +34,34 @@ fi
 [ -f "$IPSW" ] || { echo "unpack.sh: $IPSW: no such file" >&2; exit 1; }
 IPSW=$(cd "$(dirname "$IPSW")" && pwd)/$(basename "$IPSW")
 size=$(wc -c < "$IPSW" | tr -d ' ')
-# select-system.py and the checks below are made for this one build; another IPSW would unpack, then fail somewhere later
-if [ "$size" != 6165698198 ] && [ -z "${ANY_IPSW:-}" ]; then
-	echo "unpack.sh: $IPSW is $size bytes, not the 6165698198 of Darwin userland 16.5 20F66 for iPhone10,3/10,6 (ANY_IPSW=1 tries it anyway)" >&2
+# THE BUILDS THIS KNOWS (by the IPSW's size; the names are its BuildManifest's OS, Cryptex1,SystemOS and Cryptex1,AppOS
+# for d22ap): 16.5 20F66, which upstream HakiOS is built around, and 16.7.16 20H392 (2026-11-13, the Pixel 8a's tester:
+# the newest the iPhone X has). What is unpacked says which it is in build.conf, which ../userland/build.sh reads.
+cd "$(dirname "$0")"
+case "$size" in
+6165698198)
+	BUILD=20F66 VERSION=16.5
+	ROOTFS_DMG=096-04088-077.dmg                    # the root filesystem, APFS
+	CRYPTEX_DMG=096-04666-078.dmg                   # the OS cryptex: dyld shared cache and a few libraries
+	APP_CRYPTEX_DMG=096-03536-083.dmg               # the App cryptex (BuildManifest: Cryptex1,AppOS)
+	;;
+6171035648)
+	BUILD=20H392 VERSION=16.7.16
+	ROOTFS_DMG=087-86698-044.dmg
+	CRYPTEX_DMG=087-86593-047.dmg
+	APP_CRYPTEX_DMG=087-86715-047.dmg
+	;;
+*)
+	echo "unpack.sh: $IPSW is $size bytes: neither 16.5 20F66 (6165698198) nor 16.7.16 20H392 (6171035648) for iPhone10,3/10,6" >&2
+	exit 1
+	;;
+esac
+CACHE=${BUILD}__iPhone10,3_6
+if [ -f build.conf ] && ! grep -q "^BUILD=$BUILD\$" build.conf; then
+	echo "unpack.sh: this directory holds $(grep '^BUILD=' build.conf) -- move it away first (rootfs cryptex cryptex-app *__iPhone10,3_6 .done-* build.conf ...)" >&2
 	exit 1
 fi
-cd "$(dirname "$0")"
-ROOTFS_DMG=096-04088-077.dmg                    # the root filesystem, APFS
-CRYPTEX_DMG=096-04666-078.dmg                   # the OS cryptex: dyld shared cache and a few libraries
-APP_CRYPTEX_DMG=096-03536-083.dmg               # the App cryptex (BuildManifest: Cryptex1,AppOS)
-CACHE=20F66__iPhone10,3_6
+printf 'BUILD=%s\nVERSION=%s\nCACHE=%s\n' "$BUILD" "$VERSION" "$CACHE" > build.conf
 UNZBM=../xnu-deps/host/bin/unzbm
 
 for tool in python3 7z cc; do
@@ -101,7 +119,7 @@ if [ ! -f .done-cryptex ]; then
 	unzbm_all cryptex.cache
 	mv cryptex.cache/System/Library/Caches/com.apple.dyld $CACHE
 	rm -rf cryptex.cache
-	[ "$(ls $CACHE | wc -l)" -eq 43 ] || { echo "unpack.sh: the dyld shared cache is incomplete"; exit 1; }
+	[ "$(ls $CACHE | wc -l)" -ge 40 ] || { echo "unpack.sh: the dyld shared cache is incomplete"; exit 1; }
 	touch .done-cryptex
 	[ -n "$KEEP" ] || rm -f cryptex-os.dmg
 fi

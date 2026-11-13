@@ -93,7 +93,7 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
  * begins and its exact size are the phone's (tools/userdata-carve.py puts it after userdata, whatever
  * that is): at least the layout's 20 GiB.
  */
-#define UFS_WRITE_FIRST    2042368ULL                  /* darwin's blocks of 4096 */
+#define UFS_WRITE_FIRST    2097152ULL                  /* darwin's blocks of 4096: 8 GiB (xnuloader/loader.c BLOCK_WRITE_FIRST, tools/mkdatavol.py DATA_FIRST) */
 #define UFS_DARWIN_MIN     5242875ULL                  /* the first phone's darwin, in blocks of 4096 */
 
 struct loader_block_part {
