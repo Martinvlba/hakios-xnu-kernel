@@ -2508,6 +2508,56 @@ hakios_springboard_init(void)
 	notify_register_dispatch("com.hakios.layers", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		layers();
 	});
+	{
+		/* sb_authsay=1 (a test, 11-13): once a second, when it changes, what SpringBoard holds the user for --
+		 * authenticated or not, a passcode or none, the interface locked or not. After the side button's lock the
+		 * lock screen let the phone be opened by a swipe with a passcode set and the kernel's keybag locked. */
+		char args[1024] = "";
+		size_t size = sizeof(args) - 1;
+
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "sb_authsay=1") != NULL) {
+			dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+
+			dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), NSEC_PER_SEC / 2, NSEC_PER_SEC / 10);
+			dispatch_source_set_event_handler(timer, ^{
+				static int before = -1;
+				id application = SEND(id, objc_getClass("UIApplication"), "sharedApplication");
+				id authentication = application && class_respondsToSelector(object_getClass(application),
+				    sel_registerName("authenticationController")) ? SEND(id, application, "authenticationController") : NULL;
+				Class manager_class = objc_getClass("SBLockScreenManager");
+				id manager = manager_class ? SEND(id, manager_class, "sharedInstanceIfExists") : NULL;
+				int now;
+
+				if (authentication == NULL) {
+					return;
+				}
+				now = (SEND(BOOL, authentication, "isAuthenticated") ? 1 : 0) | (SEND(BOOL, authentication, "hasPasscodeSet") ? 2 : 0) |
+				    (manager != NULL && SEND(BOOL, manager, "isUILocked") ? 4 : 0) |
+				    (class_respondsToSelector(object_getClass(authentication), sel_registerName("isAuthenticatedCached")) &&
+				    SEND(BOOL, authentication, "isAuthenticatedCached") ? 8 : 0);
+				if (now != before) {
+					before = now;
+					say("hakios: auth: the user is %sauthenticated (cached: %s), %s passcode, the interface %slocked\n",
+					    now & 1 ? "" : "NOT ", now & 8 ? "yes" : "no", now & 2 ? "a" : "NO", now & 4 ? "" : "not ");
+					{
+						/* ... and why it would or would not take the authentication back: its assertions, its
+						 * policy's word, its own description */
+						SEL has = sel_registerName("hasActiveAssertions"), may = sel_registerName("_shouldRevokeAuthenticationNow");
+						id text = SEND(id, authentication, "description");
+						const char *c = text != NULL ? SEND(const char *, text, "UTF8String") : NULL;
+
+						say("hakios: auth: active assertions %d, should revoke now %d\n",
+						    class_respondsToSelector(object_getClass(authentication), has) ? (int)SEND(BOOL, authentication, "hasActiveAssertions") : -1,
+						    class_respondsToSelector(object_getClass(authentication), may) ? (int)SEND(BOOL, authentication, "_shouldRevokeAuthenticationNow") : -1);
+						for (size_t at = 0, n = c != NULL ? strlen(c) : 0; at < n && at < 2400; at += 400) {
+							say("hakios: auth: %.400s\n", c + at);
+						}
+					}
+				}
+			});
+			dispatch_resume(timer);
+		}
+	}
 	notify_register_dispatch("com.hakios.switcher", &token, dispatch_get_main_queue(), ^(__unused int t) {
 		switcher();
 	});
