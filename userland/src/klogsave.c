@@ -157,6 +157,12 @@ main(void)
 				while (n > 0 && buf[from + n - 1] == 0) {
 					n--;
 				}
+				/* (proc_kmsgbuf closes a line the kernel is still writing with a newline of its own: the last
+				 * newline is left for the next time, or the mark would not be found again and the whole ring
+				 * written anew -- the 11-13 files had every line up to five times) */
+				if (n > 0 && buf[from + n - 1] == '\n') {
+					n--;
+				}
 				if (n > 0 && write(fd, buf + from, n) > 0) {
 					fsync(fd);
 					size_t end = from + n;
