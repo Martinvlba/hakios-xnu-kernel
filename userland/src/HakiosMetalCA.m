@@ -4166,11 +4166,20 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 		 * driver does not hold it to the usage. A surface's rows are linear, so a render target costs nothing here;
 		 * one is added wherever the core takes it for the format, and the usage asked for is the fallback. */
 		texture = NULL;
-		if (plane != 0 && plane < IOSurfaceGetPlaneCount(surface)) {
+		/* (11-13) THE FIRST PLANE TOO, where it is not the surface's own start and rows: a video with alpha ('v0a8',
+		 * Fitness' Trends animation CTS.m4v: luma 960x672 with rows of 960 bytes 64 bytes in, CbCr, alpha; the
+		 * surface's own "bytes per row" says 2404) was read as R8 with rows of 2404 bytes from the start -- streaks
+		 * and a grey band on the tester's screen -- and its later planes 64 bytes early (their place was counted from
+		 * plane 0, the core counts from the surface's start). */
+		const BOOL planar = IOSurfaceGetPlaneCount(surface) >= 1 && plane < IOSurfaceGetPlaneCount(surface);
+		const BOOL firstApart = planar && plane == 0 &&
+					(IOSurfaceGetBaseAddressOfPlane(surface, 0) != IOSurfaceGetBaseAddress(surface) ||
+					 IOSurfaceGetBytesPerRowOfPlane(surface, 0) != IOSurfaceGetBytesPerRow(surface));
+		if (planar && (plane != 0 || firstApart)) {
 			/* (11-12 night) a later plane of a planar surface ('420f''s CbCr plane, which SpringBoard asks as RGBA8 of
 			 * half its width): the plane's place and rows from the surface itself, the Mali core's texture over them */
 			const uint64_t delta = (uint64_t)((uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface, plane) -
-						      (uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface, 0));
+						      (uintptr_t)IOSurfaceGetBaseAddress(surface));
 			texture = hakios_metal_texture_new_iosurface_plane(_gpu, IOSurfaceGetID(surface), delta,
 									   (unsigned)IOSurfaceGetBytesPerRowOfPlane(surface, plane),
 									   (unsigned)[descriptor pixelFormat], (unsigned)[descriptor width],
@@ -4178,7 +4187,7 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 			if (texture != NULL) {
 				usage |= MTLTextureUsageRenderTarget;
 				HM_ONCE("a texture over plane %lu of IOSurface %u: %lux%lu of format %lu, usage %#lx, the plane %zux%zu with rows "
-					"of %zu bytes, %llu bytes past plane 0 (the first)\n", (unsigned long)plane, IOSurfaceGetID(surface),
+					"of %zu bytes, %llu bytes past the surface's start\n", (unsigned long)plane, IOSurfaceGetID(surface),
 					(unsigned long)[descriptor width], (unsigned long)[descriptor height],
 					(unsigned long)[descriptor pixelFormat], (unsigned long)usage, IOSurfaceGetWidthOfPlane(surface, plane),
 					IOSurfaceGetHeightOfPlane(surface, plane), IOSurfaceGetBytesPerRowOfPlane(surface, plane),
