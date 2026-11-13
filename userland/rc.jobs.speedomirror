@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Speedometer 3.1 from a host that sends no X-Frame-Options (RC_JOBS=rc.jobs.speedomirror; browserbench.org's
+# test frame is stopped by Safari's own X-Frame-Options check: the port's log 11-13); test_reboot_after=1260 for the 20 minutes): the page by
+# URL, Start by a tap (0.5 0.446: higher than on 3.0, which has a banner), the run.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 80
+/redwood/bin/battery_test open https://chromium-workloads.web.app/speedometer/v3.1/
+/redwood/bin/rwtouch wait 45 tap 0.5 0.446 wait 1000
