@@ -16,6 +16,7 @@
 #include "hakios-metal/hakios_metal.h"
 #include "mali_draw_bc.h"
 #include "cover1_bc.h"
+#include "cube_fs_bc.h"
 
 static const char *
 colour(uint32_t p)
@@ -385,6 +386,207 @@ depth_alone_test(hakios_metal_device *d, hakios_metal_queue *q)
 	printf("mali_draw_test: a depth buffer cleared alone (no colour attachment): %u of 4096 read 0.5 (the first %g): %s\n", cleared,
 	    (double)after[0], ok ? "WORK" : "FAILED");
 	hakios_metal_texture_free(z);
+	return ok;
+}
+
+/* 6a3. ANGLE's upload (the WebGL aquarium's big textures came out striped, 11-13): the picture replaced into a
+ * one-level texture, copied on the GPU into level 0 of a texture with all its levels, the levels generated; level 0
+ * read back is the picture */
+static int
+upload_copy_test(hakios_metal_device *d, hakios_metal_queue *q, unsigned w, unsigned h)
+{
+	unsigned levels = 1, right = 0;
+	for (unsigned m = w > h ? w : h; m > 1; m >>= 1) levels++;
+	hakios_metal_texture *src = hakios_metal_texture_new(d, 2, 70, w, h, 1);
+	hakios_metal_texture *dst = hakios_metal_texture_new_levels(d, 2, 70, w, h, levels, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	uint32_t *px = malloc((size_t)w * h * 4), *back = calloc((size_t)w * h, 4);
+	int ok = src != NULL && dst != NULL && px != NULL && back != NULL;
+
+	if (!ok) {
+		printf("mali_draw_test: an upload by copy, %ux%u: no textures (%s)\n", w, h, hakios_metal_error());
+		return 0;
+	}
+	for (unsigned y = 0; y < h; y++) {
+		for (unsigned x = 0; x < w; x++) {
+			px[y * w + x] = 0xff000000u | (x & 255) | (y & 255) << 8 | ((x >> 8) << 4 | (y >> 8)) << 16;
+		}
+	}
+	hakios_metal_texture_replace(src, 0, 0, w, h, px, (uint64_t)w * 4);
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_blit(cb, src, 0, 0, 0, w, h, dst, 0, 0, 0, w, h, 0) != 0) {
+		printf("mali_draw_test: an upload by copy, %ux%u: the copy refused: %s\n", w, h, hakios_metal_error());
+		ok = 0;
+	}
+	if (hakios_metal_cb_generate_mipmaps(cb, dst) != 0) {
+		printf("mali_draw_test: an upload by copy, %ux%u: the levels refused: %s\n", w, h, hakios_metal_error());
+		ok = 0;
+	}
+	ok = finish(cb, "an upload by copy") && ok;
+	hakios_metal_texture_read(dst, 0, 0, w, h, back, (uint64_t)w * 4);
+	unsigned first = w * h;
+	for (unsigned i = 0; i < w * h; i++) {
+		if (back[i] == px[i]) right++; else if (first == w * h) first = i;
+	}
+	ok = ok && right == w * h;
+	if (first < w * h)
+		printf("mali_draw_test: an upload by copy, %ux%u: the first wrong pixel at (%u, %u): %#x for %#x\n", w, h, first % w,
+		    first / w, back[first], px[first]);
+	printf("mali_draw_test: an upload by copy, %ux%u into level 0 of %u levels, the levels generated: %u of %u pixels right: %s\n", w, h,
+	    levels, right, w * h, ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(src);
+	hakios_metal_texture_free(dst);
+	free(px);
+	free(back);
+	return ok;
+}
+
+/* 6a4. ANGLE's cube upload (the aquarium's skybox, 11-13): six one-level 2D pictures, each of one colour with its
+ * face's number in it, copied on the GPU into the faces of a cube of SIZE with all its levels, the levels generated;
+ * each face's level 0, level 1 and a small level read back are that face's colour */
+static int
+cube_upload_test(hakios_metal_device *d, hakios_metal_queue *q, unsigned size)
+{
+	unsigned levels = 1, right = 0, asked = 0;
+	for (unsigned m = size; m > 1; m >>= 1) levels++;
+	hakios_metal_texture *cube = hakios_metal_texture_new_layered(d, 5, 70, size, size, 6, levels, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *src[6] = { NULL };
+	uint32_t *px = malloc((size_t)size * size * 4), *back = malloc((size_t)size * size * 4);
+	int ok = cube != NULL && px != NULL && back != NULL;
+	hakios_metal_cb *cb;
+
+	if (!ok) {
+		printf("mali_draw_test: a cube uploaded by copies, %u: no cube (%s)\n", size, hakios_metal_error());
+		return 0;
+	}
+	cb = hakios_metal_cb_new(q);
+	for (unsigned f = 0; f < 6; f++) {
+		const uint32_t colour = 0xff000000u | (40 * (f + 1)) | (250 - 40 * f) << 8 | (f * 17 + 5) << 16;
+
+		src[f] = hakios_metal_texture_new(d, 2, 70, size, size, 1);
+		for (unsigned i = 0; i < size * size; i++) px[i] = colour;
+		if (src[f] == NULL || hakios_metal_texture_replace(src[f], 0, 0, size, size, px, (uint64_t)size * 4) != 0 ||
+		    hakios_metal_cb_blit_layer(cb, src[f], 0, 0, 0, 0, size, size, cube, 0, f, 0, 0) != 0) {
+			printf("mali_draw_test: a cube uploaded by copies, %u: face %u refused: %s\n", size, f, hakios_metal_error());
+			ok = 0;
+		}
+	}
+	if (hakios_metal_cb_generate_mipmaps(cb, cube) != 0) {
+		printf("mali_draw_test: a cube uploaded by copies, %u: the levels refused: %s\n", size, hakios_metal_error());
+		ok = 0;
+	}
+	ok = finish(cb, "a cube uploaded by copies") && ok;
+	for (unsigned f = 0; f < 6; f++) {
+		const uint32_t colour = 0xff000000u | (40 * (f + 1)) | (250 - 40 * f) << 8 | (f * 17 + 5) << 16;
+		const unsigned at[3] = { 0, 1, levels - 3 };
+
+		for (unsigned k = 0; k < 3; k++) {
+			const unsigned l = at[k], n = size >> l;
+			unsigned good = 0;
+
+			memset(back, 0, (size_t)n * n * 4);
+			if (hakios_metal_texture_read_3d(cube, l, 0, 0, f, n, n, 1, back, (uint64_t)n * 4, 0) != 0) {
+				printf("mali_draw_test: a cube uploaded by copies, %u: face %u level %u not read: %s\n", size, f, l, hakios_metal_error());
+			}
+			for (unsigned i = 0; i < n * n; i++) good += back[i] == colour;
+			asked++;
+			right += good == n * n;
+			if (good != n * n)
+				printf("mali_draw_test: a cube uploaded by copies, %u: face %u level %u: %u of %u pixels its colour %#x (the first %#x)\n",
+				    size, f, l, good, n * n, colour, back[0]);
+		}
+	}
+	ok = ok && right == asked;
+	printf("mali_draw_test: a cube of %u with %u levels uploaded by copies into its faces, the levels generated: %u of %u (face, level) "
+	    "read back right: %s\n", size, levels, right, asked, ok ? "WORK" : "FAILED");
+	for (unsigned f = 0; f < 6; f++) if (src[f] != NULL) hakios_metal_texture_free(src[f]);
+	hakios_metal_texture_free(cube);
+	free(px);
+	free(back);
+	return ok;
+}
+
+/* 6a5. a cube SAMPLED (11-13: never checked on the phone until the aquarium's skybox): the cube of 6a4 -- faces of one
+ * colour each, all its levels -- sampled over a 16x16 target along a direction from the fragment stage's buffer, off
+ * the axis: the target is the colour of the face the direction's biggest component names (+X -X +Y -Y +Z -Z) */
+static int
+cube_sample_test(hakios_metal_device *d, hakios_metal_queue *q, unsigned size, unsigned mip_filter)
+{
+	unsigned levels = 1, right = 0;
+	for (unsigned m = size; m > 1; m >>= 1) levels++;
+	hakios_metal_texture *cube = hakios_metal_texture_new_layered(d, 5, 70, size, size, 6, levels, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 16, 16, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *p = hakios_metal_program_new_bitcode(tri_cover_vs_bc, tri_cover_vs_bc_len, tri_cube_fs_bc, tri_cube_fs_bc_len, 70);
+	hakios_metal_buffer *params = hakios_metal_buffer_new(d, 4096), *dir = hakios_metal_buffer_new(d, 4096);
+	struct hakios_metal_sampler_desc sd;
+	hakios_metal_sampler *smp;
+	uint32_t *px = malloc((size_t)size * size * 4), got[6] = { 0 }, back[256];
+	static const float dirs[6][3] = { { 1, 0.4f, -0.3f }, { -1, -0.5f, 0.2f }, { 0.3f, 1, 0.6f }, { -0.2f, -1, -0.7f }, { 0.5f, -0.4f, 1 }, { -0.6f, 0.3f, -1 } };
+	int ok;
+	hakios_metal_cb *cb;
+
+	memset(&sd, 0, sizeof(sd));
+	sd.normalized_coordinates = 1;
+	sd.min_filter = sd.mag_filter = 1;
+	sd.mip_filter = mip_filter;
+	sd.lod_max_clamp = 1000.0f;
+	sd.max_anisotropy = 1;
+	smp = hakios_metal_sampler_new(d, &sd);
+	if (cube == NULL || t == NULL || p == NULL || params == NULL || dir == NULL || smp == NULL || px == NULL) {
+		printf("mali_draw_test: a cube sampled: not made (%s): FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	ok = 1;
+	for (unsigned f = 0; f < 6; f++) {
+		const uint32_t colour = 0xff000000u | (40 * (f + 1)) | (250 - 40 * f) << 8 | (f * 17 + 5) << 16;
+
+		for (unsigned i = 0; i < size * size; i++) px[i] = colour;
+		ok = hakios_metal_texture_replace_3d(cube, 0, 0, 0, f, size, size, 1, px, (uint64_t)size * 4, 0) == 0 && ok;
+	}
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_generate_mipmaps(cb, cube) != 0) ok = 0;
+	ok = finish(cb, "a cube sampled: its levels") && ok;
+	{
+		float *f = hakios_metal_buffer_contents(params);
+
+		memset(f, 0, 48);
+		f[2] = 2.0f;
+		f[5] = 2.0f;
+	}
+	for (unsigned f = 0; f < 6; f++) {
+		const uint32_t colour = 0xff000000u | (40 * (f + 1)) | (250 - 40 * f) << 8 | (f * 17 + 5) << 16;
+		struct hakios_metal_render_pass pass;
+		hakios_metal_buffer *vb[1] = { params }, *fb[1] = { dir };
+		uint64_t offs[1] = { 0 };
+		hakios_metal_texture *texs[1] = { cube };
+		hakios_metal_sampler *smps[1] = { smp };
+		float *v = hakios_metal_buffer_contents(dir);
+		unsigned good = 0;
+
+		v[0] = dirs[f][0]; v[1] = dirs[f][1]; v[2] = dirs[f][2]; v[3] = 0;
+		memset(&pass, 0, sizeof(pass));
+		pass.color0 = t;
+		pass.load_action = 2;
+		pass.store_action = 1;
+		pass.clear_color[3] = 1;
+		cb = hakios_metal_cb_new(q);
+		if (hakios_metal_cb_draw2(cb, p, &pass, NULL, NULL, 3, 0, 3, 1, vb, offs, 1, fb, offs, 1, texs, 1, smps, 1) != 0)
+			printf("mali_draw_test: a cube sampled, face %u: refused: %s\n", f, hakios_metal_error());
+		ok = finish(cb, "a cube sampled") && ok;
+		memset(back, 0xee, sizeof(back));
+		hakios_metal_texture_read(t, 0, 0, 16, 16, back, 64);
+		for (unsigned i = 0; i < 256; i++) good += back[i] == colour;
+		got[f] = back[0];
+		right += good == 256;
+		if (good != 256)
+			printf("mali_draw_test: a cube sampled, direction (%g, %g, %g), face %u: %u of 256 its colour %#x, pixel 0 is %#x\n",
+			    (double)dirs[f][0], (double)dirs[f][1], (double)dirs[f][2], f, good, colour, back[0]);
+	}
+	ok = ok && right == 6;
+	printf("mali_draw_test: a cube of %u with %u levels sampled (mip filter %u) along six directions: %u of 6 give their face's colour "
+	    "(%#x %#x %#x %#x %#x %#x): %s\n", size, levels, mip_filter, right, got[0], got[1], got[2], got[3], got[4], got[5], ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(cube);
+	hakios_metal_texture_free(t);
+	free(px);
 	return ok;
 }
 
@@ -1952,6 +2154,14 @@ main(int argc, char **argv)
 	right = depth_test(d, q, flat, col, 0) && right;
 	right = depth_test(d, q, flat, col, 1) && right;
 	right = depth_alone_test(d, q) && right;
+	right = upload_copy_test(d, q, 256, 256) && right;
+	right = upload_copy_test(d, q, 1024, 128) && right;
+	right = upload_copy_test(d, q, 1024, 1024) && right;
+	right = cube_upload_test(d, q, 64) && right;
+	right = cube_upload_test(d, q, 512) && right;
+	right = cube_sample_test(d, q, 64, 0) && right;
+	right = cube_sample_test(d, q, 512, 2) && right;
+	right = cube_sample_test(d, q, 16, 0) && right;
 	right = stencil_test(d, q, flat, col, 0) && right;
 	right = stencil_test(d, q, flat, col, 1) && right;
 	right = blend_test(d, q) && right;

@@ -6523,6 +6523,22 @@ hakios_metal_cb_generate_mipmaps(hakios_metal_cb *cb, hakios_metal_texture *t)
     if (t == nullptr || t->levels <= 1) {
         return 0;                                       // one level: nothing to make
     }
+    // A LAYERED TEXTURE (a cube, an array): each layer by itself, through a 2D view of it (11-13: only layer 0's levels
+    // were made -- a cube's other five faces had level 0 and nothing below; ANGLE's skybox in the WebGL aquarium)
+    if (t->layers > 1) {
+        for (unsigned layer = 0; layer < t->layers; layer++) {
+            hakios_metal_texture *v = hakios_metal_texture_new_view(t, t->format, 2, 0, t->levels, layer, 1);
+            if (v == nullptr) {
+                return -1;
+            }
+            int r = hakios_metal_cb_generate_mipmaps(cb, v);
+            v->release();                               // (the command buffer holds what its copies name)
+            if (r != 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
     // each level from the one above, halved with linear filtering
     for (unsigned l = 1; l < t->levels; l++) {
         if (hakios_metal_cb_blit(cb, t, l - 1, 0, 0, t->levelWidth(l - 1), t->levelHeight(l - 1), t, l, 0, 0, t->levelWidth(l),
