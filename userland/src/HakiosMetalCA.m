@@ -8546,6 +8546,17 @@ hm_spec_off(void)
 
 - (void)setFragmentBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index
 {
+	if (bytes != NULL && length >= 16) {
+		/* (metal_trace=1: each kind of fragment constants once, as floats -- the aquarium's lighting and fog, 11-13) */
+		const float *f = bytes;
+		char line[330];
+		int at = 0;
+
+		for (NSUInteger i = 0; i < length / 4 && i < 28 && at < (int)sizeof(line) - 16; i++) {
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %.3g", (double)f[i]);
+		}
+		hm_blit_say("fragment bytes at %lu, %lu long:%s", (unsigned long)index, (unsigned long)length, line);
+	}
 	HakiosMetalBuffer *buffer = [self hakiosScratch:bytes length:length stage:"fragment" index:index];
 
 	if (buffer != nil) {

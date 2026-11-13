@@ -17,6 +17,7 @@
 #include "mali_draw_bc.h"
 #include "cover1_bc.h"
 #include "cube_fs_bc.h"
+#include "link_bc.h"
 
 static const char *
 colour(uint32_t p)
@@ -630,6 +631,45 @@ buffer_cost(hakios_metal_device *d, hakios_metal_queue *q, unsigned count, uint6
 	    ((t2.tv_sec - t1.tv_sec) * 1e6 + (t2.tv_nsec - t1.tv_nsec) / 1e3) / count);
 	if (t != NULL) hakios_metal_texture_free(t);
 	free(b);
+}
+
+/* 6a7. THE STAGES LINKED BY NAME (11-13, the WebGL aquarium): tri_link_vs gives seven varyings, tri_link_fs takes four
+ * of them (the first two, the fifth and the seventh) and returns (ve.x, vg.y, ve.z, 1) = (0.25, 0.375, 0.75, 1) */
+static int
+link_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	hakios_metal_texture *t = hakios_metal_texture_new(d, 2, 70, 32, 32, 1 | HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	hakios_metal_program *p = hakios_metal_program_new_bitcode(tri_link_vs_bc, tri_link_vs_bc_len, tri_link_fs_bc, tri_link_fs_bc_len, 70);
+	struct hakios_metal_render_pass pass;
+	uint32_t px[32 * 32];
+	unsigned right = 0;
+	int ok;
+	hakios_metal_cb *cb;
+
+	if (t == NULL || p == NULL) {
+		printf("mali_draw_test: the stages linked by name: not made (%s): FAILED\n", hakios_metal_error());
+		return 0;
+	}
+	memset(&pass, 0, sizeof(pass));
+	pass.color0 = t;
+	pass.load_action = 2;
+	pass.store_action = 1;
+	pass.clear_color[3] = 1;
+	cb = hakios_metal_cb_new(q);
+	if (hakios_metal_cb_draw(cb, p, &pass, NULL, NULL, 3, 0, 6, 1, NULL, NULL, 0, NULL, NULL, 0) != 0)
+		printf("mali_draw_test: the stages linked by name: refused: %s\n", hakios_metal_error());
+	ok = finish(cb, "the stages linked by name");
+	memset(px, 0xee, sizeof(px));
+	hakios_metal_texture_read(t, 0, 0, 32, 32, px, 128);
+	for (unsigned i = 0; i < 1024; i++) {
+		int r = (int)(px[i] & 255) - 64, g = (int)(px[i] >> 8 & 255) - 96, b = (int)(px[i] >> 16 & 255) - 191;
+		right += r >= -1 && r <= 1 && g >= -1 && g <= 1 && b >= -1 && b <= 1 && px[i] >> 24 == 255;
+	}
+	ok = ok && right == 1024;
+	printf("mali_draw_test: the stages linked by name (seven varyings given, four taken): %u of 1024 pixels (0.25, 0.375, 0.75, 1), "
+	    "pixel 0 is 0x%08x for 0xffbf6040: %s\n", right, px[0], ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(t);
+	return ok;
 }
 
 /* 6b. stencil (Depth32Float_Stencil8; LEVEL 1: level 1 of a 128x128 one of two levels): the lower-left half writes
@@ -2204,6 +2244,7 @@ main(int argc, char **argv)
 	right = cube_sample_test(d, q, 64, 0) && right;
 	right = cube_sample_test(d, q, 512, 2) && right;
 	right = cube_sample_test(d, q, 16, 0) && right;
+	right = link_test(d, q) && right;
 	buffer_cost(d, q, 400, 40000, 0);
 	buffer_cost(d, q, 400, 4096, 0);
 	buffer_cost(d, q, 100, 1 << 20, 0);
