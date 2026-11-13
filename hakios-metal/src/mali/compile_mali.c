@@ -294,7 +294,8 @@ lower_draw_sysvals(nir_builder *b, nir_intrinsic_instr *in, void *data)
 		/* (a half-float format is told only for a target whose blend is computed in the shader: its tile holds
 		 * the floats) */
 		value = nir_imm_int(b, format == 55 ? (167 << 12 | 16) : format == 25 ? 199 << 12 : format == 65 ? 207 << 12 :
-		    format == 115 ? 223 << 12 : format == 92 ? 89 << 12 : 237 << 12);
+		    format == 115 ? 223 << 12 : format == 92 ? 89 << 12 : format == 71 || format == 81 ? (237 << 12 | 1 << 20) :
+		    237 << 12);
 		break;
 	}
 	default:
