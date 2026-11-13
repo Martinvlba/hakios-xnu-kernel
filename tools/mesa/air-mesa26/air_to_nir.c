@@ -155,12 +155,19 @@ air_get(struct air_ctx *c, const struct air_value *v)
       return e->data;
    const struct air_constant *k = air_value_as_constant(v);
    if (k) {
-      /* (11-13) A CONSTANT IS MADE WHERE IT IS USED, EVERY TIME. Kept from its first use, the load_const stood in
-       * whatever block that use was in: a second use on a path that does not pass through it -- `if (a) x = -x;
-       * if (b) y = -y;`, both negations LLVM's `fsub -0.0, v` -- got, from nir_repair_ssa, a phi of the constant and
-       * UNDEFINED. (ANGLE's blit vertex function, the Pixel 8a; NIR's own passes fold the copies.)
+      /* KNOWN, NOT FIXED (11-13; devices/akita TODO 18c): the constant is made at its first use and kept, its
+       * load_const in whatever block that use was in. A later use on a path not through that block -- `if (a) x = -x;
+       * if (b) y = -y;`, both negations LLVM's `fsub -0.0, v` (ANGLE's blit vertex function) -- gets, from
+       * nir_repair_ssa, a phi of the constant and UNDEFINED. The Mali reads undefined as 0, so -0.0 and 0 survive it
+       * and any other constant would not. Making it anew at each use, or once at the function's start, both stopped
+       * the compile of CoreAnimation's uber_fragment for the Calendar widget ("Unhandled ALU op i2i1": a block with
+       * integers of 3 bits, which this translator does not really serve, is then no longer folded away) -- so the
+       * integers of odd widths first.
        */
-      return air_constant_val(c, k);
+      struct air_val *val = air_constant_val(c, k);
+      if (val)
+         air_set(c, v, val);
+      return val;
    }
    air_error(c, "instruction: a %s value used before it is defined%s%s",
              v->kind == AIR_VALUE_GLOBAL ? "global" :

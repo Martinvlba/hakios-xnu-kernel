@@ -31,6 +31,8 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_lower_blend.h"
+#include <dlfcn.h>
+#include <sys/ucontext.h>
 #include "compiler/glsl_types.h"
 #include "compiler/air/nir_air.h"
 #include "panfrost/compiler/pan_compiler.h"
@@ -850,10 +852,53 @@ static struct sigaction guard_before[3];
 static const int guard_signals[3] = { SIGTRAP, SIGABRT, SIGILL };
 static pthread_once_t guard_once = PTHREAD_ONCE_INIT;
 
+/* where a compile stopped (11-13): the stopping thread's frames as image + offset, for the refusal's sentence */
+static __thread char guard_where[420];
+
+static void
+guard_frames(void *context)
+{
+#if defined(__APPLE__) && defined(__aarch64__)
+	const ucontext_t *uc = (const ucontext_t *)context;
+	size_t at = 0;
+
+	guard_where[0] = 0;
+	if (uc == NULL || uc->uc_mcontext == NULL) {
+		return;
+	}
+	uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc, fp = (uintptr_t)uc->uc_mcontext->__ss.__fp;
+	const uintptr_t sp = (uintptr_t)uc->uc_mcontext->__ss.__sp;
+	for (int i = 0; i < 14 && at + 40 < sizeof(guard_where); i++) {
+		Dl_info where;
+
+		if (pc != 0 && dladdr((void *)pc, &where) != 0 && where.dli_fname != NULL) {
+			const char *base = strrchr(where.dli_fname, '/');
+
+			at += (size_t)snprintf(guard_where + at, sizeof(guard_where) - at, " %s+%#lx", base != NULL ? base + 1 : where.dli_fname,
+			    (unsigned long)(pc - (uintptr_t)where.dli_fbase));
+		} else {
+			at += (size_t)snprintf(guard_where + at, sizeof(guard_where) - at, " %#lx", (unsigned long)pc);
+		}
+		if (fp == 0 || (fp & 7) != 0 || fp < sp || fp - sp > (64u << 20)) {
+			break;
+		}
+		pc = ((const uintptr_t *)fp)[1];
+		const uintptr_t next = ((const uintptr_t *)fp)[0];
+		if (next <= fp) {
+			break;
+		}
+		fp = next;
+	}
+#else
+	(void)context;
+#endif
+}
+
 static void
 guard_handler(int signal_number, siginfo_t *info, void *context)
 {
 	if (compile_guard != NULL) {
+		guard_frames(context);
 		siglongjmp(*compile_guard, signal_number);
 	}
 	for (int i = 0; i < 3; i++) {
@@ -909,7 +954,8 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 	int caught = sigsetjmp(jump, 1);
 	if (caught != 0) {
 		compile_guard = outer;
-		say(error, error_size, "the compiler stopped (signal %d) on %s", caught, out->name[0] ? out->name : "a function");
+		say(error, error_size, "the compiler stopped (signal %d) on %s; at%s", caught, out->name[0] ? out->name : "a function",
+		    guard_where[0] ? guard_where : " (no frames)");
 		out->code = NULL;
 		out->varyings = NULL;
 		return -1;
