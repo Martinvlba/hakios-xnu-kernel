@@ -418,6 +418,19 @@ aksOpenClasses(const uint8_t key[32])
 	}
 }
 
+/* aks_tell=N (tests; see where the messages go out): bit 0 the first unlock told, bit 1 every lock and unlock */
+static uint32_t
+aksTell(void)
+{
+	static int tell = -1;
+	uint32_t v = 0;
+
+	if (tell < 0) {
+		tell = PE_parse_boot_argn("aks_tell", &v, sizeof(v)) ? (int) v : 0;
+	}
+	return (uint32_t) tell;
+}
+
 static IOReturn
 aksUnlock(const uint8_t * passcode, size_t length)
 {
@@ -430,18 +443,12 @@ aksUnlock(const uint8_t * passcode, size_t length)
 			IOLog("MiniAppleKeyStore: unlocked%s\n", gAKSBeenUnlocked ? "" : " (the first time since the start)");
 		}
 		/* (NOT TOLD of an unlock or a lock it asked for itself -- see where the messages go out) */
-		{
-			/* (aks_tell=1: the first unlock told too -- a test; see where the messages go out) */
-			static int tell = -1;
-			uint32_t v = 0;
-
-			if (tell < 0) {
-				tell = PE_parse_boot_argn("aks_tell", &v, sizeof(v)) && v != 0;
-			}
-			if (tell) {
-				gAKSChanged |= !gAKSBeenUnlocked;
-				gAKSFirstUnlock |= !gAKSBeenUnlocked;
-			}
+		if (aksTell() & 1) {
+			gAKSChanged |= !gAKSBeenUnlocked;
+			gAKSFirstUnlock |= !gAKSBeenUnlocked;
+		}
+		if (aksTell() & 2) {
+			gAKSChanged |= gAKSLocked;
 		}
 		gAKSLocked = false;
 		gAKSBeenUnlocked = true;
@@ -463,6 +470,9 @@ aksLock(void)
 		}
 	}
 	gAKSLocked = true;
+	if (aksTell() & 2) {
+		gAKSChanged = true;
+	}
 	IOLog("MiniAppleKeyStore: locked\n");
 }
 
@@ -735,8 +745,18 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 	IOLockLock(gAKSLock);
 	there = aksBag();
 	switch (selector) {
-	case kAKSOpenCheck:
 	case kAKSAssertHold:
+		/* A hold on the bag's keys (in: the kind, the handle, a time): NOT GIVEN WHILE THE BAG IS LOCKED. SpringBoard
+		 * asks for one of its grace-period kind (2) when the phone wakes after the side button's lock ("Checking if
+		 * passcode locked") and takes a yes for "still within the grace period": with every hold granted the lock
+		 * screen let the phone be opened by a swipe, a passcode set and the bag locked (11-13; sb_authsay=1 showed
+		 * its state "Revoking" with that assertion valid). There is no grace period here yet: locked is locked. */
+		if (there && (gBag.flags & 1) && gAKSLocked) {
+			ret = kAKSReturnLocked;
+		}
+		break;
+
+	case kAKSOpenCheck:
 	case kAKSAssertDrop:
 	case kAKSAssertPromote:
 	case kAKSAssertConsume:
