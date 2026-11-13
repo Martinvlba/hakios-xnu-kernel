@@ -27,7 +27,7 @@ import tempfile
 
 BS = 4096
 DARWIN_BLOCKS = int(os.environ.get('DARWIN_BLOCKS', 5242875))   # darwin, in blocks of 4096 (README, "The port's partition")
-DATA_FIRST = 2042368               # where the volume begins: drivers/storage/hakios.ufs.c, UFS_WRITE_FIRST
+DATA_FIRST = int(os.environ.get("DATA_FIRST", 2097152))   # where the volume begins: drivers/storage/hakios.ufs.c, UFS_WRITE_FIRST (2042368 until 11-13)
 MAGIC, RAW, FILL, DONT_CARE = 0xED26FF3A, 0xCAC1, 0xCAC2, 0xCAC3
 
 

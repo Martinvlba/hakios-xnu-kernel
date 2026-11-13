@@ -124,13 +124,34 @@ def _adc_decompress(src, out_len):
     return bytes(out[:out_len])
 
 
+_liblzfse = None
+
+
 def _lzfse_decompress(src, out_len):
+    """the python module if it is there; else the system's liblzfse through ctypes (Debian's liblzfse1)"""
+    global _liblzfse
     try:
         import lzfse
+        return lzfse.decompress(src)[:out_len]
     except ImportError:
-        raise SystemExit("dmg.py: this image uses LZFSE chunks; install the python "
-                         "'lzfse' module (pip install lzfse)")
-    return lzfse.decompress(src)[:out_len]
+        pass
+    import ctypes
+    import ctypes.util
+    if _liblzfse is None:
+        name = ctypes.util.find_library('lzfse') or 'liblzfse.so.1'
+        try:
+            _liblzfse = ctypes.CDLL(name)
+        except OSError:
+            raise SystemExit("dmg.py: this image uses LZFSE chunks; install the python 'lzfse' module "
+                             "(pip install lzfse) or the system's liblzfse")
+        _liblzfse.lzfse_decode_buffer.restype = ctypes.c_size_t
+        _liblzfse.lzfse_decode_buffer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t,
+                                                  ctypes.c_void_p]
+    out = ctypes.create_string_buffer(out_len + 1)
+    n = _liblzfse.lzfse_decode_buffer(out, out_len + 1, src, len(src), None)
+    if n == 0 or n > out_len:
+        raise SystemExit("dmg.py: an LZFSE chunk did not decode (%d of %d bytes)" % (n, out_len))
+    return out.raw[:out_len] if n == out_len else out.raw[:n] + bytes(out_len - n)
 
 
 class Dmg:

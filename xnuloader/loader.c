@@ -2008,7 +2008,7 @@ ufs_survey(void)
  * whatever userdata the phone has, with a GUID of its own (BLOCK_DARWIN_FIRST/LAST and _UNIQ were
  * the first phone's, and no write was ever served on another); they are printed instead.
  */
-#define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
+#define BLOCK_WRITE_FIRST  2097152ULL                  /* darwin's blocks of 4096: past both cryptexes -- 8 GiB since 11-13 (16.7.16's volume and cryptexes end at 2048000; 16.5's at 2042368, which this was) */
 #define BLOCK_DARWIN_MIN   5242875ULL                  /* blocks of 4096: the first phone's darwin, the layout's */
 #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
 
