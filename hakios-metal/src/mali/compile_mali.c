@@ -682,6 +682,112 @@ mali_boot_arg(const char *word)
 #endif
 }
 
+/*
+ * THE VARYINGS' NAMES, kept after the vertex stage's layout (11-13): a fragment function is LINKED to the vertex
+ * function by each input's name ("user(locn2)", ANGLE's "generated(10_uv_normalDv3_f)"), and may take fewer than the
+ * vertex function gives. Both sides numbered theirs in the order they come, and the fragment's third was the vertex's
+ * third whatever it was called: the WebGL aquarium's inner globe took the tangent for its normal and the binormal for
+ * its view vector (vertex: position, texCoord, tangent, binormal, normal, surfaceToLight, surfaceToView; fragment:
+ * position, texCoord, normal, surfaceToView) -- its refraction in pieces, the tester's reference picture beside ours.
+ */
+struct varying_names {
+	unsigned count;
+	struct { char name[76]; unsigned slot; } v[32];
+};
+
+static struct varying_names *
+names_of(const void *vs_varyings)
+{
+	return vs_varyings != NULL ? (struct varying_names *)((char *)vs_varyings + sizeof(struct pan_varying_layout)) : NULL;
+}
+
+/* "generated(<length><identifier><type>)": the identifier the same in both */
+static bool
+same_identifier(const char *a, const char *b)
+{
+	unsigned long la, lb;
+	char *ea, *eb;
+
+	if (strncmp(a, "generated(", 10) != 0 || strncmp(b, "generated(", 10) != 0) {
+		return false;
+	}
+	la = strtoul(a + 10, &ea, 10);
+	lb = strtoul(b + 10, &eb, 10);
+	return la != 0 && la == lb && strlen(ea) >= la && strlen(eb) >= lb && strncmp(ea, eb, la) == 0;
+}
+
+/* the fragment function's inputs given the slots of the vertex outputs of their names; one the vertex function does
+ * not have keeps a slot past every one of them */
+static void
+link_varyings(nir_shader *s, const struct air_shader_info *info, const void *vs_varyings)
+{
+	const struct varying_names *names = names_of(vs_varyings);
+	unsigned to[64], spare = 0, moved = 0;
+
+	if (names == NULL || names->count == 0 || info->num_varyings == 0) {
+		return;
+	}
+	for (unsigned i = 0; i < names->count; i++) {
+		spare = names->v[i].slot + 1 > spare ? names->v[i].slot + 1 : spare;
+	}
+	for (unsigned i = 0; i < 64; i++) {
+		to[i] = ~0u;
+	}
+	for (unsigned i = 0; i < info->num_varyings; i++) {
+		const struct air_varying *f = &info->varyings[i];
+		unsigned slot = ~0u;
+
+		if (f->slot < VARYING_SLOT_VAR0 || f->slot >= VARYING_SLOT_VAR0 + 64 || f->name == NULL) {
+			continue;
+		}
+		for (unsigned k = 0; k < names->count; k++) {
+			if (strcmp(names->v[k].name, f->name) == 0) {
+				slot = names->v[k].slot;
+				break;
+			}
+		}
+		/* the same identifier of another type ("generated(5colorDv4_Dh)" against "generated(5colorDv4_f)":
+		 * CoreAnimation's half-precision vertex functions with a float fragment function -- by the exact word alone
+		 * WebKit's GPU process drew its layers in pieces and faulted, day13/aq17) */
+		for (unsigned k = 0; slot == ~0u && k < names->count; k++) {
+			if (same_identifier(names->v[k].name, f->name)) {
+				slot = names->v[k].slot;
+			}
+		}
+		/* none of its name: the vertex function's of the same place, as before; failing that, a slot of its own */
+		if (slot == ~0u) {
+			slot = i < names->count ? names->v[i].slot : spare++;
+		}
+		to[f->slot - VARYING_SLOT_VAR0] = slot;
+		moved += slot != f->slot;
+	}
+	if (moved == 0) {
+		return;
+	}
+	if (mali_boot_arg("mali_linksay=1")) {
+		/* (mali_linksay=1: each relinking said -- the fragment's names and where they go, the vertex's names) */
+		char line[900];
+		int at = snprintf(line, sizeof(line), "mali link %s:", s->info.name ? s->info.name : "?");
+
+		for (unsigned i = 0; i < info->num_varyings && at < (int)sizeof(line) - 110; i++) {
+			const struct air_varying *f = &info->varyings[i];
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %s %u->%u;", f->name ? f->name : "?", f->slot - VARYING_SLOT_VAR0,
+			    f->slot >= VARYING_SLOT_VAR0 && f->slot < VARYING_SLOT_VAR0 + 64 ? to[f->slot - VARYING_SLOT_VAR0] - VARYING_SLOT_VAR0 : 99);
+		}
+		at += snprintf(line + at, sizeof(line) - (size_t)at, " | vertex:");
+		for (unsigned k = 0; k < names->count && at < (int)sizeof(line) - 90; k++) {
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %s=%u", names->v[k].name, names->v[k].slot - VARYING_SLOT_VAR0);
+		}
+		fprintf(stderr, "%s\n", line);
+	}
+	nir_foreach_variable_with_modes(var, s, nir_var_shader_in) {
+		if (var->data.location >= VARYING_SLOT_VAR0 && var->data.location < VARYING_SLOT_VAR0 + 64 &&
+		    to[var->data.location - VARYING_SLOT_VAR0] != ~0u) {
+			var->data.location = (int)to[var->data.location - VARYING_SLOT_VAR0];
+		}
+	}
+}
+
 static int
 compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, struct mali_kernel_binary *out, char *error,
     size_t error_size)
@@ -732,7 +838,7 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 	NIR_PASS(_, s, nir_shader_instructions_pass, lower_res_indices, nir_metadata_control_flow, NULL);
 	if (want == MESA_SHADER_VERTEX) {
 		/* where the varyings go, compact, as panvk lays them out; the fragment stage is compiled against the same */
-		varyings = calloc(1, sizeof(*varyings));
+		varyings = calloc(1, sizeof(*varyings) + sizeof(struct varying_names));  /* (the names after it: compile_stage) */
 		if (varyings == NULL) {
 			say(error, error_size, "no memory");
 			goto done;
@@ -1074,7 +1180,21 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 			    slot_of[n] };
 		}
 	}
+	if (want == MESA_SHADER_FRAGMENT) {
+		link_varyings(s, &air_info, vs_varyings);
+	}
 	result = compile_nir(s, want, vs_varyings, out, error, error_size);
+	if (result == 0 && want == MESA_SHADER_VERTEX && out->varyings != NULL) {
+		struct varying_names *names = names_of(out->varyings);
+
+		for (unsigned i = 0; i < air_info.num_varyings && names->count < 32; i++) {
+			if (air_info.varyings[i].name != NULL) {
+				snprintf(names->v[names->count].name, sizeof(names->v[0].name), "%s", air_info.varyings[i].name);
+				names->v[names->count].slot = air_info.varyings[i].slot;
+				names->count++;
+			}
+		}
+	}
 done:
 	compile_guard = outer;
 	ralloc_free(mem);
