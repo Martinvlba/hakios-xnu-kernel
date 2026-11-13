@@ -1,6 +1,6 @@
 # Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
 # Speedometer 3.1 in Safari, whole (RC_JOBS=rc.jobs.speedo31; test_reboot_after=1260 for the 20 minutes): the page by
-# URL, Start by a tap (three places down the middle: the button's height differs with the page's banner), the run.
+# URL, Start by a tap (0.5 0.446: higher than on 3.0, which has a banner), the run.
 /redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 80
 /redwood/bin/battery_test open https://browserbench.org/Speedometer3.1/
-/redwood/bin/rwtouch wait 45 tap 0.5 0.526 wait 2 tap 0.5 0.5 wait 2 tap 0.5 0.55 wait 1000
+/redwood/bin/rwtouch wait 45 tap 0.5 0.446 wait 1000

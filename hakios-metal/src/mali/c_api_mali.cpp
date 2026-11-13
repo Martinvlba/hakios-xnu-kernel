@@ -312,6 +312,41 @@ struct hakios_metal_device {
         freeBo(bo);
     }
 
+    // BUFFERS' MEMORY KEPT FOR THE NEXT BUFFER OF THE SAME SIZE (11-13): WebKit's WebGL (ANGLE) makes a buffer and
+    // gives it back for every draw; made and freed through the kernel that is ~0.33 ms a draw, 200 ms of the WebGL
+    // aquarium's frame (618 draws: 5 frames a second). Up to 256 KiB each, 384 of them, 24 MiB in all; boot-arg
+    // metal_nobufpool: not done.
+    std::vector<Bo> buffer_pool;
+    uint64_t buffer_pool_bytes = 0;
+    bool takeBuffer(Bo &bo, uint64_t size)
+    {
+        const uint64_t want = (size + 0x3fff) & ~0x3fffULL;     // (as newBo rounds)
+        std::lock_guard<std::mutex> g(lock);
+        for (size_t i = buffer_pool.size(); i-- > 0;) {
+            if (buffer_pool[i].size == want) {
+                bo = buffer_pool[i];
+                buffer_pool[i] = buffer_pool.back();
+                buffer_pool.pop_back();
+                buffer_pool_bytes -= want;
+                return true;
+            }
+        }
+        return false;
+    }
+    bool giveBuffer(Bo &bo)
+    {
+        static const bool off = bootArg("metal_nobufpool");
+        std::lock_guard<std::mutex> g(lock);
+        if (off || bo.handle == 0 || bo.cpu == nullptr || bo.size > 256 * 1024 || buffer_pool.size() >= 384 ||
+            buffer_pool_bytes + bo.size > (24ULL << 20)) {
+            return false;
+        }
+        buffer_pool.push_back(bo);
+        buffer_pool_bytes += bo.size;
+        bo = Bo();
+        return true;
+    }
+
     void freeBo(Bo &bo)
     {
         std::lock_guard<std::mutex> g(lock);
@@ -323,12 +358,29 @@ struct hakios_metal_device {
         op.va = bo.va;
         op.size = bo.size;
         vm_bind b = { vm, 0, { sizeof(op), 1, (uint64_t)(uintptr_t)&op } };
+        // (boot-arg metal_freetime, 11-13: what giving a buffer back costs, the unmap and the close apart -- 11 ms each
+        // was measured, mali_draw_test's "what a buffer costs")
+        static const bool timed = bootArg("metal_freetime");
+        auto t0 = std::chrono::steady_clock::now();
         call(VM_BIND, &b, sizeof(b));
+        auto t1 = std::chrono::steady_clock::now();
         if (!bo.driver_mapped) {
             IOConnectUnmapMemory64(connection, bo.handle, mach_task_self(), (mach_vm_address_t)(uintptr_t)bo.cpu);
         }
         gem_close gc = { bo.handle, 0 };
         call(GEM_CLOSE, &gc, sizeof(gc));
+        if (timed) {
+            static double unmap_us, close_us;
+            static unsigned n;
+            auto t2 = std::chrono::steady_clock::now();
+            unmap_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
+            close_us += std::chrono::duration<double, std::micro>(t2 - t1).count();
+            if (++n % 100 == 0) {
+                fprintf(stderr, "hakios-metal: freetime: %u buffers given back: the unmap %.0f us each, the close %.0f us each\n", n,
+                    unmap_us / 100, close_us / 100);
+                unmap_us = close_us = 0;
+            }
+        }
         bo = Bo();
     }
 };
@@ -395,8 +447,25 @@ struct hakios_metal_buffer {
     {
         auto *p = (const uint8_t *)bo.cpu;
         if (p == nullptr || bo.size <= length) return;
-        uint64_t last = 0;
-        for (uint64_t i = length; i < bo.size; i++) {
+        // THE FIRST KILOBYTE PAST THE END, eight bytes at a time (11-13): the whole slack byte by byte through the
+        // write-combined mapping took 11 ms for EVERY buffer given back (mali_draw_test, "what a buffer costs") --
+        // WebKit's WebGL gives one back for every draw, and the aquarium's 618 a frame made a frame take 6 s after
+        // the GPU had drawn it in a millisecond. What is written past an end begins at the end.
+        const uint64_t upto = bo.size - length > 1024 ? length + 1024 : bo.size;
+        uint64_t last = 0, i = length;
+        for (; i < upto && (i & 7); i++) {
+            if (p[i] != kSlackByte) last = i + 1;
+        }
+        for (; i + 8 <= upto; i += 8) {
+            uint64_t w;
+            memcpy(&w, p + i, 8);
+            if (w != 0xa5a5a5a5a5a5a5a5ULL) {
+                for (unsigned k = 0; k < 8; k++) {
+                    if (p[i + k] != kSlackByte) last = i + k + 1;
+                }
+            }
+        }
+        for (; i < upto; i++) {
             if (p[i] != kSlackByte) last = i + 1;
         }
         if (last != 0) {
@@ -411,7 +480,9 @@ struct hakios_metal_buffer {
     {
         if (refs.fetch_sub(1) == 1) {
             checkSlack();
-            device->freeBo(bo);
+            if (!device->giveBuffer(bo)) {
+                device->freeBo(bo);
+            }
             delete this;
         }
     }
@@ -2139,7 +2210,9 @@ hakios_metal_buffer_new(hakios_metal_device *d, uint64_t length)
     auto *b = new hakios_metal_buffer;
     b->device = d;
     b->length = length;
-    if (!d->newBo(b->bo, (length ? length : 1) + kBufferSlack, BIND_NOEXEC)) {
+    if (d->takeBuffer(b->bo, (length ? length : 1) + kBufferSlack)) {
+        memset(b->bo.cpu, 0, (size_t)length);           // (a new buffer is zeroes, as the kernel's are)
+    } else if (!d->newBo(b->bo, (length ? length : 1) + kBufferSlack, BIND_NOEXEC)) {
         delete b;
         return nullptr;
     }
