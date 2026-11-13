@@ -512,6 +512,19 @@ main(int argc, char **argv)
       }
       struct air_constant_value *fc;
       unsigned num_fc = air_module_function_constants(ctx, mods[k].bitcode, mods[k].size, &fc);
+      /* AIR_FC="INDEX=VALUE,INDEX=VALUE": the function constants a pipeline specialised the function by (the plug-in's
+       * "fragment constants not 0: 1=3412048 2=5"), for translating it here as the phone did */
+      for (const char *e = getenv("AIR_FC"); e && *e; ) {
+         char *end;
+         unsigned long index = strtoul(e, &end, 0);
+         if (*end != '=')
+            break;
+         unsigned long long value = strtoull(end + 1, &end, 0);
+         for (unsigned i = 0; i < num_fc; i++)
+            if (fc[i].index == index)
+               fc[i].bits = value;
+         e = *end == ',' ? end + 1 : end;
+      }
       struct air_to_nir_options options = { .constants = fc, .num_constants = num_fc,
                                         .library_wrapper = library_wrapper };
       struct air_shader_info info;

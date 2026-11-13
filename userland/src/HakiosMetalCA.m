@@ -2619,7 +2619,10 @@ hm_crash_install(void)
 		const char *at;
 
 		memset(args, 0, sizeof(args));
-		profile = 1;
+		/* WebKit's processes get profile 4 (Apple3): WebGL then draws with Metal (the spinning cube of get.webgl.org,
+		 * night13/webgl11). Not everybody: with 4 CoreAnimation makes its widgets' and wallpapers' surfaces two-plane
+		 * ('_RB4', MTLPixelFormatRGB8_..._2P), which is not served -- both home-screen widgets went black (apps3). */
+		profile = strncmp(getprogname(), "com.apple.WebKit", 16) == 0 ? 4 : 1;
 		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "metal_profile=")) != NULL) {
 			long n = strtol(at + strlen("metal_profile="), NULL, 10);
 
