@@ -93,6 +93,10 @@ DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk
 # ../sysimage/20F66.keep when 16.7.16 came, 2026-11-13. Which build it is: its build.conf)
 DARWIN=${DARWIN:-../sysimage}
 CACHE=$DARWIN/$( (. $DARWIN/build.conf 2>/dev/null; echo ${CACHE:-20F66__iPhone10,3_6}) )
+# which build the hooks' addresses are taken for (src/inject*.c, AT()): src/ios_build.h, written when it changes
+IOS_BUILD=$( (. $DARWIN/build.conf 2>/dev/null; echo ${BUILD:-20F66}) )
+echo "#define HAKIOS_IOS_$IOS_BUILD 1        /* build.sh: $DARWIN/build.conf */" > src/ios_build.h.new
+cmp -s src/ios_build.h.new src/ios_build.h 2>/dev/null && rm -f src/ios_build.h.new || mv src/ios_build.h.new src/ios_build.h
 # sysimage/rootfs and sysimage/cryptex must be this copy's own directories of hard links, the way
 # tools/new-workspace.sh makes them. A symlink to another copy's tree makes sysroot a symlink too, because
 # cp -a does not follow one, and then every rm -rf and mv below edits the shared extraction in place. That
