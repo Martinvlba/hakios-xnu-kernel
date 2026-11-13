@@ -2297,6 +2297,27 @@ hm_crash_install(void)
 	static dispatch_once_t once;
 
 	dispatch_once(&once, ^{
+		/* (11-13) boot-arg metal_stderr=1 or metal_progsay: THE CORE's own lines (fprintf(stderr): metal_progsay's first
+		 * draws, its deferred refusals) from inside an application, whose stderr is /dev/null -- the console in its
+		 * place. Maps' map draws were looked for in a log that could not hold them. */
+		{
+			char args[1024];
+			size_t size = sizeof(args) - 1;
+			struct stat err, null;
+
+			memset(args, 0, sizeof(args));
+			if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 &&
+			    (strstr(args, "metal_stderr=1") != NULL || strstr(args, "metal_progsay") != NULL) &&
+			    fstat(2, &err) == 0 && stat("/dev/null", &null) == 0 && S_ISCHR(err.st_mode) && err.st_rdev == null.st_rdev) {
+				int console = open("/dev/console", O_WRONLY | O_NOCTTY);
+
+				if (console >= 0) {
+					dup2(console, 2);
+					close(console);
+					setvbuf(stderr, NULL, _IOLBF, 0);
+				}
+			}
+		}
 		for (unsigned i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
 			struct sigaction now, ours;
 
@@ -3527,6 +3548,15 @@ hm_compile_queue(void)
 					       (unsigned)[c0 sourceRGBBlendFactor], (unsigned)[c0 destinationRGBBlendFactor],
 					       (unsigned)[c0 sourceAlphaBlendFactor], (unsigned)[c0 destinationAlphaBlendFactor], (unsigned)[c0 writeMask]);
 		hakios_metal_program_set_attachment_format(program, 0, (unsigned)[c0 pixelFormat]);
+		if (hm_boot_arg_set("metal_passsay=1") && strcmp(getprogname(), "backboardd") != 0) {
+			hm_print("pipeline %p %s: blend %s ops %lu/%lu factors %lu %lu / %lu %lu, write mask %#lx, samples %lu, alpha to coverage %d, "
+				 "depth format %lu stencil format %lu\n", (void *)program, hakios_metal_program_name(program),
+				 [c0 isBlendingEnabled] ? "on" : "off", (unsigned long)[c0 rgbBlendOperation], (unsigned long)[c0 alphaBlendOperation],
+				 (unsigned long)[c0 sourceRGBBlendFactor], (unsigned long)[c0 destinationRGBBlendFactor],
+				 (unsigned long)[c0 sourceAlphaBlendFactor], (unsigned long)[c0 destinationAlphaBlendFactor],
+				 (unsigned long)[c0 writeMask], (unsigned long)[descriptor rasterSampleCount], (int)[descriptor isAlphaToCoverageEnabled],
+				 (unsigned long)[descriptor depthAttachmentPixelFormat], (unsigned long)[descriptor stencilAttachmentPixelFormat]);
+		}
 		for (unsigned i = 1; i < 8; i++) {
 			MTLRenderPipelineColorAttachmentDescriptor *c = [[descriptor colorAttachments] objectAtIndexedSubscript:i];
 
@@ -6663,11 +6693,51 @@ hm_timeline(double created, double committed, double completed, double gpu)
 	hm_print("timeline: made %.1f committed %.1f done %.1f gpu %.2f\n", created * 1e3, committed * 1e3, completed * 1e3, gpu * 1e3);
 }
 
+static char hm_passsay_key, hm_passsay_from_key;
+
 static void
 hm_completed(hakios_metal_cb *cb, void *context)
 {
 	HakiosMetalCommandBuffer *self = (HakiosMetalCommandBuffer *)context;
 
+	/* boot-arg metal_passsay=1: the last resolve of this buffer -- nine pixels of what it left in its target (and of the
+	 * samples it read, sample 0 as stored), the first 24 of a process */
+	{
+		HakiosMetalTexture *to = objc_getAssociatedObject(self, &hm_passsay_key);
+		HakiosMetalTexture *from = objc_getAssociatedObject(self, &hm_passsay_from_key);
+		static int said;
+
+		if (to != nil && said < 24) {
+			char line[700];
+			size_t at = (size_t)snprintf(line, sizeof(line), "resolved (status %d) into %lux%lu format %lu:", (int)hakios_metal_cb_status(cb),
+						     (unsigned long)[to width], (unsigned long)[to height], (unsigned long)[to pixelFormat]);
+
+			said++;
+			for (int k = 0; k < 9; k++) {
+				unsigned x = (unsigned)[to width] * (unsigned)(1 + k % 3 * 2) / 6, y = (unsigned)[to height] * (unsigned)(1 + k / 3 * 2) / 6;
+				uint32_t pixel = 0xdeadbeef, sample[4] = { 0xdeadbeef, 0, 0, 0 };
+				int a = hakios_metal_texture_read([to hakiosTexture], x, y, 1, 1, &pixel, 4);
+				int b = from != nil ? hakios_metal_texture_read([from hakiosTexture], x, y, 1, 1, sample, 16) : -1;
+
+				at += (size_t)snprintf(line + at, sizeof(line) - at, " (%u,%u) %08x%s from %08x%s", x, y, pixel, a != 0 ? "!" : "", sample[0],
+						       b != 0 ? "!" : "");
+			}
+			hm_print("%s\n", line);
+		}
+	}
+
+	/* (11-13) A COMMAND BUFFER THAT ENDED IN ERROR SAYS SO: the core's sentence, the first eight of a process and then
+	 * every 500th with the count. Maps' and Weather's maps were black for a night because every one of their command
+	 * buffers failed ("vertex stage textures and samplers") and nothing in any log said it. */
+	if (hakios_metal_cb_status(cb) == HAKIOS_METAL_ERROR) {
+		static unsigned failed;
+		unsigned n = __sync_add_and_fetch(&failed, 1);
+
+		if (n <= 8 || n % 500 == 0) {
+			hm_print("a command buffer ended in error (the %u%s of this process): %s\n", n,
+				 n == 1 ? "st" : n == 2 ? "nd" : n == 3 ? "rd" : "th", hakios_metal_cb_error(cb));
+		}
+	}
 	hm_timeline([self hakiosCreatedAt], [self GPUStartTime], hm_now(), (double)hakios_metal_cb_gpu_nanoseconds(cb) / 1e9);
 	{
 		/* (hakios) boot-arg touch_lat=1: "tl: M made US committed US done US gpu US" of every command buffer, in
@@ -8035,6 +8105,57 @@ hm_spec_off(void)
 
 - (void)hakiosTakeResolves:(MTLRenderPassDescriptor *)descriptor
 {
+	/* boot-arg metal_passsay=1 (a diagnostic, 11-13: Maps' black map): the first 60 passes of a process, each colour
+	 * attachment and the depth's as the application gave them */
+	{
+		static int say = -1, said;
+
+		if (say < 0) {
+			say = hm_boot_arg_set("metal_passsay=1");
+		}
+		if (say && said < 60) {
+			char line[900];
+			size_t at = (size_t)snprintf(line, sizeof(line), "pass %d:", ++said);
+
+			for (NSUInteger i = 0; i < 4 && at < sizeof(line) - 200; i++) {
+				MTLRenderPassColorAttachmentDescriptor *c = [[descriptor colorAttachments] objectAtIndexedSubscript:i];
+				id<MTLTexture> t = [c texture], r = [c resolveTexture];
+
+				if (t == nil) {
+					continue;
+				}
+				at += (size_t)snprintf(line + at, sizeof(line) - at, " colour %lu %lux%lu format %lu samples %lu type %lu %s%p load %lu "
+						       "store %lu level %lu slice %lu;", (unsigned long)i, (unsigned long)[t width],
+						       (unsigned long)[t height], (unsigned long)[t pixelFormat], (unsigned long)[t sampleCount],
+						       (unsigned long)[t textureType], [t iosurface] != NULL ? "IOSurface " : "", (void *)t,
+						       (unsigned long)[c loadAction], (unsigned long)[c storeAction], (unsigned long)[c level],
+						       (unsigned long)[c slice]);
+				if (r != nil) {
+					at += (size_t)snprintf(line + at, sizeof(line) - at, " resolve into %lux%lu format %lu samples %lu %s%p level %lu;",
+							       (unsigned long)[r width], (unsigned long)[r height], (unsigned long)[r pixelFormat],
+							       (unsigned long)[r sampleCount], [r iosurface] != NULL ? "IOSurface " : "", (void *)r,
+							       (unsigned long)[c resolveLevel]);
+				}
+			}
+			{
+				MTLRenderPassDepthAttachmentDescriptor *z = [descriptor depthAttachment];
+				MTLRenderPassStencilAttachmentDescriptor *st = [descriptor stencilAttachment];
+
+				if ([z texture] != nil && at < sizeof(line) - 120) {
+					at += (size_t)snprintf(line + at, sizeof(line) - at, " depth format %lu samples %lu load %lu store %lu%s;",
+							       (unsigned long)[[z texture] pixelFormat], (unsigned long)[[z texture] sampleCount],
+							       (unsigned long)[z loadAction], (unsigned long)[z storeAction],
+							       [z resolveTexture] != nil ? " (resolved)" : "");
+				}
+				if ([st texture] != nil && at < sizeof(line) - 80) {
+					at += (size_t)snprintf(line + at, sizeof(line) - at, " stencil format %lu load %lu store %lu;",
+							       (unsigned long)[[st texture] pixelFormat], (unsigned long)[st loadAction],
+							       (unsigned long)[st storeAction]);
+				}
+			}
+			hm_print("%s\n", line);
+		}
+	}
 	for (NSUInteger i = 0; i < 8; i++) {
 		MTLRenderPassColorAttachmentDescriptor *c = [[descriptor colorAttachments] objectAtIndexedSubscript:i];
 		MTLStoreAction a = [c storeAction];
@@ -8833,6 +8954,29 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 		}
 		hakios_metal_cb_set_indirect(cb, [(HakiosMetalBuffer *)indirectArgs hakiosBuffer], (uint64_t)indirectOffset);
 	}
+	/* boot-arg metal_passsay=1: the first 150 draws of a process other than the window server, each with the state
+	 * that decides whether its pixels arrive */
+	{
+		static int say = -1, said;
+
+		if (say < 0) {
+			say = hm_boot_arg_set("metal_passsay=1") && strcmp(getprogname(), "backboardd") != 0;
+		}
+		if (say && said < 150) {
+			said++;
+			hm_print("draw %d: %p %s prim %lu %lu from %lu x%lu%s into %ux%u; depth %s compare %u write %d; stencil %s front cmp %u pass %u "
+				 "zfail %u rmask %#x wmask %#x ref %u; cull %u winding %u; viewport %s %g %g %g %g z %g..%g; scissor %s %u %u %u %u\n",
+				 said, (void *)[_pipeline hakiosProgram], hakios_metal_program_name([_pipeline hakiosProgram]), (unsigned long)primitive, (unsigned long)count,
+				 (unsigned long)start, (unsigned long)instances, indexBuffer != nil ? " indexed" : "",
+				 _pass.color0 != NULL ? hakios_metal_texture_width(_pass.color0) : 0,
+				 _pass.color0 != NULL ? hakios_metal_texture_height(_pass.color0) : 0, _pass.depth_state_set ? "set" : "unset",
+				 _pass.depth_compare, _pass.depth_write, _pass.stencil_state_set ? "set" : "unset", _pass.stencil_front.compare,
+				 _pass.stencil_front.pass, _pass.stencil_front.depth_fail, _pass.stencil_front.read_mask, _pass.stencil_front.write_mask,
+				 _pass.stencil_front_reference, _pass.cull_mode, _pass.winding, _hasViewport ? "set" : "unset", _viewport.x, _viewport.y,
+				 _viewport.width, _viewport.height, _viewport.znear, _viewport.zfar, _hasScissor ? "set" : "unset", _scissor.x,
+				 _scissor.y, _scissor.width, _scissor.height);
+		}
+	}
 	const double coreBegan = hm_fps_on() ? hm_now() : 0;
 	if (indexBuffer != nil) {
 		drawn = hakios_metal_cb_draw_indexed(cb, program, &_pass, _hasViewport ? &_viewport : NULL, _hasScissor ? &_scissor : NULL,
@@ -9080,6 +9224,25 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 	/* the resolves, after the pass: each multisample attachment's samples into its resolveTexture, pixel for pixel (the
 	 * blit closes the pass first, so it reads what the draws wrote) */
 	for (unsigned i = 0; i < 8; i++) {
+		if (_resolving[i]) {
+			static int say = -1, said;
+
+			if (say < 0) {
+				say = hm_boot_arg_set("metal_passsay=1");
+			}
+			if (say && said < 40) {
+				said++;
+				hm_print("pass end: colour %u resolves %lux%lu samples %lu into %lux%lu level %u; the buffer's error so far: \"%s\"\n", i,
+					 (unsigned long)[_resolveFrom[i] width], (unsigned long)[_resolveFrom[i] height],
+					 (unsigned long)[_resolveFrom[i] sampleCount], (unsigned long)[_resolveTo[i] width],
+					 (unsigned long)[_resolveTo[i] height], _resolveLevel[i], hakios_metal_cb_error([self hakiosCb]));
+			}
+		}
+		if (_resolving[i] && hm_boot_arg_set("metal_passsay=1")) {
+			/* (the diagnostic: what the resolve left in its target is read when the buffer completes, hm_completed) */
+			objc_setAssociatedObject(_commandBuffer, &hm_passsay_key, _resolveTo[i], OBJC_ASSOCIATION_RETAIN);
+			objc_setAssociatedObject(_commandBuffer, &hm_passsay_from_key, _resolveFrom[i], OBJC_ASSOCIATION_RETAIN);
+		}
 		if (!_resolving[i] || hakios_metal_cb_error([self hakiosCb])[0] != '\0') {
 			continue;
 		}

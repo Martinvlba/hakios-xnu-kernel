@@ -761,7 +761,11 @@ rtBlend(uint32_t rt1)
     if (rt1 & kRtRaw) return 167u << 12 | 16;                   // R32F, as a texture of it is named
     if (rt1 & kRtWide) return 223u << 12;                       // RGBA16F
     if ((rt1 & kRtFloat) && ((rt1 >> 3) & 31) == 20) return 89u << 12;      // R11F_G11F_B10F
-    return !(rt1 & kRtFloat) ? 237u << 12 : ((rt1 >> 3) & 31) == 16 ? 199u << 12 : 207u << 12;
+    // (11-13) AN sRGB TARGET's memory format says so (bit 20, as a texture of it does): without it the blend unit wrote
+    // the shader's linear colour into the tile buffer as it was -- BGRA8Unorm_sRGB and RGBA8Unorm_sRGB targets came out
+    // linear, some forty times too dark in the shadows: Maps' and Weather's maps in dark mode were all but black
+    if (!(rt1 & kRtFloat)) return 237u << 12 | ((rt1 & 1u << 14) ? 1u << 20 : 0u);
+    return ((rt1 >> 3) & 31) == 16 ? 199u << 12 : 207u << 12;
 }
 inline uint32_t
 halfOf(double v)
@@ -903,6 +907,10 @@ struct DrawJob {
     hakios_metal_texture *textures[MALI_KERNEL_TEXTURES];
     uint32_t samplers[MALI_KERNEL_TEXTURES][8];
     unsigned texture_count, sampler_count;
+    // (11-13) THE VERTEX STAGE's textures and samplers: a resource table of its own (register 0; the fragment's is 4)
+    hakios_metal_texture *vs_textures[MALI_KERNEL_TEXTURES];
+    uint32_t vs_samplers[MALI_KERNEL_TEXTURES][8];
+    unsigned vs_texture_count, vs_sampler_count;
     uint64_t index_va = 0, index_size = 0;              // an indexed draw's indices (0: none)
     bool clear_only = false;                            // a pass with no geometry: the clear (hakios_metal_cb_clear)
     // DEPTH AND STENCIL (zs): the attachments' memory, formats, actions and clear values (the framebuffer descriptor's
@@ -1340,6 +1348,43 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         }
         srt = t_va | MALI_TABLES;
     }
+    // the vertex stage's resource table, after the fragment's (64-byte aligned): the same three tables
+    const uint64_t fs_srt_bytes = dj.texture_count || dj.sampler_count ? 0x80 + (dj.texture_count * 3 + dj.sampler_count) * 32 : 0;
+    const uint64_t vsrt_at = (srt_at + fs_srt_bytes + 0x3f) & ~0x3fULL;
+    const uint64_t vs_srt_bytes = dj.vs_texture_count || dj.vs_sampler_count ? 0x80 + (dj.vs_texture_count * 3 + dj.vs_sampler_count) * 32 : 0;
+    uint64_t vsrt = 0;
+    if (vs_srt_bytes != 0) {
+        uint8_t *t = area + vsrt_at;
+        uint64_t t_va = area_va + vsrt_at, tex_va = t_va + 0x80, samp_va = tex_va + dj.vs_texture_count * 32;
+        uint64_t img_va = samp_va + dj.vs_sampler_count * 32, plane_va = img_va + dj.vs_texture_count * 32;
+        memset(t, 0, 0x80);
+        auto entry = [&](unsigned table, uint64_t va, unsigned count) {
+            auto *e = (uint32_t *)(t + 16 * table);
+            e[0] = (uint32_t)va;
+            e[1] = (uint32_t)(va >> 32) | 1u << 24;
+            e[2] = count * 32;
+        };
+        entry(MALI_TABLE_TEXTURE, tex_va, dj.vs_texture_count);
+        entry(MALI_TABLE_SAMPLER, samp_va, dj.vs_sampler_count);
+        entry(MALI_TABLE_IMAGE, img_va, dj.vs_texture_count);
+        for (unsigned i = 0; i < dj.vs_texture_count; i++) {
+            auto *tex = (uint32_t *)(area + (tex_va - area_va) + 32 * i), *img = (uint32_t *)(area + (img_va - area_va) + 32 * i);
+            uint32_t plane[8];
+            if (dj.vs_textures[i] == nullptr) {
+                memset(tex, 0, 32);
+                memset(img, 0, 32);
+                continue;
+            }
+            describe(dj.vs_textures[i], tex, plane, plane_va);
+            memcpy(area + (plane_va - area_va), plane, 32);
+            memcpy(img, tex, 32);
+            plane_va += 32;
+        }
+        for (unsigned i = 0; i < dj.vs_sampler_count; i++) {
+            memcpy(area + (samp_va - area_va) + 32 * i, dj.vs_samplers[i], 32);
+        }
+        vsrt = t_va | MALI_TABLES;
+    }
     uint64_t vs_fau_va = area_va + vs_at, fs_fau_va = area_va + fs_at;
     // A PASS OPENED (11-10): the texture caches dropped first (and the load/store caches cleaned) -- what an earlier pass
     // of this command buffer wrote back is in L2, but a texture cache may still hold that memory as it was before:
@@ -1379,7 +1424,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         // texel (texture 0, txf), into the same tiler context as the draw -- the tile buffer preloaded through the
         // ordinary draw path. Caches first, as at a command buffer's start: what an earlier pass wrote back reaches
         // L2, and the texture cache drops what an earlier preload read of the same target.
-        uint64_t end_at = srt_at + (dj.texture_count || dj.sampler_count ? 0x80 + (dj.texture_count * 3 + dj.sampler_count) * 32 : 0);
+        uint64_t end_at = vs_srt_bytes != 0 ? vsrt_at + vs_srt_bytes : srt_at + fs_srt_bytes;
         uint64_t pvs_at = (end_at + 0x3f) & ~0x3fULL, pfs_at = pvs_at + ((dj.pre_vs_fau.size() * 4 + 0x3f) & ~0x3fULL);
         uint64_t psrt_at = pfs_at + ((dj.pre_fs_fau.size() * 4 + 0x3f) & ~0x3fULL);
         const unsigned nt = dj.rts;
@@ -1456,7 +1501,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         s[n++] = 49ULL << 56 | 0ULL << 32;                                      // HEAP_OPERATION: vertex/tiler started
         s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                          // RUN_IDVS
     }
-    s[n++] = move48(0, 0);                                                      // vertex SRT: none
+    s[n++] = move48(0, vsrt);                                                   // the vertex stage's SRT (0: none)
     s[n++] = move48(4, srt);                                                    // fragment SRT
     s[n++] = move48(8, vs_fau_va);
     s[n++] = move32(9, (uint32_t)(vs_fau_va >> 32) | (uint32_t)((dj.vs_fau.size() + 1) / 2) << 24);
@@ -1608,6 +1653,9 @@ drawBytes(const DrawJob &dj)
     if (dj.texture_count || dj.sampler_count) {
         bytes += 0x80 + (dj.texture_count * 3 + dj.sampler_count) * 32 + 0x40;
     }
+    if (dj.vs_texture_count || dj.vs_sampler_count) {
+        bytes += 0x80 + (dj.vs_texture_count * 3 + dj.vs_sampler_count) * 32 + 0x80;
+    }
     if (dj.tls_size != 0) {
         bytes += 0x80;                                  // (the local storage descriptor, 64-byte aligned, last)
     }
@@ -1640,6 +1688,11 @@ struct hakios_metal_cb {
     std::chrono::steady_clock::time_point bo_at, submitted_at, waited_at;   // (boot-arg metal_cbtime)
     unsigned timestamp_count = 0;
     std::vector<Job> blits;
+    // the vertex stage's [[texture(n)]] and [[sampler(m)]] for the draws that follow (hakios_metal_cb_set_vertex_textures)
+    hakios_metal_texture *vs_textures[MALI_KERNEL_TEXTURES] = {};
+    uint32_t vs_samplers[MALI_KERNEL_TEXTURES][8] = {};
+    bool vs_sampler_set[MALI_KERNEL_TEXTURES] = {};
+    unsigned vs_texture_count = 0, vs_sampler_count = 0;
     std::vector<hakios_metal_buffer *> held;    // retained until the GPU is done
     std::vector<hakios_metal_kernel *> kernels;
     std::vector<hakios_metal_texture *> held_textures;
@@ -4891,6 +4944,56 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             return -1;
         }
     }
+    // the vertex stage's, the same way from what the command buffer was given (hakios_metal_cb_set_vertex_textures)
+    {
+        const uint32_t nearest = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
+        uint32_t vs_nothing_at = 0;
+        for (unsigned r = 0; r < p->vs.num_resources; r++) {
+            const mali_kernel_resource &res = p->vs.resources[r];
+            if (res.kind == HAKIOS_METAL_RESOURCE_TEXTURE) {
+                if (res.index >= MALI_KERNEL_TEXTURES || (cb->vs_textures[res.index] == nullptr && nothingTexture(d) == nullptr)) {
+                    fail("draw with %s: nothing bound at the vertex function's [[texture(%u)]]", p->name, res.index);
+                    return -1;
+                }
+                if (cb->vs_textures[res.index] == nullptr) vs_nothing_at |= 1u << res.index;
+                dj.vs_texture_count = res.index + 1 > dj.vs_texture_count ? res.index + 1 : dj.vs_texture_count;
+            } else if (res.kind == HAKIOS_METAL_RESOURCE_SAMPLER) {
+                if (res.index >= MALI_KERNEL_TEXTURES) {
+                    fail("draw with %s: nothing bound at the vertex function's [[sampler(%u)]]", p->name, res.index);
+                    return -1;
+                }
+                if (res.inline_sampler) {
+                    if (!inlineSampler(res.sampler_state, dj.vs_samplers[res.index])) {
+                        fail("draw with %s: its vertex function's constexpr sampler at %u: %s", p->name, res.index, gError.c_str());
+                        return -1;
+                    }
+                } else if (cb->vs_sampler_set[res.index]) {
+                    memcpy(dj.vs_samplers[res.index], cb->vs_samplers[res.index], 32);
+                } else {
+                    dj.vs_samplers[res.index][0] = nearest;
+                }
+                dj.vs_sampler_count = res.index + 1 > dj.vs_sampler_count ? res.index + 1 : dj.vs_sampler_count;
+            } else if (res.kind == HAKIOS_METAL_RESOURCE_IMAGE) {
+                fail("draw with %s: a texture the vertex function writes (not on the Mali yet)", p->name);
+                return -1;
+            }
+        }
+        if (dj.vs_texture_count != 0 && dj.vs_sampler_count == 0) {
+            dj.vs_sampler_count = 1;
+            dj.vs_samplers[0][0] = nearest;
+        }
+        for (unsigned i = 0; i < dj.vs_texture_count; i++) {
+            hakios_metal_texture *t = cb->vs_textures[i] != nullptr ? cb->vs_textures[i] : (vs_nothing_at & 1u << i) ? nothingTexture(d) : nullptr;
+            dj.vs_textures[i] = t;
+            if (t != nullptr) {
+                hakios_metal_texture *rt_ = t;
+                while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent;
+                if (rt_ != nullptr) rt_->reads++;
+                t->retain();
+                cb->held_textures.push_back(t);
+            }
+        }
+    }
     dj.name = p->name;
     dj.program = p;
     dj.pos_spd = p->pos_spd;
@@ -6475,9 +6578,16 @@ hakios_metal_argument_buffer_layout(const void *bitcode, size_t size, unsigned s
 void hakios_metal_cb_set_vertex_textures(hakios_metal_cb *cb, hakios_metal_texture *const *textures, unsigned texture_count,
     hakios_metal_sampler *const *samplers, unsigned sampler_count)
 {
-    (void)textures; (void)samplers;
-    if (cb && (texture_count || sampler_count)) {
-        hakios_metal_cb_fail(cb, "vertex stage textures and samplers (not on the Mali yet)");
+    // (11-13) kept for the draws that follow; a draw takes what its vertex function declares. VectorKit binds them for
+    // every map draw: refused here, every command buffer of Maps and of Weather's radar map failed without a word and
+    // the map stayed black (the tester's phone; night13/maps4)
+    if (cb == nullptr) return;
+    cb->vs_texture_count = texture_count < MALI_KERNEL_TEXTURES ? texture_count : MALI_KERNEL_TEXTURES;
+    cb->vs_sampler_count = sampler_count < MALI_KERNEL_TEXTURES ? sampler_count : MALI_KERNEL_TEXTURES;
+    for (unsigned i = 0; i < MALI_KERNEL_TEXTURES; i++) {
+        cb->vs_textures[i] = i < cb->vs_texture_count ? textures[i] : nullptr;
+        cb->vs_sampler_set[i] = i < cb->vs_sampler_count && samplers[i] != nullptr;
+        if (cb->vs_sampler_set[i]) memcpy(cb->vs_samplers[i], samplers[i]->words, 32);
     }
 }
 void hakios_metal_cb_set_indirect(hakios_metal_cb *cb, hakios_metal_buffer *args, uint64_t offset)
