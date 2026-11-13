@@ -820,7 +820,9 @@ add_varying(struct air_ctx *c, const char *name, unsigned slot, unsigned comps,
    info->varyings = reralloc(c->mem_ctx, info->varyings, struct air_varying,
                              info->num_varyings + 1);
    info->varyings[info->num_varyings++] = (struct air_varying) {
-      .name = name, .slot = slot, .components = comps,
+      /* (a copy: the module's own strings are gone when the translation returns, and the name is what the
+       * runtime links the stages by) */
+      .name = name != NULL ? ralloc_strdup(c->mem_ctx, name) : NULL, .slot = slot, .components = comps,
       .flat = md_key(node, "air.flat") >= 0,
       .centroid = md_key(node, "air.centroid") >= 0,
       .sample = md_key(node, "air.sample") >= 0,
@@ -955,8 +957,15 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
          var->data.interpolation = INTERP_MODE_SMOOTH;
       var->data.centroid = md_key(node, "air.centroid") >= 0;
       var->data.sample = md_key(node, "air.sample") >= 0;
-      if (c->nir->info.stage == MESA_SHADER_FRAGMENT)
-         add_varying(c, name, slot, air_nir_components(t), node);
+      if (c->nir->info.stage == MESA_SHADER_FRAGMENT) {
+         /* by the name that LINKS it to the vertex function's output -- the word after air.fragment_input
+          * ("user(locn2)", ANGLE's "generated(10_uv_normalDv3_f)"), as the vertex side is recorded by the word after
+          * air.vertex_output -- not by the argument's own name: a fragment function that takes fewer of them than
+          * the vertex function gives is linked by these (hakios-metal's compile_mali.c) */
+         int key = md_key(node, "air.fragment_input");
+         const char *link = key >= 0 ? md_str(node, key + 1) : NULL;
+         add_varying(c, link != NULL ? link : name, slot, air_nir_components(t), node);
+      }
       c->params[param] = air_val_ssa(c, nir_load_var(&c->b, var));
       return true;
    }
@@ -3642,9 +3651,16 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
       if (info->num_resources)
          info->resources = ralloc_memdup(mem_ctx, info->resources,
                                          info->num_resources * sizeof(*info->resources));
-      if (info->num_varyings)
+      if (info->num_varyings) {
          info->varyings = ralloc_memdup(mem_ctx, info->varyings,
                                         info->num_varyings * sizeof(*info->varyings));
+         /* and their names, which the caller links the stages by: they lay in what is freed below (11-13: every
+          * name read after the return was an empty or a stray string) */
+         for (unsigned i = 0; i < info->num_varyings; i++) {
+            if (info->varyings[i].name != NULL)
+               info->varyings[i].name = ralloc_strdup(mem_ctx, info->varyings[i].name);
+         }
+      }
       info->entry_point = ralloc_strdup(mem_ctx, info->entry_point);
    }
    ralloc_free(ctx);
