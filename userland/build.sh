@@ -231,6 +231,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/thermal_state src/thermal_state.c
 		# the kernel's log kept in a file on the data partition (com.hakios.klogsave; the boot before's end on the console)
 		$DYN -o obj/klogsave src/klogsave.c
+		# where the kernel's memory is, every 20 s (com.hakios.memsay; mach_memory_info, as zprint)
+		$DYN -o obj/memsay src/memsay.c
 		# the photos for a trusted computer over USB, as an iPhone's PTP storage (com.hakios.ptp; /dev/hakios-ptp)
 		$DYN -o obj/ptp_responder src/ptp_responder.c
 		# the Pixel 8a's GPU through HakiosGPU, panthor's interface by hand (src/mali_test.c; rc.jobs.mali)
@@ -402,6 +404,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/thermal_state ] && cp obj/thermal_state root/bin/
 	[ -f obj/klogsave ] && cp obj/klogsave root/bin/
+	[ -f obj/memsay ] && cp obj/memsay root/bin/
 	[ -f obj/ptp_responder ] && cp obj/ptp_responder root/bin/
 	[ -f obj/mali_test ] && cp obj/mali_test root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
@@ -524,6 +527,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist com.hakios.ptp.plist root/LaunchDaemons/
 	[ -f obj/klogsave ] && cp com.hakios.klogsave.plist root/LaunchDaemons/
+	[ -f obj/memsay ] && cp com.hakios.memsay.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
