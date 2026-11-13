@@ -53,6 +53,15 @@
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 
 #define CACHE_BASE 0x180000000UL                /* where the cache was built to be, before the slide */
+/* an address of the shared cache as each build this is made for has it: Darwin userland 16.5 (20F66), 16.7.16 (20H392:
+ * the same symbols, found by name in the cache's local symbols -- tools/dsc-symbols.py). ios_build.h is written by
+ * build.sh from sysimage/build.conf. */
+#include "ios_build.h"
+#ifdef HAKIOS_IOS_20H392
+#define AT(f66, h392) (h392)
+#else
+#define AT(f66, h392) (f66)
+#endif
 #define HAKIOS_GL "/redwood/lib/libhakios.gl.dylib"
 
 static uintptr_t slide;
@@ -100,9 +109,11 @@ replace_virtual(const char *what, uintptr_t slot, uintptr_t expected, void *repl
 
 /* ---- backboardd: CA::WindowServer ------------------------------------------------------------ */
 
-#define VT_APPLE_CLCD_DISPLAY   0x1d5b44520UL   /* vtable for CA::WindowServer::AppleCLCDDisplay */
-#define VT_EAGL_SERVER          0x1d5b45c58UL   /* vtable for CA::WindowServer::EAGLServer */
+#define VT_APPLE_CLCD_DISPLAY   AT(0x1d5b44520UL, 0x1d5b38788UL)   /* vtable for CA::WindowServer::AppleCLCDDisplay */
+#define VT_EAGL_SERVER          AT(0x1d5b45c58UL, 0x1d5b39ed0UL)   /* vtable for CA::WindowServer::EAGLServer */
 #define VSLOT(vtable, offset)   ((vtable) + 0x10 + (offset))
+/* (20H392: AppleCLCDDisplay has one more virtual function before begin_update -- begin_update and finish_update
+ * are one slot further, 0x178 and 0x180; the first boot said so: the old slots held the neighbours) */
 
 #define DISPLAY_FLAGS(display)  (*(uint64_t *)((char *)(display) + 0x9f2))
 #define DISPLAY_B233(display)   (*(uint8_t *)((char *)(display) + 0x233))
@@ -216,7 +227,7 @@ my_render_update(void *server, void *update, unsigned *flags)
  * (The last of the ninety, "cst", is not asked about: the OpenGL ES renderer draws it with no
  * program at all. The lock screen's wallpaper goes that way; see plain_draw_begin() in eagl.c.)
  */
-#define VT_GLES_CONTEXT         0x1d5b3b540UL   /* vtable for CA::OGL::GLESContext */
+#define VT_GLES_CONTEXT         AT(0x1d5b3b540UL, 0x1d5b2f6e8UL)   /* vtable for CA::OGL::GLESContext */
 
 static int gl_loaded;                           /* CoreAnimation draws with OpenGL ES (opengl_es() below) */
 static void (*gl_function_refused)(unsigned function);  /* our OpenGL ES library keeps count (eagl.c, the census) */
@@ -355,7 +366,7 @@ watch_for_faults(void)
  * blur. CoreAnimation asks for the single-pass blur exactly when the radius is too small to need
  * the multi-pass one, so the four samples coincide and the pass copies what it was given.
  */
-#define CA_SHADER_TABLE         0x1d5b54790UL
+#define CA_SHADER_TABLE         AT(0x1d5b54790UL, 0x1d5b48a10UL)
 
 static const char shadow_blur_source[] =
     "uniform lowp sampler2DRect texture0;\n"
@@ -528,27 +539,27 @@ my_function_uniform(void *context, unsigned index, size_t components, size_t cou
 static void
 window_server_fixes(void)
 {
-	orig_is_ready = replace_virtual("is_ready", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xb0), 0x1882f0908UL, my_is_ready);
-	orig_ignore_update_p = replace_virtual("ignore_update_p", VSLOT(VT_APPLE_CLCD_DISPLAY, 0x138), 0x1882e0c90UL,
+	orig_is_ready = replace_virtual("is_ready", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xb0), AT(0x1882f0908UL, 0x1882f9318UL), my_is_ready);
+	orig_ignore_update_p = replace_virtual("ignore_update_p", VSLOT(VT_APPLE_CLCD_DISPLAY, 0x138), AT(0x1882e0c90UL, 0x1882e9684UL),
 	    my_ignore_update_p);
-	orig_begin_update = replace_virtual("begin_update", VSLOT(VT_APPLE_CLCD_DISPLAY, 0x170), 0x1882ddda4UL,
+	orig_begin_update = replace_virtual("begin_update", VSLOT(VT_APPLE_CLCD_DISPLAY, AT(0x170, 0x178)), AT(0x1882ddda4UL, 0x1882e6798UL),
 	    my_begin_update);
-	orig_finish_update = replace_virtual("finish_update", VSLOT(VT_APPLE_CLCD_DISPLAY, 0x178), 0x1882c8568UL,
+	orig_finish_update = replace_virtual("finish_update", VSLOT(VT_APPLE_CLCD_DISPLAY, AT(0x178, 0x180)), AT(0x1882c8568UL, 0x1882d0f88UL),
 	    my_finish_update);
-	orig_renderer = replace_virtual("renderer", VSLOT(VT_EAGL_SERVER, 0x1a0), 0x1882e2548UL, my_renderer);
-	orig_render_update = replace_virtual("render_update", VSLOT(VT_EAGL_SERVER, 0x178), 0x18835770cUL,
+	orig_renderer = replace_virtual("renderer", VSLOT(VT_EAGL_SERVER, 0x1a0), AT(0x1882e2548UL, 0x1882eaf3cUL), my_renderer);
+	orig_render_update = replace_virtual("render_update", VSLOT(VT_EAGL_SERVER, 0x178), AT(0x18835770cUL, 0x1883601dcUL),
 	    my_render_update);
 	if (gl_loaded) {
-		orig_function_supported = replace_virtual("function_supported", VSLOT(VT_GLES_CONTEXT, 0x378), 0x1884a9308UL,
+		orig_function_supported = replace_virtual("function_supported", VSLOT(VT_GLES_CONTEXT, 0x378), AT(0x1884a9308UL, 0x1884b2164UL),
 		    my_function_supported);
 		if (gl_function_values != NULL) {
-			orig_function_uniform = replace_virtual("function_uniform", VSLOT(VT_GLES_CONTEXT, 0x388), 0x1884a9350UL,
+			orig_function_uniform = replace_virtual("function_uniform", VSLOT(VT_GLES_CONTEXT, 0x388), AT(0x1884a9350UL, 0x1884b21acUL),
 			    my_function_uniform);
 		}
 		/* always, because the boot-args are read in another place than this and the order of the
 		   two is not ours to rely on; the hook writes nothing unless glcompile=1 */
 		orig_compile_shader = (uintptr_t (*)(void *, const char *))replace_virtual("compile_shader",
-		    VSLOT(VT_GLES_CONTEXT, 0x060), 0x1883fc808UL, my_compile_shader);
+		    VSLOT(VT_GLES_CONTEXT, 0x060), AT(0x1883fc808UL, 0x1884053fcUL), my_compile_shader);
 		say("hakios: the shader compiler of CoreAnimation is %s\n", orig_compile_shader ? "watched" : "NOT watched");
 		watch_for_faults();
 		{
@@ -595,7 +606,7 @@ brightness_fixes(void)
 	Method method = cls ? class_getInstanceMethod(cls, sel_registerName("waitForALSArrival")) : NULL;
 	IMP original = method ? method_getImplementation(method) : NULL;
 
-	if (original == NULL || (uintptr_t)original != 0x1af043734UL + slide) {
+	if (original == NULL || (uintptr_t)original != AT(0x1af043734UL, 0x1af0a672cUL) + slide) {
 		say("hakios: -[BLControl waitForALSArrival]: found %#lx, not what was expected; left alone\n",
 		    original ? (uintptr_t)original - slide : 0);
 		return;
@@ -1333,7 +1344,7 @@ container_manager_fixes(void)
 	Method method = cls ? class_getClassMethod(cls, sel_registerName("personasAreSupported")) : NULL;
 	IMP original = method ? method_getImplementation(method) : NULL;
 
-	if (original == NULL || (uintptr_t)original != 0x1c3ea6298UL + slide) {
+	if (original == NULL || (uintptr_t)original != AT(0x1c3ea6298UL, 0x1c4c699f8UL) + slide) {
 		say("hakios: +[MCMUserIdentityCache personasAreSupported]: found %#lx, not what was expected; left alone\n",
 		    original ? (uintptr_t)original - slide : 0);
 		return;
