@@ -1,0 +1,8 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Speedometer 3 in Safari (RC_JOBS=rc.jobs.speedo): the tester's run of 11-13 reset the phone (the kernel's wired
+# memory, the GPU mappings of surfaces), and the next day's showed a blank white page. The home screen, the network
+# (the join takes ~95 s), the page, a look (the host takes screenshots meanwhile), the Start button, the run until the
+# test build's ten-minute restart.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 80
+/redwood/bin/battery_test open https://browserbench.org/Speedometer3.0/
+/redwood/bin/rwtouch wait 45 tap 0.5 0.526 wait 1000

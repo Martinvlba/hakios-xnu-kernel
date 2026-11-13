@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Fitness' Summary (RC_JOBS=rc.jobs.fitness): its Trends card plays Fitness.app/CTS.m4v (H.264, 341x405), which drew as
+# streaks on the Pixel 8a (the tester's screenshot of 11-13). The home screen, the application by its URL scheme, a
+# minute of it (the host takes screenshots; metal_surfsay=1 metal_ycbcrsay=1 say what its frames are), home.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 15
+/redwood/bin/battery_test open fitnessapp://
+/redwood/bin/rwtouch wait 70 button home wait 3
