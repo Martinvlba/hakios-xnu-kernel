@@ -2586,6 +2586,17 @@ hm_crash_install(void)
 
 - (hakios_metal_device *)hakiosDevice { return _gpu; }
 
+/* (11-13: ANGLE asks before it makes a multisample target) the counts the Mali build draws into: 1 and 4 (and 2) */
+- (BOOL)supportsTextureSampleCount:(NSUInteger)sampleCount
+{
+	return sampleCount == 1 || sampleCount == 2 || sampleCount == 4;
+}
+
+- (BOOL)supportsSampleCount:(NSUInteger)sampleCount
+{
+	return [self supportsTextureSampleCount:sampleCount];
+}
+
 /* The profile is what -[_MTLDevice initLimits] switches on: measured on the phone, 0, 1 and 4 to 9 fill the limits
  * table and 2, 3 and 10 to 12 abort inside Apple on _limits.maxColorAttachments > 0. 0 claims only Apple1 and Common1
  * in -supportsFamily:, and that cost SpringBoard its life: MPSDevice::GetMPSDevice asks for Apple8 down to Apple2
@@ -2594,7 +2605,31 @@ hm_crash_install(void)
  * Apple1, Apple2 and Common1 (measured: the line at the first queue), the least that MPS takes; the render test passes
  * as with 0, and SpringBoard then finishes its startup and stays up (logs/203759-run.log). What Apple2 promises beyond
  * Apple1 that is not served -- ASTC, say -- is refused where it is asked for, by name, as everything else is. */
-- (NSUInteger)featureProfile { return 1; }
+- (NSUInteger)featureProfile
+{
+	/* boot-arg metal_profile=N (11-13, a test): another profile -- WebKit takes Metal for WebGL only from a device
+	 * that answers -supportsFamily:MTLGPUFamilyApple3 (platformSupportsMetal: "A8 devices cannot use WebGL via Metal"),
+	 * which profile 1 does not; without it WebGL goes to OpenGL ES, which draws nothing here (Safari said "Your browser
+	 * supports WebGL" over an empty canvas; the tester's 3D benchmark ran without one pipeline of ANGLE's) */
+	static long profile = -1;
+
+	if (profile < 0) {
+		char args[1024];
+		size_t size = sizeof(args) - 1;
+		const char *at;
+
+		memset(args, 0, sizeof(args));
+		profile = 1;
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "metal_profile=")) != NULL) {
+			long n = strtol(at + strlen("metal_profile="), NULL, 10);
+
+			if (n == 0 || n == 1 || (n >= 4 && n <= 9)) {       /* (2, 3 and 10 to 12 abort inside -initLimits) */
+				profile = n;
+			}
+		}
+	}
+	return (NSUInteger)profile;
+}
 
 /* Not measured: nothing has asked the kernel what one allocation may be. It only has to be non-zero for initLimits
  * to accept it; a buffer longer than the kernel gives is refused at -newBufferWithLength:options:, with the reason. */
@@ -4379,6 +4414,14 @@ hm_refuse_sampler(NSString *why)
 
 @implementation HakiosMetalBuffer
 
+/* (11-13) whose memory this is, for the system's accounting (WebKit's GPU process says so of every resource ANGLE
+ * makes for a web page): there is no such accounting here; taken and answered as done */
+- (kern_return_t)setOwnerWithIdentity:(mach_port_t)token
+{
+	(void)token;
+	return KERN_SUCCESS;
+}
+
 /* Conformance is a static property of the class and callers test it (MPS tests the command buffer's before anything
  * else); it is declared for the one protocol this class does answer. */
 + (void)load
@@ -4521,6 +4564,13 @@ HM_REFUSES_OUT_LOUD
  * ============================================================================================================ */
 
 @implementation HakiosMetalTexture
+
+/* (as the buffer's: no accounting of whose memory it is) */
+- (kern_return_t)setOwnerWithIdentity:(mach_port_t)token
+{
+	(void)token;
+	return KERN_SUCCESS;
+}
 
 - (unsigned)hakiosStorageKind
 {
@@ -6707,7 +6757,7 @@ hm_completed(hakios_metal_cb *cb, void *context)
 		HakiosMetalTexture *from = objc_getAssociatedObject(self, &hm_passsay_from_key);
 		static int said;
 
-		if (to != nil && said < 24) {
+		if (to != nil && said < (strcmp(getprogname(), "com.apple.WebKit.GPU") == 0 ? 400 : 24)) {
 			char line[700];
 			size_t at = (size_t)snprintf(line, sizeof(line), "resolved (status %d) into %lux%lu format %lu:", (int)hakios_metal_cb_status(cb),
 						     (unsigned long)[to width], (unsigned long)[to height], (unsigned long)[to pixelFormat]);
@@ -6723,6 +6773,28 @@ hm_completed(hakios_metal_cb *cb, void *context)
 						       b != 0 ? "!" : "");
 			}
 			hm_print("%s\n", line);
+			/* a small target whole: how many of its pixels are not zero, and the box they are in */
+			if ([to width] * [to height] <= (1u << 20) && hakios_metal_texture_bytes_per_pixel([to hakiosTexture]) == 4) {
+				unsigned w = (unsigned)[to width], h = (unsigned)[to height], n = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
+				uint32_t *all = malloc((size_t)w * h * 4);
+
+				if (all != NULL && hakios_metal_texture_read([to hakiosTexture], 0, 0, w, h, all, w * 4) == 0) {
+					for (unsigned y = 0; y < h; y++) {
+						for (unsigned x = 0; x < w; x++) {
+							if (all[y * w + x] != 0) {
+								n++;
+								if (x < x0) x0 = x;
+								if (x > x1) x1 = x;
+								if (y < y0) y0 = y;
+								if (y > y1) y1 = y;
+							}
+						}
+					}
+					hm_print("  ... %u of %u pixels not zero, in (%u,%u)..(%u,%u); %s\n", n, w * h, x0, y0, x1, y1,
+						 [to iosurface] != NULL ? "an IOSurface" : "not a surface");
+				}
+				free(all);
+			}
 		}
 	}
 
@@ -9237,6 +9309,11 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 					 (unsigned long)[_resolveFrom[i] sampleCount], (unsigned long)[_resolveTo[i] width],
 					 (unsigned long)[_resolveTo[i] height], _resolveLevel[i], hakios_metal_cb_error([self hakiosCb]));
 			}
+		}
+		if (i == 0 && !_resolving[0] && _colorTexture != nil && hm_boot_arg_set("metal_passsay=1")) {
+			/* (a pass without a resolve: its colour attachment 0 is what is read) */
+			objc_setAssociatedObject(_commandBuffer, &hm_passsay_key, _colorTexture, OBJC_ASSOCIATION_RETAIN);
+			objc_setAssociatedObject(_commandBuffer, &hm_passsay_from_key, nil, OBJC_ASSOCIATION_RETAIN);
 		}
 		if (_resolving[i] && hm_boot_arg_set("metal_passsay=1")) {
 			/* (the diagnostic: what the resolve left in its target is read when the buffer completes, hm_completed) */

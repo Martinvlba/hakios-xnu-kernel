@@ -48,6 +48,7 @@ idep_air = declare_dependency(
 air2nir = executable(
   'air2nir',
   files('air2nir.c'),
+  c_args : air_c_args,
   dependencies : [dep_m, idep_air],
   include_directories : [inc_include, inc_src],
   build_by_default : false,

@@ -1,0 +1,6 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# WebGL in Safari (devices/akita TODO 18c: the tester's 3D benchmark ran with no pipeline of ANGLE's in WebKit's GPU
+# process): the home screen unlocked, a WebGL page opened through SpringBoard, left 70 s.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 70
+/redwood/bin/battery_test open https://get.webgl.org/
+/redwood/bin/rwtouch wait 70 button home wait 3

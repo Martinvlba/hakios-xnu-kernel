@@ -155,10 +155,12 @@ air_get(struct air_ctx *c, const struct air_value *v)
       return e->data;
    const struct air_constant *k = air_value_as_constant(v);
    if (k) {
-      struct air_val *val = air_constant_val(c, k);
-      if (val)
-         air_set(c, v, val);
-      return val;
+      /* (11-13) A CONSTANT IS MADE WHERE IT IS USED, EVERY TIME. Kept from its first use, the load_const stood in
+       * whatever block that use was in: a second use on a path that does not pass through it -- `if (a) x = -x;
+       * if (b) y = -y;`, both negations LLVM's `fsub -0.0, v` -- got, from nir_repair_ssa, a phi of the constant and
+       * UNDEFINED. (ANGLE's blit vertex function, the Pixel 8a; NIR's own passes fold the copies.)
+       */
+      return air_constant_val(c, k);
    }
    air_error(c, "instruction: a %s value used before it is defined%s%s",
              v->kind == AIR_VALUE_GLOBAL ? "global" :
@@ -3095,6 +3097,101 @@ materialise_globals(struct air_ctx *c)
    }
 }
 
+/* The bytes of the constant V of type T, as memory holds them (little-endian), into DST; false for what is not plain
+ * data -- a constant expression (a pointer's value), a pointer, a type with no size. (From tools/mesa/air.)
+ */
+static bool
+write_constant(struct air_ctx *c, const struct air_type *t, const struct air_value *v, uint8_t *dst)
+{
+   const struct air_constant *k = air_value_as_constant(v);
+   if (!k || !t)
+      return false;
+   const uint64_t size = air_type_alloc_size(c->m, t);
+   switch (k->ckind) {
+   case AIR_CONST_NULL:
+   case AIR_CONST_UNDEF:
+   case AIR_CONST_POISON:
+      if (t->kind == AIR_TYPE_POINTER)
+         return false;
+      memset(dst, 0, size);
+      return true;
+   case AIR_CONST_INT:
+   case AIR_CONST_FLOAT: {
+      const unsigned bytes = t->kind == AIR_TYPE_INT ? (t->bits + 7) / 8 : t->kind == AIR_TYPE_HALF ? 2 :
+                             t->kind == AIR_TYPE_FLOAT ? 4 : t->kind == AIR_TYPE_DOUBLE ? 8 : 0;
+      if (bytes == 0 || bytes > 8)
+         return false;
+      memcpy(dst, &k->u, bytes);
+      return true;
+   }
+   case AIR_CONST_DATA:
+   case AIR_CONST_AGGREGATE: {
+      if (t->kind != AIR_TYPE_ARRAY && t->kind != AIR_TYPE_VECTOR && t->kind != AIR_TYPE_STRUCT)
+         return false;
+      memset(dst, 0, size);
+      for (unsigned i = 0; i < k->num_elems; i++) {
+         if (t->kind == AIR_TYPE_STRUCT && i >= t->num_members)
+            return false;
+         const struct air_type *et = t->kind == AIR_TYPE_STRUCT ? t->members[i] : t->elem;
+         const uint64_t eb = air_type_alloc_size(c->m, et);
+         const uint64_t at = t->kind == AIR_TYPE_STRUCT ? air_struct_member_offset(c->m, t, i) : i * eb;
+         if (at + eb > size)
+            return false;
+         if (k->ckind == AIR_CONST_DATA) {
+            if (eb > 8)
+               return false;
+            memcpy(dst + at, &k->data[i], eb);
+         } else if (!write_constant(c, et, k->elems[i], dst + at)) {
+            return false;
+         }
+      }
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
+/* A GLOBAL WITH ITS DATA -- a table, `static const float2 corners[3] = {...}`, or a program-scope variable with a
+ * first value -- is in scratch memory, which nothing had written the initialiser to (11-13): a load at an index known
+ * only while the shader runs read whatever was there. WebKit's WebGL (ANGLE's blit: its triangle's corners from such
+ * a table by the vertex number) drew nothing on the Pixel 8a, every corner at 0,0. The initialiser's bytes are stored
+ * at the entry point's start, a word at a time, before the static initialisers run (their stores come after and
+ * stand). tools/mesa/air puts a read-only one in nir->constant_data instead; Mesa's Mali compiler has no
+ * load_constant, and scratch is where every pointer into the global already points.
+ */
+static void
+store_global_initialisers(struct air_ctx *c)
+{
+   for (unsigned i = 0; i < c->m->num_globals && !c->error[0]; i++) {
+      const struct air_global_plan *pl = &c->global_plan[i];
+      const struct air_global *g = c->m->globals[i];
+      if (pl->skip || pl->class != AIR_PTR_SCRATCH || !pl->has_offset || !g->init || !g->value_type)
+         continue;
+      const uint64_t size = air_type_alloc_size(c->m, g->value_type);
+      if (size == 0)
+         continue;
+      if (size > 16384) {
+         air_error(c, "interface: a global of %llu bytes with an initialiser (16384 at most are written at the start)",
+                   (unsigned long long)size);
+         return;
+      }
+      uint8_t *bytes = rzalloc_size(c->mem_ctx, size + 4);
+      if (!write_constant(c, g->value_type, g->init, bytes))
+         continue;         /* (pointers and constant expressions: materialise_globals' table, or nothing) */
+      uint64_t at = 0;
+      for (; at + 4 <= size; at += 4) {
+         uint32_t word;
+         memcpy(&word, bytes + at, 4);
+         nir_store_scratch(&c->b, nir_imm_int(&c->b, (int32_t)word), nir_imm_int(&c->b, (int32_t)(pl->offset + at)),
+                           .align_mul = 4, .write_mask = 1);
+      }
+      for (; at < size; at++)
+         nir_store_scratch(&c->b, nir_imm_intN_t(&c->b, bytes[at], 8), nir_imm_int(&c->b, (int32_t)(pl->offset + at)),
+                           .align_mul = 1, .write_mask = 1);
+   }
+}
+
 /* A static initializer with branches, run at translation: every condition in it
  * is decided by function constants (CoreAnimation's generic fixed_frag_lph_cph
  * and _cpf: short-circuit tests of which constants are defined), so its blocks
@@ -3367,6 +3464,8 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
    }
    if (!c.error[0])
       materialise_globals(&c);
+   if (!c.error[0])
+      store_global_initialisers(&c);
    if (!c.error[0])
       run_static_initializers(&c);
 
