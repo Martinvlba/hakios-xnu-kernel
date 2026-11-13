@@ -155,6 +155,48 @@ hm_print(const char *fmt, ...)
 	}
 }
 
+/* boot-arg metal_trace=1: each KIND of upload or copy said once (the line itself is the kind), as the draws are -- the
+ * WebGL aquarium's striped textures, 11-13 */
+static void hm_blit_say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void
+hm_blit_say(const char *fmt, ...)
+{
+	static int on = -1;
+	static uint32_t seen[128];
+	static unsigned n;
+	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+	char line[400];
+	va_list ap;
+	uint32_t h = 2166136261u;
+
+	if (on < 0) {
+		char args[1024] = { 0 };
+		size_t size = sizeof(args) - 1;
+		on = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_trace=1") != NULL;
+	}
+	if (!on) {
+		return;
+	}
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	for (const char *c = line; *c; c++) {
+		h = (h ^ (uint8_t)*c) * 16777619u;
+	}
+	pthread_mutex_lock(&lock);
+	for (unsigned i = 0; i < n; i++) {
+		if (seen[i] == h) {
+			pthread_mutex_unlock(&lock);
+			return;
+		}
+	}
+	if (n < 128) {
+		seen[n++] = h;
+	}
+	pthread_mutex_unlock(&lock);
+	hm_print("trace: %s\n", line);
+}
+
 /* a sentence that is true every time and says nothing new after the first */
 #define HM_ONCE(...)							\
 	do {								\
@@ -3628,6 +3670,29 @@ hm_compile_queue(void)
 		if (fetches != nil) {
 			hm_print("%s fetches through %s\n", hakios_metal_program_name(program), [fetches UTF8String]);
 		}
+		/* (metal_trace=1: the whole vertex descriptor, each kind once -- the aquarium's ground, 11-13) */
+		MTLVertexDescriptor *vd = [descriptor vertexDescriptor];
+		if (vd != nil) {
+			char line[380];
+			int at = 0;
+
+			for (NSUInteger i = 0; i < 31 && at < (int)sizeof(line) - 40; i++) {
+				MTLVertexAttributeDescriptor *a = [[vd attributes] objectAtIndexedSubscript:i];
+				if (a != nil && [a format] != MTLVertexFormatInvalid) {
+					at += snprintf(line + at, sizeof(line) - (size_t)at, " a%lu=f%lu@%lu/b%lu", (unsigned long)i, (unsigned long)[a format],
+						       (unsigned long)[a offset], (unsigned long)[a bufferIndex]);
+				}
+			}
+			for (NSUInteger i = 0; i < 31 && at < (int)sizeof(line) - 40; i++) {
+				MTLVertexBufferLayoutDescriptor *l = [[vd layouts] objectAtIndexedSubscript:i];
+				if (l != nil && [l stride] != 0) {
+					at += snprintf(line + at, sizeof(line) - (size_t)at, " b%lu:stride %lu step %lu/%lu", (unsigned long)i,
+						       (unsigned long)[l stride], (unsigned long)[l stepFunction], (unsigned long)[l stepRate]);
+				}
+			}
+			line[at] = 0;
+			hm_blit_say("vertex descriptor of %s:%s", hakios_metal_program_name(program), line);
+		}
 	}
 	{
 		/* the fragment function's constants beside the line: one function (fixed_frag_lph_cph) is most of what
@@ -4313,6 +4378,9 @@ hm_refuse_sampler(NSString *why)
 	desc.normalized_coordinates = [descriptor normalizedCoordinates] ? 1 : 0;
 	desc.lod_min_clamp = [descriptor lodMinClamp];
 	desc.lod_max_clamp = [descriptor lodMaxClamp];
+	if (hm_boot_arg_set("metal_nomip")) {
+		desc.lod_max_clamp = 0;        /* (metal_nomip=1, a diagnostic: every sampler reads level 0 only) */
+	}
 	desc.max_anisotropy = (unsigned)[descriptor maxAnisotropy];
 	desc.compare_function = (unsigned)[descriptor compareFunction];
 	desc.border_color = (unsigned)[descriptor borderColor];
@@ -5147,6 +5215,11 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 	if (![self hakiosRegion:region level:level slice:slice bytes:bytes isFor:"replaceRegion"]) {
 		return;
 	}
+	hm_blit_say("replaceRegion %lux%lux%lu at %s, level %lu, slice %lu, rows %lu (%s 4 x width) into type %lu format %lu %lux%lu of %lu levels",
+		    (unsigned long)region.size.width, (unsigned long)region.size.height, (unsigned long)region.size.depth,
+		    region.origin.x || region.origin.y || region.origin.z ? "an offset" : "0", (unsigned long)level, (unsigned long)slice,
+		    (unsigned long)bytesPerRow, bytesPerRow == 4 * region.size.width ? "=" : "not", (unsigned long)[self textureType],
+		    (unsigned long)[self pixelFormat], (unsigned long)[self width], (unsigned long)[self height], (unsigned long)[self mipmapLevelCount]);
 	snprintf(hm_crash_doing, sizeof(hm_crash_doing), "replaceRegion %lux%lux%lu at (%lu, %lu, %lu), level %lu, slice %lu, the "
 		 "caller's rows %lu bytes apart (images %lu), from %p; the texture %lux%lu, MTLPixelFormat %lu, type %lu, %u level(s), %u "
 		 "bytes a pixel, %llu bytes of memory", (unsigned long)region.size.width, (unsigned long)region.size.height,
@@ -7223,6 +7296,12 @@ hm_blit_texture(hakios_metal_cb *cb, id object, const char *what)
 	hakios_metal_cb *cb = [_commandBuffer hakiosCommandBuffer];
 	hakios_metal_texture *from = hm_blit_texture(cb, sourceTexture, "source");
 	hakios_metal_texture *to = from != NULL ? hm_blit_texture(cb, destinationTexture, "destination") : NULL;
+	hm_blit_say("copyFromTexture type %lu format %lu %lux%lu slice %lu level %lu, %lux%lux%lu, to type %lu format %lu %lux%lu slice %lu level %lu",
+		    (unsigned long)[sourceTexture textureType], (unsigned long)[sourceTexture pixelFormat], (unsigned long)[sourceTexture width],
+		    (unsigned long)[sourceTexture height], (unsigned long)sourceSlice, (unsigned long)sourceLevel, (unsigned long)sourceSize.width,
+		    (unsigned long)sourceSize.height, (unsigned long)sourceSize.depth, (unsigned long)[destinationTexture textureType],
+		    (unsigned long)[destinationTexture pixelFormat], (unsigned long)[destinationTexture width],
+		    (unsigned long)[destinationTexture height], (unsigned long)destinationSlice, (unsigned long)destinationLevel);
 
 	if (to == NULL) {
 		return;
@@ -7296,6 +7375,9 @@ hm_blit_texture(hakios_metal_cb *cb, id object, const char *what)
 	hakios_metal_cb *cb = [_commandBuffer hakiosCommandBuffer];
 	hakios_metal_texture *t = hm_blit_texture(cb, texture, "texture");
 
+	hm_blit_say("generateMipmaps of type %lu format %lu %lux%lu of %lu levels", (unsigned long)[texture textureType],
+		    (unsigned long)[texture pixelFormat], (unsigned long)[texture width], (unsigned long)[texture height],
+		    (unsigned long)[texture mipmapLevelCount]);
 	if (t != NULL && hakios_metal_cb_generate_mipmaps(cb, t) != 0) {
 		hm_print("refused: generateMipmaps of a %lux%lu texture of %lu levels: %s\n", (unsigned long)[texture width],
 			 (unsigned long)[texture height], (unsigned long)[texture mipmapLevelCount], hakios_metal_error());
@@ -7362,6 +7444,13 @@ hm_rows_texture(HakiosMetalBlitCommandEncoder *self, hakios_metal_cb *cb, hakios
 	uint64_t pitch;
 	int failed = 0;
 
+	hm_blit_say("copyFromBuffer offset %%64=%lu rows %lu (%%64=%lu) %lux%lux%lu to slice %lu level %lu at %s of type %lu format %lu %lux%lu of %lu levels",
+		    (unsigned long)(sourceOffset % 64), (unsigned long)sourceBytesPerRow, (unsigned long)(sourceBytesPerRow % 64),
+		    (unsigned long)sourceSize.width, (unsigned long)sourceSize.height, (unsigned long)sourceSize.depth, (unsigned long)destinationSlice,
+		    (unsigned long)destinationLevel, destinationOrigin.x || destinationOrigin.y || destinationOrigin.z ? "an offset" : "0",
+		    (unsigned long)[destinationTexture textureType], (unsigned long)[destinationTexture pixelFormat],
+		    (unsigned long)[destinationTexture width], (unsigned long)[destinationTexture height],
+		    (unsigned long)[destinationTexture mipmapLevelCount]);
 	(void)sourceBytesPerImage;   /* one image: depth 1 is all a texture here has */
 	if (from == NULL) {
 		hakios_metal_cb_refuse(cb, "a buffer-to-texture copy named a buffer that is not this device's");
