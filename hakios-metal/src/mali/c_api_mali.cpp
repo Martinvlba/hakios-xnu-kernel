@@ -451,7 +451,9 @@ struct hakios_metal_buffer {
         // write-combined mapping took 11 ms for EVERY buffer given back (mali_draw_test, "what a buffer costs") --
         // WebKit's WebGL gives one back for every draw, and the aquarium's 618 a frame made a frame take 6 s after
         // the GPU had drawn it in a millisecond. What is written past an end begins at the end.
-        const uint64_t upto = bo.size - length > 1024 ? length + 1024 : bo.size;
+        // (THE FIRST 64 BYTES since the evening: the kilobyte was still a quarter of that GPU process's time,
+        // metal_sample=1000 -- every read through that mapping goes to the memory itself.)
+        const uint64_t upto = bo.size - length > 64 ? length + 64 : bo.size;
         uint64_t last = 0, i = length;
         for (; i < upto && (i & 7); i++) {
             if (p[i] != kSlackByte) last = i + 1;

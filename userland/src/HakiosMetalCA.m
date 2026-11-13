@@ -1388,6 +1388,8 @@ HM_REFUSES_OUT_LOUD
 	HakiosMetalSamplerState *_vsSamplers[HM_MAX_SAMPLERS];
 	unsigned _vsHighestTexture, _vsHighestSampler;
 	NSMutableArray *_scratch;                   /* the buffers -setVertexBytes:/-setFragmentBytes: made */
+	HakiosMetalBuffer *_arena;                  /* ... the one they are filling (one of _scratch's) */
+	NSUInteger _arenaUsed, _arenaSize;
 	MTLWinding _frontFacingWinding;             /* -setFrontFacingWinding:'s, also in _pass.winding for the draws */
 	char _refused[160];                         /* a binding or state this encoder could not take: the next draw is failed by it */
 	NSMutableIndexSet *_visibilityCounted;      /* the result words (offset / 8) a draw of this encoder has counted into */
@@ -2233,6 +2235,186 @@ ca_prof_start(void)
 	});
 }
 
+/*
+ * (hakios, 11-13) boot-arg metal_sample=US, in WebKit's GPU process (metal_sample_in=NAME: the processes whose name
+ * has NAME in it): WHERE A CLIENT'S PROCESSOR TIME GOES. Every US microseconds each thread that is RUNNING is stopped
+ * and its stack taken; every 5 s the functions the samples were in, the most first -- "self" (the function running)
+ * and "with callees" (anywhere on the stack), as image + offset of the function's start and its name where the
+ * image has one. The WebGL aquarium's GPU process took 1.5 cores for 615 draws a frame; this says in what.
+ */
+#define HM_SAMPLE_SLOTS 2048
+#define HM_SAMPLE_DEPTH 24
+static unsigned hm_sample_us;
+static struct {
+	uintptr_t start;
+	const char *image, *name;
+	uintptr_t base;
+	unsigned self, with;
+} hm_sample_table[HM_SAMPLE_SLOTS];
+
+static int
+hm_sample_slot(uintptr_t pc)
+{
+	Dl_info where = { 0 };
+	uintptr_t start = pc;
+	const char *image = "?", *slash;
+
+	static uintptr_t cache, cache_end;
+	static bool looked;
+
+	if (!looked) {
+		extern const void *_dyld_get_shared_cache_range(size_t *length);
+		size_t length = 0;
+
+		cache = (uintptr_t)_dyld_get_shared_cache_range(&length);
+		cache_end = cache + length;
+		looked = true;
+	}
+	if (cache != 0 && pc >= cache && pc < cache_end) {
+		/* (the shared cache's functions are mostly without a name here -- its local symbols are in a file of their
+		 * own, tools/dsc-symbols.py: 256 bytes of code a slot, said as the address the cache was built for) */
+		static const char in_cache[] = "cache";
+
+		start = pc & ~(uintptr_t)0xff;
+		image = in_cache;
+		where.dli_sname = NULL;
+		where.dli_fbase = (void *)(cache - 0x180000000ul);
+	} else if (dladdr((void *)pc, &where) != 0 && where.dli_fname != NULL) {
+		image = (slash = strrchr(where.dli_fname, '/')) != NULL ? slash + 1 : where.dli_fname;
+		start = where.dli_saddr != NULL ? (uintptr_t)where.dli_saddr : pc & ~(uintptr_t)0xfff;
+	}
+	for (unsigned i = (unsigned)((start * 0x9e3779b97f4a7c15ull) >> 40) % HM_SAMPLE_SLOTS, probes = 0; probes < HM_SAMPLE_SLOTS;
+	     i = (i + 1) % HM_SAMPLE_SLOTS, probes++) {
+		if (hm_sample_table[i].start == start) return (int)i;
+		if (hm_sample_table[i].start == 0) {
+			hm_sample_table[i].start = start;
+			hm_sample_table[i].image = image;
+			hm_sample_table[i].name = where.dli_sname;
+			hm_sample_table[i].base = (uintptr_t)where.dli_fbase;
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+static int
+hm_sample_by_self(const void *a, const void *b)
+{
+	return (int)((const typeof(hm_sample_table[0]) *)b)->self - (int)((const typeof(hm_sample_table[0]) *)a)->self;
+}
+
+static int
+hm_sample_by_with(const void *a, const void *b)
+{
+	return (int)((const typeof(hm_sample_table[0]) *)b)->with - (int)((const typeof(hm_sample_table[0]) *)a)->with;
+}
+
+static void *
+hm_sample_main(__unused void *argument)
+{
+	thread_t self = mach_thread_self();
+	unsigned looks = 0, samples = 0;
+	uint64_t began = mach_absolute_time();
+	mach_timebase_info_data_t tb;
+
+	mach_timebase_info(&tb);
+	for (;;) {
+		thread_act_array_t threads;
+		mach_msg_type_number_t n = 0;
+
+		usleep(hm_sample_us);
+		if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS) continue;
+		looks++;
+		for (mach_msg_type_number_t t = 0; t < n; t++) {
+			thread_basic_info_data_t basic;
+			mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+			arm_thread_state64_t state;
+			mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
+			uintptr_t stack[HM_SAMPLE_DEPTH] = { 0 };
+			int slots[HM_SAMPLE_DEPTH];
+			unsigned depth = 0;
+
+			if (threads[t] == self || thread_info(threads[t], THREAD_BASIC_INFO, (thread_info_t)&basic, &count) != KERN_SUCCESS ||
+			    basic.run_state != TH_STATE_RUNNING || thread_suspend(threads[t]) != KERN_SUCCESS) {
+				mach_port_deallocate(mach_task_self(), threads[t]);
+				continue;
+			}
+			if (thread_get_state(threads[t], ARM_THREAD_STATE64, (thread_state_t)&state, &state_count) == KERN_SUCCESS) {
+				uint64_t sp = arm_thread_state64_get_sp(state), fp = arm_thread_state64_get_fp(state), top = 0;
+				pthread_t pt = pthread_from_mach_thread_np(threads[t]);
+
+				if (pt != NULL) top = (uint64_t)(uintptr_t)pthread_get_stackaddr_np(pt);
+				stack[depth++] = (uintptr_t)arm_thread_state64_get_pc(state);
+				while (depth < HM_SAMPLE_DEPTH && top != 0 && fp >= sp && fp + 16 <= top && (fp & 15) == 0) {
+					const uint64_t *record = (const uint64_t *)(uintptr_t)fp;
+
+					if (record[1] != 0) stack[depth++] = (uintptr_t)record[1];
+					if (record[0] <= fp) break;
+					fp = record[0];
+				}
+			}
+			thread_resume(threads[t]);
+			mach_port_deallocate(mach_task_self(), threads[t]);
+			if (depth == 0) continue;
+			samples++;
+			/* (names looked up with the thread running again: dladdr takes dyld's lock) */
+			for (unsigned d = 0; d < depth; d++) {
+				bool seen = false;
+
+				slots[d] = hm_sample_slot(stack[d]);
+				for (unsigned e = 0; e < d; e++) seen |= slots[e] == slots[d];
+				if (slots[d] < 0 || seen) continue;
+				hm_sample_table[slots[d]].with++;
+				if (d == 0) hm_sample_table[slots[d]].self++;
+			}
+		}
+		vm_deallocate(mach_task_self(), (vm_address_t)threads, n * sizeof(thread_t));
+		if ((mach_absolute_time() - began) * tb.numer / tb.denom < 5000000000ull) continue;
+		if (samples >= 50) {
+			hm_print("metal-sample: %u looks, %u samples of running threads (%.0f%% of a core)\n", looks, samples,
+				 100.0 * samples / looks);
+			for (int pass = 0; pass < 2; pass++) {
+				qsort(hm_sample_table, HM_SAMPLE_SLOTS, sizeof(hm_sample_table[0]), pass == 0 ? hm_sample_by_self : hm_sample_by_with);
+				for (unsigned i = 0; i < (pass == 0 ? 28 : 36); i++) {
+					unsigned n_here = pass == 0 ? hm_sample_table[i].self : hm_sample_table[i].with;
+
+					if (hm_sample_table[i].start == 0 || n_here * 200 < samples) break;
+					hm_print("metal-sample: %s %4.1f%% %s+0x%lx %s\n", pass == 0 ? "self" : "with callees",
+						 100.0 * n_here / samples, hm_sample_table[i].image,
+						 (unsigned long)(hm_sample_table[i].start - hm_sample_table[i].base),
+						 hm_sample_table[i].name != NULL ? hm_sample_table[i].name : "?");
+				}
+			}
+		}
+		memset(hm_sample_table, 0, sizeof(hm_sample_table));
+		looks = samples = 0;
+		began = mach_absolute_time();
+	}
+	return NULL;
+}
+
+static void
+hm_sample_start(void)
+{
+	static dispatch_once_t once;
+
+	dispatch_once(&once, ^{
+		char args[1024] = "", in[64] = "WebKit.GPU";
+		size_t size = sizeof(args) - 1;
+		const char *at;
+		pthread_t sampler;
+
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0 || (at = strstr(args, "metal_sample=")) == NULL) return;
+		hm_sample_us = (unsigned)atoi(at + strlen("metal_sample="));
+		if ((at = strstr(args, "metal_sample_in=")) != NULL) {
+			sscanf(at + strlen("metal_sample_in="), "%63s", in);
+		}
+		if (hm_sample_us < 200 || strstr(getprogname(), in) == NULL) return;
+		pthread_create(&sampler, NULL, hm_sample_main, NULL);
+		hm_print("metal-sample: %s: every running thread looked at every %u us\n", getprogname(), hm_sample_us);
+	});
+}
+
 /* UniXNU's Metal on Vulkan (NativeBridgeMetalFrontend.h), there when the bundle is linked with it (M2V=1) */
 extern id native_bridge_metal_open(const char *loader, const char *cache, uint64_t registryID,
 				   void (*missing)(const char *, const char *)) __attribute__((weak_import));
@@ -2379,6 +2561,7 @@ hm_crash_install(void)
 - (instancetype)initWithAcceleratorPort:(io_service_t)port
 {
 	hm_crash_install();
+	hm_sample_start();
 	/* (hakios) the window server alone is shown the device: every other client of this image's Metal (SpringBoard
 	 * through SiriUICore, mediaserverd, ...) finds pipeline libraries made for Apple's GPUs with no default.metallib
 	 * beside them and aborts, while without a device it takes the road it takes today. Boot-arg metal_all=1: all. */
@@ -8518,11 +8701,49 @@ hm_spec_off(void)
 }
 
 /* Metal's shorthand for small constant data: a buffer here, because that is what a stage's binding is. The scratch buffer
- * is the encoder's until -endEncoding; hakios-metal keeps it alive past that until the GPU is done with it. */
+ * is the encoder's until -endEncoding; hakios-metal keeps it alive past that until the GPU is done with it.
+ * ONE BUFFER FOR MANY OF THEM (11-13): each -set...Bytes: made a buffer of its own -- the kernel's driver asked for
+ * memory, a mapping made, and all of it undone when the frame was drawn -- and WebKit's WebGL (ANGLE) sets a draw's
+ * constants this way: the aquarium's 615 draws a frame made some 1200 buffers a frame, a fifth of its GPU process's
+ * time in the kernel for them and a quarter in giving them back (metal_sample=1000). Now the bytes go one after
+ * another into a 64 KiB buffer (each at a multiple of 64 bytes), bound at their offset; what is over 16 KiB still
+ * gets its own. */
+#define HM_ARENA_SIZE   65536u
+#define HM_ARENA_MOST   16384u
 - (HakiosMetalBuffer *)hakiosScratch:(const void *)bytes length:(NSUInteger)length stage:(const char *)stage index:(NSUInteger)index
+			      offset:(NSUInteger *)offset
 {
-	HakiosMetalBuffer *buffer = [[self device] newBufferWithBytes:bytes length:length options:0];
+	HakiosMetalBuffer *buffer;
 
+	*offset = 0;
+	static int shared = -1;         /* (metal_arena=1: NOT YET -- the first run with it left the window server spinning) */
+
+	if (shared < 0) {
+		shared = hm_boot_arg_set("metal_arena=1") ? 1 : 0;
+	}
+	if (shared && bytes != NULL && length != 0 && length <= HM_ARENA_MOST) {
+		void *to;
+
+		if (_arena == nil || _arenaUsed + length > _arenaSize) {
+			_arena = [[self device] newBufferWithLength:HM_ARENA_SIZE options:0];
+			if (_arena != nil) {
+				if (_scratch == nil) {
+					_scratch = [[NSMutableArray alloc] init];
+				}
+				[_scratch addObject:_arena];
+				[_arena release];       /* (the array's now, with the others) */
+				_arenaUsed = 0;
+				_arenaSize = HM_ARENA_SIZE;
+			}
+		}
+		if (_arena != nil && (to = [_arena contents]) != NULL) {
+			memcpy((uint8_t *)to + _arenaUsed, bytes, length);
+			*offset = _arenaUsed;
+			_arenaUsed = (_arenaUsed + length + 63) & ~(NSUInteger)63;
+			return _arena;
+		}
+	}
+	buffer = [[self device] newBufferWithBytes:bytes length:length options:0];
 	if (buffer == nil) {
 		snprintf(_refused, sizeof(_refused), "no scratch buffer for %lu %s bytes at index %lu", (unsigned long)length, stage, (unsigned long)index);
 		return nil;
@@ -8537,7 +8758,13 @@ hm_spec_off(void)
 
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index
 {
-	if (bytes != NULL && length >= 64 && hm_boot_arg_set("metal_vbytes")) {
+	static int say = -1;            /* (asked once: the kernel's arguments are a system call away) */
+	NSUInteger offset = 0;
+
+	if (say < 0) {
+		say = hm_boot_arg_set("metal_vbytes") ? 1 : 0;
+	}
+	if (say && bytes != NULL && length >= 64) {
 		/* (metal_vbytes with metal_trace=1: each kind of vertex constants once, as floats) */
 		const float *f = bytes;
 		char line[380];
@@ -8548,16 +8775,22 @@ hm_spec_off(void)
 		}
 		hm_blit_say("vertex bytes at %lu, %lu long:%s", (unsigned long)index, (unsigned long)length, line);
 	}
-	HakiosMetalBuffer *buffer = [self hakiosScratch:bytes length:length stage:"vertex" index:index];
+	HakiosMetalBuffer *buffer = [self hakiosScratch:bytes length:length stage:"vertex" index:index offset:&offset];
 
 	if (buffer != nil) {
-		[self setVertexBuffer:buffer offset:0 atIndex:index];
+		[self setVertexBuffer:buffer offset:offset atIndex:index];
 	}
 }
 
 - (void)setFragmentBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index
 {
-	if (bytes != NULL && length >= 16) {
+	static int say = -1;
+	NSUInteger offset = 0;
+
+	if (say < 0) {
+		say = hm_boot_arg_set("metal_trace=1") ? 1 : 0;
+	}
+	if (say && bytes != NULL && length >= 16) {
 		/* (metal_trace=1: each kind of fragment constants once, as floats -- the aquarium's lighting and fog, 11-13) */
 		const float *f = bytes;
 		char line[330];
@@ -8568,10 +8801,10 @@ hm_spec_off(void)
 		}
 		hm_blit_say("fragment bytes at %lu, %lu long:%s", (unsigned long)index, (unsigned long)length, line);
 	}
-	HakiosMetalBuffer *buffer = [self hakiosScratch:bytes length:length stage:"fragment" index:index];
+	HakiosMetalBuffer *buffer = [self hakiosScratch:bytes length:length stage:"fragment" index:index offset:&offset];
 
 	if (buffer != nil) {
-		[self setFragmentBuffer:buffer offset:0 atIndex:index];
+		[self setFragmentBuffer:buffer offset:offset atIndex:index];
 	}
 }
 
@@ -9476,6 +9709,8 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 	/* the bindings were handed to hakios-metal at each draw, which holds them until the GPU is done */
 	[_scratch release];
 	_scratch = nil;
+	_arena = nil;                   /* (it was one of them) */
+	_arenaUsed = _arenaSize = 0;
 	[super endEncoding];   /* MUST: the base class retains the command buffer and this is what releases it */
 }
 
