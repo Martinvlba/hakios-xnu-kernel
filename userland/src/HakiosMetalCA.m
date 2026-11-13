@@ -8537,6 +8537,17 @@ hm_spec_off(void)
 
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index
 {
+	if (bytes != NULL && length >= 64 && hm_boot_arg_set("metal_vbytes")) {
+		/* (metal_vbytes with metal_trace=1: each kind of vertex constants once, as floats) */
+		const float *f = bytes;
+		char line[380];
+		int at = 0;
+
+		for (NSUInteger i = 0; i < length / 4 && i < 36 && at < (int)sizeof(line) - 16; i++) {
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %.4g", (double)f[i]);
+		}
+		hm_blit_say("vertex bytes at %lu, %lu long:%s", (unsigned long)index, (unsigned long)length, line);
+	}
 	HakiosMetalBuffer *buffer = [self hakiosScratch:bytes length:length stage:"vertex" index:index];
 
 	if (buffer != nil) {

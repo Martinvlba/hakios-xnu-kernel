@@ -5266,18 +5266,19 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.instances = instance_count;
     dj.vertex_start = ix ? (unsigned)ix->base_vertex : vertex_start;
     // DCD0: scissor to the bounding box, cull zero area (v11); the face culled and the front's winding.
-    // THE WINDING IS FLIPPED (11-10): Metal names it in its normalized coordinates, y up; the Mali judges it where
-    // the vertex shader's viewport transform puts the triangle, in the target's pixels, y down (scale -height/2,
-    // above) -- the y flip turns Metal's counter-clockwise into the Mali's clockwise (panvk sets "front face CCW"
-    // from Vulkan's framebuffer-space winding). Taken as it was, culling kept the faces turned away and dropped the
-    // ones facing the viewer: sb_cube=1's cube showed its far faces, their numbers mirrored. metal_winding=metal:
-    // as before (a test).
-    static const bool winding_as_is = [] {
+    // THE WINDING AS METAL NAMES IT (11-13): Metal's clockwise is clockwise as the target shows the triangle (y down),
+    // and so is the Mali's "front face CCW" (panvk sets it from Vulkan's framebuffer-space winding, which is that
+    // too). From 11-10 until now it was FLIPPED here, on the strength of sb_cube=1's cube -- CoreAnimation layers,
+    // which do not cull on the GPU at all (both ways draw it right, day13/cube-both.png). WebKit's WebGL does: the
+    // aquarium (webglsamples.org) drew every fish from its inside -- lit from behind, dark -- and its glass globe not
+    // at all, so the page's clear colour stood where the dome is; the tester's pictures from another phone beside
+    // ours (day13/aq25 against aq26). metal_winding=flip: as it was from 11-10 (a test).
+    static const bool winding_flipped = [] {
         char args[1024] = {0};
         size_t size = sizeof(args) - 1;
-        return sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, "metal_winding=metal") != nullptr;
+        return sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, "metal_winding=flip") != nullptr;
     }();
-    bool front_ccw = winding_as_is ? pass->winding == 1 : pass->winding == 0;
+    bool front_ccw = winding_flipped ? pass->winding == 0 : pass->winding == 1;
     dj.dcd0 = 1u << 23 | 1u << 26 | (front_ccw ? 1u << 16 : 0) | (pass->cull_mode == 1 ? 1u << 17 : 0) |
         (pass->cull_mode == 2 ? 1u << 18 : 0) | (dj.samples > 1 ? 1u << 19 : 0);  // (19: multisample)
     if (dj.zs && ((dj.zsd[4] >> 29) != 7 || (dj.zsd[4] & 1u << 27) || (dj.zsd[0] >> 31))) {
