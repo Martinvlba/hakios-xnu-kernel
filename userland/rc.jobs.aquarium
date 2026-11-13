@@ -1,0 +1,8 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The WebGL aquarium's speed (RC_JOBS=rc.jobs.aquarium): the home screen unlocked, the page opened through SpringBoard
+# and left 90 s; src/cputop.c beside it says which processes take the cores meanwhile (WebKit's content process, its
+# GPU process, the window server). With metal_stats=1 the plug-in says each command buffer's passes and draws.
+/redwood/bin/cputop 5 &
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 20
+/redwood/bin/battery_test open https://webglsamples.org/aquarium/aquarium.html
+/redwood/bin/rwtouch wait 90 button home wait 3
