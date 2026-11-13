@@ -351,6 +351,43 @@ depth_test(hakios_metal_device *d, hakios_metal_queue *q, hakios_metal_program *
 	return ok;
 }
 
+/* 6a2. a pass with a depth buffer and NO colour attachment that only clears (ANGLE's first clear of a WebGL depth
+ * buffer; refused until 11-13): the depth buffer, filled with 0.75 from here, reads 0.5 everywhere afterwards */
+static int
+depth_alone_test(hakios_metal_device *d, hakios_metal_queue *q)
+{
+	hakios_metal_texture *z = hakios_metal_texture_new(d, 2, 252, 64, 64, HAKIOS_METAL_TEXTURE_USAGE_RENDER_TARGET);
+	static float before[64 * 64], after[64 * 64];
+	struct hakios_metal_render_pass pass;
+	unsigned cleared = 0;
+	int ok = 1;
+
+	if (z == NULL) {
+		printf("mali_draw_test: a depth buffer cleared alone: no texture (%s)\n", hakios_metal_error());
+		return 0;
+	}
+	for (unsigned i = 0; i < 64 * 64; i++) before[i] = 0.75f;
+	hakios_metal_texture_replace(z, 0, 0, 64, 64, before, 64 * 4);
+	hakios_metal_cb *cb = hakios_metal_cb_new(q);
+	memset(&pass, 0, sizeof(pass));
+	pass.depth = z;
+	pass.depth_load_action = 2;
+	pass.depth_store_action = 1;
+	pass.clear_depth = 0.5;
+	if (hakios_metal_cb_clear(cb, &pass) != 0) {
+		printf("mali_draw_test: a depth buffer cleared alone: refused: %s\n", hakios_metal_error());
+		ok = 0;
+	}
+	ok = finish(cb, "a depth buffer cleared alone") && ok;
+	hakios_metal_texture_read(z, 0, 0, 64, 64, after, 64 * 4);
+	for (unsigned i = 0; i < 64 * 64; i++) cleared += after[i] == 0.5f;
+	ok = ok && cleared == 4096;
+	printf("mali_draw_test: a depth buffer cleared alone (no colour attachment): %u of 4096 read 0.5 (the first %g): %s\n", cleared,
+	    (double)after[0], ok ? "WORK" : "FAILED");
+	hakios_metal_texture_free(z);
+	return ok;
+}
+
 /* 6b. stencil (Depth32Float_Stencil8; LEVEL 1: level 1 of a 128x128 one of two levels): the lower-left half writes
  * stencil 1 (compare Always, Replace) and draws flat; tri_color over the whole target where stencil Equal 1 -- the
  * lower-left half all tri_color, the rest the grey clear; then, a new command buffer with the stencil loaded, flat where
@@ -1914,6 +1951,7 @@ main(int argc, char **argv)
 	right = levels_and_blits(d, q, flat) && right;
 	right = depth_test(d, q, flat, col, 0) && right;
 	right = depth_test(d, q, flat, col, 1) && right;
+	right = depth_alone_test(d, q) && right;
 	right = stencil_test(d, q, flat, col, 0) && right;
 	right = stencil_test(d, q, flat, col, 1) && right;
 	right = blend_test(d, q) && right;

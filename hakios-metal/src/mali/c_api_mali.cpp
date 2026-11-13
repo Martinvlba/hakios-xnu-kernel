@@ -6055,9 +6055,42 @@ hakios_metal_cb_clear(hakios_metal_cb *cb, const struct hakios_metal_render_pass
     struct Cleared { hakios_metal_texture *t; const double *color; unsigned store; };
     Cleared c[8];
     unsigned nc = 0;
-    if (cb == nullptr || pass == nullptr || pass->color0 == nullptr) {
-        fail("a clear without a colour attachment");
+    if (cb == nullptr || pass == nullptr) {
+        fail("a clear without a pass");
         return -1;
+    }
+    // DEPTH OR STENCIL ALONE, NO COLOUR ATTACHMENT AT ALL (11-13; ANGLE's first clear of a WebGL depth buffer, refused
+    // twice a page until now): a Mali fragment job has a colour target, so the pass gets one of its own -- RGBA8 of the
+    // depth buffer's size, not cleared to anything that is kept, not written, gone with the command buffer
+    hakios_metal_texture *stand_in = nullptr;
+    if (pass->color0 == nullptr) {
+        hakios_metal_texture *zs = pass->depth != nullptr ? pass->depth : pass->stencil;
+        bool more = false;
+        for (unsigned i = 0; i < 7; i++) more = more || pass->more[i].texture != nullptr;
+        if (zs == nullptr || more) {
+            fail("a clear without colour attachment 0 (%s)", more ? "others are there" : "and no depth or stencil");
+            return -1;
+        }
+        if (!((pass->depth && pass->depth_load_action == 2) || (pass->stencil && pass->stencil_load_action == 2))) {
+            return 0;                                   // nothing cleared
+        }
+        stand_in = hakios_metal_texture_new_levels(cb->queue->device, 2, 70, zs->width, zs->height, 1, 4 | 1);
+        if (stand_in == nullptr) {
+            return -1;                                  // (the reason is the texture's)
+        }
+        if (zs->samples > 1) {
+            // (a multisampled depth buffer wants a colour target of its sample count: not served, said as it is)
+            stand_in->release();
+            fail("a clear of a %u-sample depth or stencil buffer alone, no colour attachment (one sample on the Mali yet)", zs->samples);
+            return -1;
+        }
+        struct hakios_metal_render_pass q = *pass;
+        q.color0 = stand_in;
+        q.load_action = 0;
+        q.store_action = 0;
+        int r = hakios_metal_cb_clear(cb, &q);
+        stand_in->release();                            // (the command buffer holds it until it is done)
+        return r;
     }
     if (pass->load_action == 2) c[nc++] = { pass->color0, pass->clear_color, pass->store_action };
     for (unsigned i = 0; i < 7; i++) {
