@@ -850,6 +850,9 @@ all_zero(nir_def *def)
  */
 #define AIR_NULL_TEXTURE 0xfffeu
 
+/* texture_op's "is the number a level" flag, forced (0, 1) while it translates one sample both ways; -1: as the call says */
+static __thread int tex_level_forced = -1;
+
 static bool
 texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n)
 {
@@ -1024,18 +1027,48 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
 
    nir_texop op;
    if (!strcmp(t.op, "sample")) {
-      uint64_t has_offset, is_level;
-      if (!tex_flag(c, in, arg, &has_offset))
-         return false;
-      arg++;
-      nir_def *offset = air_get_ssa(c, in->operands[arg++]);
-      if (!offset)
-         return false;
-      if (has_offset && !all_zero(offset))
-         srcs[nsrc++] = (nir_tex_src){ .src_type = nir_tex_src_offset,
-                                       .src = nir_src_for_ssa(nir_u2u32(&c->b, offset)) };
-      if (!tex_flag(c, in, arg, &is_level))
-         return false;
+      uint64_t has_offset = 0, is_level;
+      /* (a cube's sample has no offset: air.sample_texture_cube(texture, sampler, float3, i1 level?, float, float,
+       * i32) -- read as a 2D one's, its level took the offset's place and "argument 5 is not a constant" refused the
+       * shader: the WebGL aquarium's sky reflections, 11-13. Told by the operand itself: an offset is a vector of
+       * integers after an i1.) */
+      const struct air_type *after = arg + 1 < in->num_operands ? in->operands[arg + 1]->type : NULL;
+      const bool offset_there = after != NULL && (after->kind == AIR_TYPE_VECTOR ? after->elem->kind == AIR_TYPE_INT
+                                                                                  : after->kind == AIR_TYPE_INT && after->bits != 1);
+      if (offset_there) {
+         if (!tex_flag(c, in, arg, &has_offset))
+            return false;
+         arg++;
+         nir_def *offset = air_get_ssa(c, in->operands[arg++]);
+         if (!offset)
+            return false;
+         if (has_offset && !all_zero(offset))
+            srcs[nsrc++] = (nir_tex_src){ .src_type = nir_tex_src_offset,
+                                          .src = nir_src_for_ssa(nir_u2u32(&c->b, offset)) };
+      }
+      if (tex_level_forced >= 0) {
+         is_level = (uint64_t)tex_level_forced;       /* (the second and third time through: see below) */
+      } else if (!air_const_uint(in->operands[arg], &is_level)) {
+         /* (11-13) WHETHER THE NUMBER IS A LEVEL OR A BIAS, KNOWN ONLY WHILE THE SHADER RUNS -- LLVM folds two sample
+          * calls of a GL-on-Metal layer's texture helper into one with the flag a value (WebKit's WebGL through ANGLE:
+          * the aquarium's ground and its inner shader were refused, "argument 5 is not a constant"). Sampled both
+          * ways, the flag choosing between the two results. */
+         nir_def *flag = air_get_ssa(c, in->operands[arg]);
+         nir_def *both[2];
+         if (!flag)
+            return false;
+         for (int way = 1; way >= 0; way--) {
+            tex_level_forced = way;
+            const bool ok = texture_op(c, in, n);
+            tex_level_forced = -1;
+            struct air_val *v = ok ? air_get(c, &in->base) : NULL;
+            if (!v)
+               return false;
+            both[way] = v->kind == AIR_VAL_AGG ? v->elems[0]->def : v->def;
+         }
+         set_tex_result(c, in, nir_bcsel(&c->b, flag->bit_size == 1 ? flag : nir_ine_imm(&c->b, flag, 0), both[1], both[0]));
+         return true;
+      }
       arg++;
       nir_def *level = air_get_ssa(c, in->operands[arg++]);
       nir_def *min_lod = air_get_ssa(c, in->operands[arg++]);
