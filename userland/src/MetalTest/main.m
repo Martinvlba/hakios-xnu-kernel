@@ -1470,6 +1470,10 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 int
 main(int argc, char **argv)
 {
+	/* what this device's Metal refuses fails the command buffer here (the plug-in's strict mode, read at each command
+	 * buffer): by default it leaves the refused piece out and completes the rest without an error, which is right for
+	 * a game and would let a test page pass for missing work */
+	setenv("HAKIOS_METAL_STRICT", "1", 1);
 	@autoreleasepool {
 		return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
 	}
