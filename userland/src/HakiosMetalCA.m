@@ -6367,10 +6367,12 @@ hm_read_render_pass(MTLRenderPassDescriptor *d, struct hakios_metal_render_pass 
 		}
 		pass->visibility = [(HakiosMetalBuffer *)[d visibilityResultBuffer] hakiosBuffer];
 	}
-	if ([d renderTargetArrayLength] > 1) {
-		snprintf(why, size, "renderTargetArrayLength %lu (layered rendering); one layer is served", (unsigned long)[d renderTargetArrayLength]);
+	/* layered rendering: the core's (hakios_metal.h, layers): 2 to 8 layers of one array or cube colour attachment */
+	if ([d renderTargetArrayLength] > 8) {
+		snprintf(why, size, "renderTargetArrayLength %lu (layered rendering); up to 8 layers are served", (unsigned long)[d renderTargetArrayLength]);
 		return NO;
 	}
+	pass->layers = (unsigned)[d renderTargetArrayLength];
 	if ([d defaultRasterSampleCount] > 1) {
 		snprintf(why, size, "defaultRasterSampleCount %lu; one sample is served", (unsigned long)[d defaultRasterSampleCount]);
 		return NO;

@@ -556,7 +556,7 @@ struct hakios_metal_program {
     Bo code;
     uint64_t pos_spd = 0, vary_spd = 0, frag_spd = 0;
     uint64_t pos_spd_no_psiz = 0;
-    bool writes_psiz = false, extended_fifo = false;
+    bool writes_psiz = false, extended_fifo = false, writes_layer = false;
     unsigned color_format = 0, samples = 1;
     bool blend_enabled = false, vertex_descriptor = false;
     // colour attachment 0's blend (hakios_metal_program_set_blend): the fixed-function equation word, whether it
@@ -644,6 +644,7 @@ struct hakios_metal_program {
         pos_spd_no_psiz = vs.writes_psiz && vs.no_psiz_offset ? spd(3, 3, vs.work_regs, vs.preload, code.va + vs.no_psiz_offset, false) : 0;
         writes_psiz = vs.writes_psiz != 0;
         extended_fifo = vs.extended_fifo != 0;
+        writes_layer = vs.writes_layer != 0;
         __asm__ volatile("dsb sy" ::: "memory");
         device = d;
         return true;
@@ -1042,6 +1043,9 @@ struct DrawJob {
     hakios_metal_texture *pre_target = nullptr;
     // INCREMENTAL RENDERING (emitIr): the preload's fragment shader for every target as a pre-frame shader, its push
     // constants; 0: the pass has no tiler OOM handler (boot-arg metal_noir, or no preload program)
+    // LAYERED RENDERING (11-14): the pass's layers (1: none) and how far apart they lie in the target's memory
+    unsigned layers = 1;
+    uint64_t layer_stride = 0;
     uint64_t ir_frag_spd = 0;
     std::vector<uint32_t> ir_fs_fau;
     hakios_metal_texture *ir_target = nullptr;          // colour attachment 0 (held as the draw's target)
@@ -1351,6 +1355,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     static const bool last_pv = bootArg("metal_lastpv");
     tc[2] = hierarchyMask(dj.width, dj.height, d->tiler_levels) | 1u << 17 | (last_pv ? 0u : 1u << 18);  // (sample test off)
     tc[3] = (dj.width - 1) | (dj.height - 1) << 16;
+    tc[4] = dj.layers - 1;                                                      // (layer count; layer offset 0)
     *(uint64_t *)&tc[6] = d->heapdesc.va;
     *(uint64_t *)&tc[8] = (d->heapdesc.va + 0x1000) | (0x10000 >> 12);
     // sample positions: one, centred; four: the rotated 4x grid (descriptors + 0x2000)
@@ -1508,7 +1513,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         return !(sysctlbyname("kern.bootargs", args, &size, nullptr, 0) == 0 && strstr(args, "metal_passinv=0") != nullptr);
     }();
     // (with every target that asked for a load elided -- passElide -- there is nothing to preload)
-    bool preload = dj.load;
+    bool preload = dj.load && dj.layers <= 1;       // (a layered pass is not loaded: refused where the draw is recorded)
     if (preload && !dj.load0) {
         preload = false;
         for (unsigned i = 1; i < dj.rts; i++) {
@@ -1522,8 +1527,8 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     }
     if (first && ir != nullptr) {
         *(uint64_t *)(ir + 0x10) = 0;
-        if (!dj.clear_only && dj.ir_frag_spd != 0) {
-            *(uint64_t *)(ir + 0x10) = 1;                                       // (emitIr when the pass ends)
+        if (!dj.clear_only && dj.ir_frag_spd != 0 && dj.layers <= 1) {             // (a layered pass: its area holds
+            *(uint64_t *)(ir + 0x10) = 1;                                       // the layers' framebuffers instead)
             s[n++] = move48(76, ir_va + IR_HANDLER);
             s[n++] = move32(78, IR_HANDLER_BYTES);
             s[n++] = 25ULL << 56 | 76ULL << 40 | 78ULL << 32 | 2;              // SET_EXCEPTION_HANDLER: tiler OOM
@@ -1705,8 +1710,29 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(43, (dj.width - 1) | (dj.height - 1) << 16);
     s[n++] = move48(44, 0);                                                     // no tile enable map (r44 held the
     s[n++] = move32(46, 0);                                                     // depth clamps), its row stride
+    if (dj.layers > 1 && ir != nullptr && !ir_on) {
+        // LAYERED RENDERING (11-14): the tiler put each primitive into the list of the layer its vertex function named
+        // (the tiler context's layer count, the draws' "layer index enable"); now a fragment job a layer, each with a
+        // copy of the pass's framebuffer descriptor that names its layer (internal layer index; the frame argument as
+        // panvk has it) and whose render target is that layer's memory. The copies are in the pass's incremental-
+        // rendering area, which a layered pass does not use (no tiler OOM handler: a pass whose lists outgrow the heap
+        // is not flushed).
+        for (unsigned layer = 0; layer < dj.layers; layer++) {
+            uint8_t *copy = ir + 0x100 + 0x100 * layer;
+            uint64_t copy_va = ir_va + 0x100 + 0x100 * layer;
+            memcpy(copy, pass_area + 0x80, 0x80 + 0x40 * dj.rts);
+            auto *lfb = (uint32_t *)copy, *lrt = (uint32_t *)(copy + 0x80);
+            lfb[0] = (lfb[0] & 0x00ffffffu) | layer << 24;
+            *(uint64_t *)&lfb[2] = layer;
+            *(uint64_t *)&lrt[8] += dj.layer_stride * layer;
+            s[n++] = move48(40, copy_va | 1 | (dj.rts - 1) << 2);
+            s[n++] = 7ULL << 56;                                                // RUN_FRAGMENT
+            s[n++] = WAIT_ALL;
+        }
+    } else {
     s[n++] = 7ULL << 56;                                                        // RUN_FRAGMENT
     s[n++] = WAIT_ALL;
+    }
     // the pass finished, as panvk ends one: the tiler context's completed top and bottom (byte 40, four words) into
     // r70-r73, and FINISH_FRAGMENT gives that heap memory back and counts the pass done. Without it a queue drew one
     // pass and then binned nothing (the heap's in-flight passes never went down).
@@ -1730,6 +1756,7 @@ bool
 samePass(const DrawJob &a, const DrawJob &b)
 {
     if (a.clear_only || b.clear_only || !b.load || !b.load0 || a.target_va != b.target_va || a.rts != b.rts || a.width != b.width ||
+        a.layers != b.layers ||
         a.height != b.height || a.row_bytes != b.row_bytes || a.zs != b.zs || a.z_va != b.z_va || a.s_va != b.s_va ||
         (b.zs && ((b.has_z && !b.z_load) || (b.has_s && !b.s_load)))) {
         return false;
@@ -2434,6 +2461,9 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
         // the stream (from 0), then each job's push constants: 32 bytes for a blit, a kernel's fau_words for a dispatch
         static const bool stats = bootArg("metal_stats") || bootArg("mdsay=");
         size_t words = 18 + cb->blits.size() * 24 + cb->draws.size() * (DRAW_WORDS + (stats ? 4 : 0));   // (24: a compute job's 15, its flush's 3)
+        for (const DrawJob &dj : cb->draws) {
+            if (dj.layers > 1) words += 3 * dj.layers;                          // (a layered pass's fragment jobs)
+        }
         if (stats && !cb->draws.empty() && cb->timestamps.size == 0) {
             if (!d->newBo(cb->timestamps, ((cb->draws.size() * 16) + 0xfff) & ~0xfffULL, BIND_NOEXEC)) {
                 cb->timestamps.size = 0;
@@ -5186,6 +5216,19 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     dj.blend[2] = (reads0 && !(dj.rt1 & kRtRaw) ? 2u : 1u) | 3 << 3;   // mode, 4 components, RT 0
     dj.blend[3] = rtBlend(dj.rt1);                           // the tile buffer's RGBA8
     dj.rts = rts;
+    if (pass->layers > 1) {
+        // LAYERED RENDERING: see the pass's end in emitDraw
+        // (a pass that LOADS its layers is not refused here -- every draw after an encoder's first comes as one that
+        // loads -- but nothing is loaded: emitDraw's preload is left out, the layers begin as the tile buffer's clear)
+        if (pass->layers > 8 || t->layers < pass->layers || rts != 1 || dj.zs || t->samples > 1) {
+            fail("%s: a layered pass (%u layers) into a texture of %u layers, %u colour targets%s%s: served are 2 to 8 layers of "
+                "one array or cube texture, no depth or stencil, one sample", p->name, pass->layers,
+                t->layers, rts, dj.zs ? ", depth or stencil" : "", t->samples > 1 ? ", multisampled" : "");
+            return -1;
+        }
+        dj.layers = pass->layers;
+        dj.layer_stride = t->layer_stride;
+    }
     for (unsigned i = 1; i < rts; i++) {
         const hakios_metal_render_pass::hakios_metal_color_attachment &a = pass->more[i - 1];
         DrawJob::More &m = dj.more[i - 1];
@@ -5310,7 +5353,8 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         dj.pos_spd = p->pos_spd_no_psiz;
     }
     dj.tiler_flags = dj.mode | (psiz || p->extended_fifo ? 2u : 1u) << 22 | (psiz ? 2u << 11 : 0) |
-        (dj.vary_spd ? 1u << 18 : 0);   // the FIFO's format; the varying shader
+        (dj.vary_spd ? 1u << 18 : 0) |  // the FIFO's format; the varying shader
+        (dj.layers > 1 && p->writes_layer ? 1u << 20 : 0);                      // the layer the vertex function names
     if (ix) {
         // the indices: 16 or 32 bits (Mali's index type 2, 3), primitive restart at the type's all-ones as Metal has it
         dj.index_va = ix->buffer->bo.va + ix->offset;

@@ -950,6 +950,7 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 		out->writes_psiz = info.vs.writes_point_size;
 		out->no_psiz_offset = info.vs.no_psiz_offset;
 		out->extended_fifo = info.vs.needs_extended_fifo;
+		out->writes_layer = (s->info.outputs_written & VARYING_BIT_LAYER) != 0;
 		out->varying_bytes = varyings->generic_size_B;
 		out->varyings = varyings;               /* (handed to the fragment stage's compile) */
 		varyings = NULL;
