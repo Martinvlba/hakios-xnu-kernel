@@ -409,7 +409,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	}];
 
 	/* 5 */
-	[self add:@"Mipmaps" expect:@"a floor to the horizon: checkerboard near, then bands red, green, blue, white further away, blending smoothly; right third: generated mipmaps, grey in the distance, no sparkle"
+	[self add:@"Mipmaps" expect:@"a floor to the horizon: checkerboard near, then bands red, green, blue, white further away, blending smoothly; right third: generated mipmaps, a fine checkerboard near and plain grey from where the left turns blue, no sparkle"
 	    setup:^SceneDraw(Renderer *r) {
 		id<MTLLibrary> library = [r library:@
 		    "vertex VO floor_v(uint vid [[vertex_id]], constant U &u [[buffer(0)]]) {\n"
@@ -417,7 +417,8 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 		    "  o.uv = float2(q.x * 20.0, q.y * 100.0); o.col = float4(1.0); return o; }\n"];
 		id<MTLRenderPipelineState> pipeline = [r simple:library vertex:@"floor_v" fragment:@"tex_f" blend:NO];
 		id<MTLTexture> coloured = [r checker:256 cell:32 a:0xffffffff b:0xff202020 mipmapped:YES];
-		id<MTLTexture> generated = [r checker:256 cell:32 a:0xffffffff b:0xff000000 mipmapped:YES];
+		/* (cells of 4 pixels: plain grey from level 3 on, where the left part turns blue) */
+		id<MTLTexture> generated = [r checker:256 cell:4 a:0xffffffff b:0xff000000 mipmapped:YES];
 		static const uint32_t level_colours[] = { 0, 0xff0000ff, 0xff00ff00, 0xffff0000, 0xffffffff, 0xff00ffff, 0xffff00ff, 0xffffff00, 0xff808080 };
 
 		for (NSUInteger level = 1; level < coloured.mipmapLevelCount; level++) {
@@ -437,6 +438,17 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 			[blit generateMipmapsForTexture:generated];
 			[blit endEncoding];
 			[cb commit];
+			/* what the generated levels hold: a black and white checkerboard of 4-pixel cells is plain grey from
+			 * the level where a cell is under a pixel (3) */
+			[cb waitUntilCompleted];
+			for (NSUInteger level = 3; level < generated.mipmapLevelCount; level += 3) {
+				uint8_t px[4] = { 1, 2, 3, 4 };
+
+				[generated getBytes:px bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:level];
+				say([NSString stringWithFormat:@"generated mipmaps %@: level %lu pixel %u %u %u %u (expected 127 or 128 grey; 1 2 3 4: nothing read)",
+				     level >= 3 ? (abs((int)px[0] - 128) < 8 && abs((int)px[1] - 128) < 8 ? @"RIGHT" : @"WRONG") : @"-",
+				     (unsigned long)level, px[0], px[1], px[2], px[3]]);
+			}
 		}
 		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {
 			id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:[r passTo:target clear:MTLClearColorMake(0.3, 0.5, 0.9, 1)]];

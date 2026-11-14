@@ -1050,6 +1050,13 @@ staged_apps_after_mount(void)
 	unsigned files = 0;
 	int ok, fd;
 
+	/* boot-arg staged_again=1: once more, for a phone whose staged applications went back to "Waiting..." (the
+	 * migration run again with the staged copies already used up has the App Store's daemon queue all of them for a
+	 * download that never comes) */
+	if (boot_arg("staged_again") != NULL) {
+		unlink(STAGED_DONE);
+		unlink(STAGED_DONE "-migrate");
+	}
 	if (var_kept && staged_reachable && lstat(STAGED_DONE, &st) != 0) {
 		empty_tree(STAGED_APPS, 0);             /* (a copy a restart cut short) */
 		ok = copy_whole_tree(".", STAGED_APPS, 0, &files);
