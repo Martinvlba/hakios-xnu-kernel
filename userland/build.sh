@@ -192,6 +192,12 @@ for d in $EXTRA_SHARE; do
 	[ -d "$d" ] || { echo "build.sh: EXTRA_SHARE: $d is not a directory"; exit 1; }
 	cp -rL "$d" root/share/
 done
+# Applications of our own that the image carries (bin/lsreg registers them with LaunchServices, a line of the job
+# file): the Metal test application, built further down in an earlier run of this script.
+rm -rf root/share/system-apps
+if [ -d obj/MetalTest.app ]; then
+	mkdir -p root/share/system-apps && cp -r obj/MetalTest.app root/share/system-apps/
+fi
 # Metal's compiled shader stages from an earlier boot (tools/metal-cache-seed.sh puts them in
 # userland/hakios-metal-cache): the window server reads them from /redwood/share/hakios-metal-cache
 # (HakiosMetalCA.m: HM_CACHE_SEED) instead of compiling CoreAnimation's shaders during the first minute
@@ -286,14 +292,17 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# ... and inside an application, to say what killed it (src/inject_app.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.app.dylib -lobjc \
 			-o obj/libhakios.app.dylib src/inject_app.c
-		# MetalTest.app: Metal's features one full screen at a time (src/MetalTest/main.m). Not in the image: it is
-		# installed over USB -- devices/akita/tools/usbmux-install.py install userland/obj/MetalTest.app
+		# MetalTest.app: Metal's features one full screen at a time (src/MetalTest/main.m). In the image under
+		# share/system-apps (the next build's: see there), which lsreg (a line of the job file) tells LaunchServices about
 		rm -rf obj/MetalTest.app && mkdir -p obj/MetalTest.app &&
 		$DYN -fobjc-arc -miphoneos-version-min=14.0 -framework UIKit -framework Metal -framework QuartzCore -framework Foundation \
 			-framework CoreGraphics -o obj/MetalTest.app/MetalTest src/MetalTest/main.m &&
 		cp src/MetalTest/Info.plist obj/MetalTest.app/ && printf 'APPL????' > obj/MetalTest.app/PkgInfo &&
 		{ ${LDID:-ldid} -Ssrc/MetalTest/MetalTest.entitlements obj/MetalTest.app/MetalTest 2>/dev/null ||
 		  echo "build.sh: no ldid: MetalTest.app is unsigned, and installd may refuse it"; }
+		# lsreg: an application the image carries (share/system-apps) told to LaunchServices as a system one (src/lsreg.m)
+		$DYN -fobjc-arc -framework Foundation -framework CoreServices -o obj/lsreg src/lsreg.m &&
+		{ ${LDID:-ldid} -Ssrc/lsreg.entitlements obj/lsreg 2>/dev/null || echo "build.sh: no ldid: lsreg is unsigned"; }
 		# ... and inside lockdownd: the services it keeps for an activated phone (src/inject_lockdown.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.lockdown.dylib -framework CoreFoundation \
 			-F${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks -framework MobileActivation \
@@ -424,6 +433,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/snap_test ] && cp obj/snap_test root/bin/
 	[ -f obj/font_test ] && cp obj/font_test root/bin/
 	[ -f obj/metal_test ] && cp obj/metal_test root/bin/
+	[ -f obj/lsreg ] && cp obj/lsreg root/bin/
 	[ -f obj/mali_draw_test ] && cp obj/mali_draw_test root/bin/
 	[ -f obj/fps_info ] && cp obj/fps_info root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
