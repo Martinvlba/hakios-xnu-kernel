@@ -542,7 +542,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 			[e setDepthStencilState:depthState];
 			[e setVertexBuffer:buffer offset:0 atIndex:1];
 			for (int i = 0; i < 2; i++) {
-				matrix_float4x4 model = simd_mul(translate(i ? 0.6f : -0.6f, 0, -6), rotate(t * (i ? 0.9f : -0.7f), 0.3f, 1, i ? 0.5f : -0.2f));
+				matrix_float4x4 model = simd_mul(translate(i ? 0.6f : -0.6f, 0, -12), rotate(t * (i ? 0.9f : -0.7f), 0.3f, 1, i ? 0.5f : -0.2f));
 				Uniforms u = { simd_mul(projection, model), { 0 }, { 1, 1, 1, 1 }, t, 0, 0, 0 };
 
 				[r uniforms:u on:e];
