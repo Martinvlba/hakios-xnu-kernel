@@ -72,6 +72,10 @@ struct mali_kernel_binary {
 	 * of varyings a vertex has; the layout the fragment function is compiled against (Mesa's, opaque here) */
 	unsigned idvs, secondary_offset, secondary_work_regs, varying_bytes;
 	uint64_t secondary_preload;
+	/* [[point_size]]: the function writes one (points are drawn with the position FIFO's extended entries and the
+	 * size taken from them); where in CODE its variant without that write begins, for everything that is not points
+	 * (0: none needed); and whether the entries are extended for another reason */
+	unsigned writes_psiz, no_psiz_offset, extended_fifo;
 	void *varyings;
 	unsigned num_resources;
 	struct mali_kernel_resource resources[MALI_KERNEL_MAX_RESOURCES];

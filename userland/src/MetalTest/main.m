@@ -13,6 +13,9 @@
 #include <fcntl.h>
 #include <simd/simd.h>
 #include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 #define SCENE_SECONDS 5.0
@@ -452,7 +455,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 		}
 		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {
 			id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:[r passTo:target clear:MTLClearColorMake(0.3, 0.5, 0.9, 1)]];
-			Uniforms u = { simd_mul(perspective(1.0f, r.aspect > 0 ? 1 / r.aspect : 1, 0.1f, 400), translate(0, -2.0f, fmodf(t, 4) * 2 - 4)),
+			Uniforms u = { simd_mul(perspective(1.0f, r.aspect > 0 ? r.aspect : 1, 0.1f, 400), translate(0, -2.0f, fmodf(t, 4) * 2 - 4)),
 				       { 0 }, { 0 }, t, 0, 0, 0 };
 
 			[e setRenderPipelineState:pipeline];
@@ -533,7 +536,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 			pass.depthAttachment.storeAction = MTLStoreActionDontCare;
 			pass.depthAttachment.clearDepth = 1;
 			id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
-			matrix_float4x4 projection = perspective(0.9f, r.aspect > 0 ? 1 / r.aspect : 1, 0.1f, 50);
+			matrix_float4x4 projection = perspective(0.9f, r.aspect > 0 ? r.aspect : 1, 0.1f, 50);
 
 			[e setRenderPipelineState:pipeline];
 			[e setDepthStencilState:depthState];
@@ -777,7 +780,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	}];
 
 	/* 14 */
-	[self add:@"ASTC compressed textures" expect:@"a 4x4 grid of 14 flat coloured tiles on grey, every tile ONE even colour and all different (rainbow order): the 14 ASTC block sizes 4x4 .. 12x12; last row's 2 tiles: sRGB 4x4 and 8x8, mid grey-orange"
+	[self add:@"ASTC compressed textures" expect:@"a 4x4 grid of 14 flat coloured tiles on grey, every tile ONE even colour and all different (rainbow order): the 14 ASTC block sizes 4x4 .. 12x12; last row's 2 tiles: sRGB 4x4 and 8x8, the same dark brown (0.5 0.35 0.2 decoded to linear: about 55 26 8 on this non-sRGB drawable; a mid grey-orange would be the value NOT decoded)"
 	    setup:^SceneDraw(Renderer *r) {
 		id<MTLLibrary> library = [r library:@""];
 		id<MTLRenderPipelineState> show = [r simple:library vertex:@"rect_v" fragment:@"tex_f" blend:NO];
@@ -962,7 +965,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	}];
 
 	/* 17 */
-	[self add:@"Points, lines, strips" expect:@"top: a ring of round-ish coloured dots of growing size (points). Middle: a white zigzag line and a green sine curve (lines, line strip). Bottom: a rainbow ribbon waving (triangle strip)"
+	[self add:@"Points, lines, strips" expect:@"top: a ring of coloured squares growing in size around it, 4 to 50 pixels (points). Middle: a white zigzag line and a green sine curve (lines, line strip). Bottom: a rainbow ribbon waving (triangle strip)"
 	    setup:^SceneDraw(Renderer *r) {
 		id<MTLLibrary> library = [r library:@
 		    "struct PO { float4 pos [[position]]; float4 col; float size [[point_size]]; };\n"
@@ -1198,6 +1201,20 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	_layer.opaque = YES;
 	_renderer = [[Renderer alloc] initWithDevice:device format:_layer.pixelFormat];
 	_started = _fpsFrom = CACurrentMediaTime();
+	{
+		/* boot-arg metaltest_from=N: begin at scene N (a test run that is after the later ones) */
+		char args[1024] = "";
+		size_t size = sizeof(args) - 1;
+		const char *from;
+
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (from = strstr(args, "metaltest_from=")) != NULL) {
+			int n = atoi(from + 15);
+
+			if (n >= 1 && (NSUInteger)n <= _renderer.scenes.count) {
+				_index = (NSUInteger)n - 1;
+			}
+		}
+	}
 	CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(frame:)];
 	if (@available(iOS 15.0, *)) {
 		link.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);

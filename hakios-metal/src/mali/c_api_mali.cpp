@@ -555,6 +555,8 @@ struct hakios_metal_program {
     hakios_metal_device *device = nullptr;
     Bo code;
     uint64_t pos_spd = 0, vary_spd = 0, frag_spd = 0;
+    uint64_t pos_spd_no_psiz = 0;
+    bool writes_psiz = false, extended_fifo = false;
     unsigned color_format = 0, samples = 1;
     bool blend_enabled = false, vertex_descriptor = false;
     // colour attachment 0's blend (hakios_metal_program_set_blend): the fixed-function equation word, whether it
@@ -610,7 +612,7 @@ struct hakios_metal_program {
             return false;
         }
         uint64_t fs_at = (vs.size + 0x100 + 0xff) & ~0xffULL, spd_at = (fs_at + fs.size + 0x100 + 0x3f) & ~0x3fULL;
-        if (!d->newBo(code, spd_at + 0xc0, BIND_READONLY)) {
+        if (!d->newBo(code, spd_at + 0x100, BIND_READONLY)) {
             return false;
         }
         auto *bytes = (uint8_t *)code.cpu;
@@ -637,6 +639,11 @@ struct hakios_metal_program {
         pos_spd = spd(0, 3, vs.work_regs, vs.preload, code.va, false);
         vary_spd = vs.secondary_offset ? spd(1, 3, vs.secondary_work_regs, vs.secondary_preload, code.va + vs.secondary_offset, false) : 0;
         frag_spd = spd(2, 2, fs.work_regs, fs.preload, code.va + fs_at, fs.helpers != 0);
+        // a vertex function with a [[point_size]]: its variant that does not write one, for lines and triangles (the
+        // position FIFO's basic entries have no room for it; Mesa's no_psiz variant)
+        pos_spd_no_psiz = vs.writes_psiz && vs.no_psiz_offset ? spd(3, 3, vs.work_regs, vs.preload, code.va + vs.no_psiz_offset, false) : 0;
+        writes_psiz = vs.writes_psiz != 0;
+        extended_fifo = vs.extended_fifo != 0;
         __asm__ volatile("dsb sy" ::: "memory");
         device = d;
         return true;
@@ -5294,7 +5301,16 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     // in one pass each read the tile as it was before either: WebKit's path coverage, added into an R32Float target, came
     // out as noise (mali_draw_test "blending into R32Float": two draws added once)
     dj.dcd2 = 1u << 12 | 1u << 24 | 1u << 25 | (p->fs.rt_read & 0xffu);
-    dj.tiler_flags = dj.mode | 1u << 22 | (dj.vary_spd ? 1u << 18 : 0);   // basic FIFO; the varying shader
+    // POINTS (11-14): a point is as large as the vertex function's [[point_size]] -- the size array's format FP16 and
+    // the position FIFO's extended entries, which hold it (panvk: writes_point_size, extended_fifo); without both the
+    // points of MetalTest's page 17 were not drawn at all. Anything else that such a function draws goes through its
+    // variant without the write. A function that writes none: points of the primitive size register's 1.0.
+    const bool psiz = primitive == 0 && p->writes_psiz;
+    if (!psiz && p->writes_psiz && p->pos_spd_no_psiz != 0) {
+        dj.pos_spd = p->pos_spd_no_psiz;
+    }
+    dj.tiler_flags = dj.mode | (psiz || p->extended_fifo ? 2u : 1u) << 22 | (psiz ? 2u << 11 : 0) |
+        (dj.vary_spd ? 1u << 18 : 0);   // the FIFO's format; the varying shader
     if (ix) {
         // the indices: 16 or 32 bits (Mali's index type 2, 3), primitive restart at the type's all-ones as Metal has it
         dj.index_va = ix->buffer->bo.va + ix->offset;

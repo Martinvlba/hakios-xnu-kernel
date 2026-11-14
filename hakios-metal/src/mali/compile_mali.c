@@ -873,6 +873,22 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 		inputs.varying_layout = vs_varyings;
 		inputs.trust_varying_flat_highp_types = true;
 	}
+	if (want == MESA_SHADER_VERTEX) {
+		/*
+		 * (11-14) WHAT THE VERTEX FUNCTION WRITES, told to the compiler: the front end leaves info.outputs_written 0
+		 * and nothing here gathered it, and the compiler goes by it -- a [[point_size]] was not written to the
+		 * position FIFO at all (points one pixel large whatever the function said: MetalTest's page 17), and a
+		 * [[render_target_array_index]] would not have been either. From the output variables, which are all there.
+		 * Those two and the viewport's index only -- what the FIFO's extended entries carry: with the position's bit
+		 * as well the compiler's pass for noperspective varyings ran and va_optimize crashed on every vertex function.
+		 */
+		nir_foreach_shader_out_variable(var, s) {
+			if (var->data.location == VARYING_SLOT_PSIZ || var->data.location == VARYING_SLOT_LAYER ||
+			    var->data.location == VARYING_SLOT_VIEWPORT) {
+				s->info.outputs_written |= BITFIELD64_BIT(var->data.location);
+			}
+		}
+	}
 	memset(&info, 0, sizeof(info));
 	pan_postprocess_nir(s, &inputs, &info);
 	NIR_PASS(_, s, nir_shader_intrinsics_pass, want == MESA_SHADER_COMPUTE ? lower_sysvals : lower_draw_sysvals,
@@ -931,6 +947,9 @@ compile_nir(nir_shader *s, mesa_shader_stage want, const void *vs_varyings, stru
 		out->secondary_offset = info.vs.secondary_enable ? info.vs.secondary_offset : 0;
 		out->secondary_work_regs = info.vs.secondary_work_reg_count;
 		out->secondary_preload = info.vs.secondary_preload;
+		out->writes_psiz = info.vs.writes_point_size;
+		out->no_psiz_offset = info.vs.no_psiz_offset;
+		out->extended_fifo = info.vs.needs_extended_fifo;
 		out->varying_bytes = varyings->generic_size_B;
 		out->varyings = varyings;               /* (handed to the fragment stage's compile) */
 		varyings = NULL;
