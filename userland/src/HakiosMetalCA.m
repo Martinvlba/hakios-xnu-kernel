@@ -101,6 +101,9 @@
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+/* (<mach/mach_vm.h> is not in the iPhone SDK; the call is in libSystem all the same) */
+extern kern_return_t mach_vm_read_overwrite(vm_map_t task, mach_vm_address_t address, mach_vm_size_t size, mach_vm_address_t data,
+    mach_vm_size_t *got);
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -549,11 +552,16 @@ _Static_assert(sizeof(struct MTLTargetDeviceArch) == 24 && __builtin_offsetof(st
 	void (^_deallocator)(void *, NSUInteger);
 	void *_callerBytes;
 	NSUInteger _callerLength;
+	const uint8_t *_noCopyBytes;        /* a no-copy buffer's memory, deallocator or not: perhaps gone by now (read with care) */
+	NSUInteger _noCopyLength;
 }
+- (void)hakiosSetNoCopy:(const void *)bytes length:(NSUInteger)length;
 - (instancetype)initWithHakiosDevice:(HakiosMetalDevice *)device length:(NSUInteger)length;
 - (void)hakiosSetDeallocator:(void (^)(void *, NSUInteger))deallocator bytes:(void *)bytes length:(NSUInteger)length;
 - (hakios_metal_buffer *)hakiosBuffer;
 - (void *)contents;
+- (const uint8_t *)hakiosCallerBytes;      /* a no-copy buffer's: the caller's memory, its until the deallocator has it back */
+- (NSUInteger)hakiosCallerLength;
 @end
 
 /*
@@ -594,7 +602,20 @@ _Static_assert(sizeof(struct MTLTargetDeviceArch) == 24 && __builtin_offsetof(st
 	MTLPixelFormat _ycbcrFormat;        /* ... and the private format it was asked as (500, 540), which it answers */
 	void *_deallocBytes;
 	NSUInteger _deallocLength;
+	/* a no-copy texture's bytes, looked at again when it is bound (see -hakiosWatchNoCopy) */
+	NSUInteger _watchPitch, _watchWidth, _watchHeight;
+	uint64_t _watchSum;
+	double _watchNext, _watchEvery;
+	const uint8_t *_watchFrom;          /* the caller's bytes: the texture's own no-copy ones, or a no-copy buffer's rows */
+	id _watchBuffer;                    /* ... that buffer (retained), whose GPU copy the rows go into first */
+	NSUInteger _watchOffset;
+	BOOL _watchIsCopy;                  /* the texture is a copy of the buffer's rows, not a view of them */
+	uint8_t *_watchScratch;             /* the rows as last read (the caller's memory may be gone: it is read through the kernel) */
 }
+- (void)hakiosWatchPitch:(NSUInteger)pitch width:(NSUInteger)width height:(NSUInteger)height;
+- (void)hakiosWatchBuffer:(id)buffer offset:(NSUInteger)offset pitch:(NSUInteger)pitch width:(NSUInteger)width height:(NSUInteger)height
+		   isCopy:(BOOL)isCopy;
+- (size_t)hakiosWatchLength;
 - (instancetype)initWithHakiosDevice:(HakiosMetalDevice *)device texture:(hakios_metal_texture *)texture
 			  descriptor:(MTLTextureDescriptor *)descriptor usage:(MTLTextureUsage)usage;
 - (hakios_metal_texture *)hakiosTexture;
@@ -3102,9 +3123,18 @@ hm_print_callers(const char *what)
 
 	HM_ONCE("a no-copy buffer was asked for; its bytes are copied into GPU memory, so neither side sees the other's later "
 		"writes\n");
+	{
+		static unsigned said;
+
+		if (said < 12 && hm_boot_arg_set("metal_nocopy_say=1")) {
+			said++;
+			hm_print("no-copy buffer: %lu bytes at %p, deallocator %s\n", (unsigned long)length, bytes, deallocator != nil ? "given" : "NONE");
+		}
+	}
 	if (buffer != nil && deallocator != nil) {
 		[buffer hakiosSetDeallocator:deallocator bytes:bytes length:length];
 	}
+	[buffer hakiosSetNoCopy:bytes length:length];
 	return buffer;
 }
 
@@ -3167,10 +3197,12 @@ hm_print_callers(const char *what)
 		[texture release];
 		return nil;
 	}
-	HM_ONCE("a no-copy texture was asked for; its bytes are copied into GPU memory, so neither side sees the other's later writes\n");
+	HM_ONCE("a no-copy texture was asked for; its bytes are copied into GPU memory, and looked at again when it is bound\n");
 	[(id<MTLTexture>)texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:bytes bytesPerRow:pitch];
 	if (deallocator != nil) {
 		[texture hakiosSetDeallocator:deallocator bytes:bytes length:length];
+		/* (the bytes are the texture's until its deallocator has them back: they may be read as long as it lives) */
+		[texture hakiosWatchPitch:pitch width:width height:height];
 	}
 	return texture;
 }
@@ -4757,6 +4789,9 @@ HM_REFUSES_OUT_LOUD
 }
 
 - (hakios_metal_buffer *)hakiosBuffer { return _buffer; }
+- (const uint8_t *)hakiosCallerBytes { return _noCopyBytes; }
+- (NSUInteger)hakiosCallerLength { return _noCopyLength; }
+- (void)hakiosSetNoCopy:(const void *)bytes length:(NSUInteger)length { _noCopyBytes = bytes; _noCopyLength = length; }
 
 - (void *)contents          { return hakios_metal_buffer_contents(_buffer); }
 - (NSUInteger)length        { return (NSUInteger)hakios_metal_buffer_length(_buffer); }
@@ -4790,7 +4825,7 @@ HM_REFUSES_OUT_LOUD
  * memory as they lie: a pitch and a start that are multiples of 64 bytes. Rows that are not -- QuartzCore's
  * copy_image_to_texture hands an image's own row bytes, whatever its width made them -- are copied into a texture of
  * the GPU's layout instead, as the texture is made: a copy then, not a view, so a later write to the buffer is not seen
- * through it. Its one caller writes the buffer before and never after. */
+ * through it. (Of a no-copy buffer the caller's rows are watched: -hakiosWatchBuffer:...) */
 - (id)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow
 {
 	MTLTextureUsage usage;
@@ -4803,10 +4838,14 @@ HM_REFUSES_OUT_LOUD
 	usage = [descriptor usage] == MTLTextureUsageUnknown ? (MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget)
 							      : [descriptor usage];
 	usage &= MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+	BOOL isCopy = NO;
+	HakiosMetalTexture *made;
+
 	texture = hakios_metal_texture_new_buffer(_buffer, (unsigned)[descriptor textureType], (unsigned)[descriptor pixelFormat],
 						  (unsigned)[descriptor width], (unsigned)[descriptor height], (unsigned)usage, (uint64_t)offset,
 						  (uint64_t)bytesPerRow);
 	if (texture == NULL && (bytesPerRow % 64 != 0 || offset % 64 != 0)) {
+		isCopy = YES;
 		const uint8_t *from = (const uint8_t *)hakios_metal_buffer_contents(_buffer) + offset;
 
 		HM_ONCE("a texture over a buffer's rows of %lu bytes from %lu, which the GPU cannot take as they lie, is a copy of them, "
@@ -4825,7 +4864,21 @@ HM_REFUSES_OUT_LOUD
 			 (unsigned long)bytesPerRow, (unsigned long)offset, hakios_metal_error());
 		return nil;
 	}
-	return [[HakiosMetalTexture alloc] initWithHakiosDevice:_device texture:texture descriptor:descriptor usage:usage];
+	made = [[HakiosMetalTexture alloc] initWithHakiosDevice:_device texture:texture descriptor:descriptor usage:usage];
+	{
+		static unsigned said;
+
+		if (said < 12 && hm_boot_arg_set("metal_nocopy_say=1")) {
+			said++;
+			hm_print("texture over a buffer: %lux%lu, rows of %lu from %lu, usage %#lx, %s, the buffer's caller bytes %p\n",
+				 (unsigned long)[descriptor width], (unsigned long)[descriptor height], (unsigned long)bytesPerRow, (unsigned long)offset,
+				 (unsigned long)[descriptor usage], isCopy ? "a copy" : "a view", _noCopyBytes);
+		}
+	}
+	if (_noCopyBytes != NULL && ([descriptor usage] & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget)) == 0) {
+		[made hakiosWatchBuffer:self offset:offset pitch:bytesPerRow width:[descriptor width] height:[descriptor height] isCopy:isCopy];
+	}
+	return made;
 }
 
 /* the SPI form QuartzCore sends: the image size beside the rows, which a single 2D level does not need */
@@ -4906,6 +4959,8 @@ HM_REFUSES_OUT_LOUD
 		hakios_metal_texture_free(_turnedSurface);
 	}
 	[_parent release];
+	[_watchBuffer release];
+	free(_watchScratch);
 	if (_deallocator != nil) {
 		_deallocator(_deallocBytes, _deallocLength);
 		Block_release(_deallocator);
@@ -5186,6 +5241,139 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 	_shadowSeed = seed;
 }
 
+/*
+ * A no-copy texture is the caller's memory on an iPhone, and QuartzCore uses it so: a layer's backing store that an
+ * application draws again at the same size (a label whose text changes) is drawn into the memory the render server
+ * already made a texture over, and nothing is said to Metal. The copy here went stale -- MetalTest's label showed an
+ * earlier scene's name for seconds, and since a backing store has two such memories in turn, an older text came back
+ * after a newer one. So the bytes are summed when the texture is bound, and copied again if the sum has moved: at
+ * every bind while they keep changing, then less and less often (every 0.25 s at the least) while they do not.
+ * metal_nocopy_watch=0: never (the copy as it was).
+ */
+static BOOL
+hm_read_with_care(const uint8_t *from, uint8_t *to, size_t length)
+{
+	mach_vm_size_t got = 0;
+
+	return mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(uintptr_t)from, length, (mach_vm_address_t)(uintptr_t)to, &got) ==
+	       KERN_SUCCESS && got == length;
+}
+
+static uint64_t
+hm_bytes_sum(const uint8_t *bytes, size_t length)
+{
+	uint64_t sum = 0x9e3779b97f4a7c15ull, word;
+	size_t at;
+
+	for (at = 0; at + 8 <= length; at += 8) {
+		memcpy(&word, bytes + at, 8);
+		sum = (sum ^ word) * 0x100000001b3ull;
+		sum = (sum << 23) | (sum >> 41);
+	}
+	for (; at < length; at++) {
+		sum = (sum ^ bytes[at]) * 0x100000001b3ull;
+	}
+	return sum;
+}
+
+- (void)hakiosWatchPitch:(NSUInteger)pitch width:(NSUInteger)width height:(NSUInteger)height
+{
+	static int on = -1;
+
+	if (on < 0) {
+		on = !hm_boot_arg_set("metal_nocopy_watch=0");
+	}
+	if (!on || _deallocBytes == NULL || pitch * height > _deallocLength) {
+		return;
+	}
+	_watchFrom = _deallocBytes;
+	_watchPitch = pitch;
+	_watchWidth = width;
+	_watchHeight = height;
+	_watchSum = hm_bytes_sum(_watchFrom, pitch * height);
+	_watchEvery = 0.03;
+	_watchNext = hm_now() + _watchEvery;
+}
+
+/* ... and the form QuartzCore's render server uses for a layer's backing store: a no-copy BUFFER over the memory, a
+ * texture over the buffer's rows. The buffer is a copy here, so the rows are looked at in the caller's memory, copied
+ * into the buffer when they have changed, and from there into the texture if that is a copy too. */
+- (void)hakiosWatchBuffer:(id)buffer offset:(NSUInteger)offset pitch:(NSUInteger)pitch width:(NSUInteger)width height:(NSUInteger)height
+		   isCopy:(BOOL)isCopy
+{
+	const uint8_t *bytes = [(HakiosMetalBuffer *)buffer hakiosCallerBytes];
+
+	if (hm_boot_arg_set("metal_nocopy_watch=0") || bytes == NULL || pitch == 0 ||
+	    offset + pitch * (height - 1) + width * hakios_metal_texture_bytes_per_pixel(_texture) > [(HakiosMetalBuffer *)buffer hakiosCallerLength]) {
+		return;
+	}
+	_watchBuffer = [buffer retain];
+	_watchOffset = offset;
+	_watchIsCopy = isCopy;
+	_watchFrom = bytes + offset;
+	_watchPitch = pitch;
+	_watchWidth = width;
+	_watchHeight = height;
+	_watchScratch = malloc([self hakiosWatchLength]);
+	if (_watchScratch == NULL || !hm_read_with_care(_watchFrom, _watchScratch, [self hakiosWatchLength])) {
+		_watchPitch = 0;                /* not watched */
+		return;
+	}
+	_watchSum = hm_bytes_sum(_watchScratch, [self hakiosWatchLength]);
+	_watchEvery = 0.03;
+	_watchNext = hm_now() + _watchEvery;
+}
+
+/* the rows' bytes: the last row only as far as its pixels go (a buffer may end there) */
+- (size_t)hakiosWatchLength
+{
+	return _watchBuffer != nil ? _watchPitch * (_watchHeight - 1) + _watchWidth * hakios_metal_texture_bytes_per_pixel(_texture)
+				   : _watchPitch * _watchHeight;
+}
+
+- (void)hakiosWatchNoCopy
+{
+	const double now = hm_now();
+	uint64_t sum;
+
+	if (now < _watchNext) {
+		return;
+	}
+	const uint8_t *rows = _watchFrom;
+
+	if (_watchScratch != NULL) {
+		/* (a buffer without a deallocator: its memory is the caller's to take away, so it is read by the kernel, which
+		 * says no where a load would fault) */
+		if (!hm_read_with_care(_watchFrom, _watchScratch, [self hakiosWatchLength])) {
+			_watchPitch = 0;
+			return;
+		}
+		rows = _watchScratch;
+	}
+	sum = hm_bytes_sum(rows, [self hakiosWatchLength]);
+	if (sum != _watchSum) {
+		static unsigned said;
+
+		_watchSum = sum;
+		_watchEvery = 0;
+		if (_watchBuffer != nil) {
+			memcpy((uint8_t *)hakios_metal_buffer_contents([(HakiosMetalBuffer *)_watchBuffer hakiosBuffer]) + _watchOffset, rows,
+			       [self hakiosWatchLength]);
+		}
+		if (_watchBuffer == nil || _watchIsCopy) {
+			(void)hakios_metal_texture_replace(_texture, 0, 0, (unsigned)_watchWidth, (unsigned)_watchHeight, rows, (uint64_t)_watchPitch);
+		}
+		if (said < 5) {
+			said++;
+			hm_print("a no-copy %s's bytes had changed (%lux%lu): copied again\n", _watchBuffer != nil ? "buffer" : "texture",
+				 (unsigned long)_watchWidth, (unsigned long)_watchHeight);
+		}
+	} else {
+		_watchEvery = _watchEvery < 0.03 ? 0.03 : _watchEvery * 2 > 0.25 ? 0.25 : _watchEvery * 2;
+	}
+	_watchNext = now + _watchEvery;
+}
+
 - (void)hakiosRefreshShadow
 {
 	if (_parent != nil) {
@@ -5193,6 +5381,10 @@ static uint8_t hm_clamp8(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_
 		return;
 	}
 	uint32_t seed;
+
+	if (_watchPitch != 0) {
+		[self hakiosWatchNoCopy];
+	}
 
 	if (_mirrored) {
 		/* (a mirror: the GPU's copy, kept by the core; only what the CPU did to the surface is news to it) */
