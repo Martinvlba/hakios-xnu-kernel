@@ -1,3 +1,7 @@
 # Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist): none. For a phone that runs Darwin as
 # its system (the Pixel 8a's boot_b), where the default rc.jobs's test programs would run at every start -- cpu_test 240
 # among them, which loads every core four minutes in. RC_JOBS=rc.jobs.quiet.
+# ... but one: the applications the image carries (share/system-apps: the Metal test application) told to
+# LaunchServices, once it is up -- registered already at every start after the first.
+/redwood/bin/rwtouch wait 25
+/redwood/bin/lsreg /private/preboot/redwood/share/system-apps/MetalTest.app
