@@ -2369,6 +2369,13 @@ hakios_springboard_init(void)
 		});
 		return;
 	}
+	/* The start's time bomb (boot-arg boot_bomb=SECONDS, hakios.akita_power.c): SpringBoard's main queue still
+	 * running 20 s after it began is "the system is up"; without this word the kernel restarts into the bootloader. */
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+		int zero = 0;
+
+		sysctlbyname("kern.hakios.boot_bomb", NULL, NULL, &zero, sizeof(zero));
+	});
 	caenv();
 	display_link_rates();
 	accessibility_settings();
