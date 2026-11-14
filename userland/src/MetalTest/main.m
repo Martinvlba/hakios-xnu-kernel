@@ -91,6 +91,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 @interface Scene : NSObject
 @property NSString *name, *expect, *failure;
 @property (copy) SceneDraw draw;
+@property BOOL overlay;         /* UIKit views are moved over the Metal layer while it shows (the controller's) */
 @end
 @implementation Scene
 @end
@@ -1113,6 +1114,83 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 			[e endEncoding];
 		};
 	}];
+
+	/* 22 */
+	[self add:@"Layered rendering, 4 layers in one pass" expect:@"four quarters: red, green (top), blue, yellow (bottom) -- ONE instanced draw sent each instance to its own layer of an array texture ([[render_target_array_index]]); a quarter black or all four the same = the layers were not told apart (the console says each layer's centre pixel)"
+	    setup:^SceneDraw(Renderer *r) {
+		id<MTLLibrary> library = [r library:@
+		    "struct LO { float4 pos [[position]]; float4 col; uint layer [[render_target_array_index]]; };\n"
+		    "struct LI { float4 pos [[position]]; float4 col; };\n"
+		    "vertex LO layer_v(uint vid [[vertex_id]], uint iid [[instance_id]]) {\n"
+		    "  LO o; float2 q = corner(vid); o.pos = float4(q * 2.0 - 1.0, 0.0, 1.0);\n"
+		    "  o.col = float4((iid == 0 || iid == 3) ? 1.0 : 0.0, (iid == 1 || iid == 3) ? 1.0 : 0.0, iid == 2 ? 1.0 : 0.0, 1.0);\n"
+		    "  o.layer = iid; return o; }\n"
+		    "fragment float4 layer_f(LI in [[stage_in]]) { return in.col; }\n"
+		    "fragment float4 layers_show_f(VO in [[stage_in]], texture2d_array<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+		    "  uint layer = (in.uv.x < 0.5 ? 0 : 1) + (in.uv.y < 0.5 ? 0 : 2); return t.sample(s, fract(in.uv * 2.0), layer); }\n"];
+		MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+
+		if (library != nil) {
+			pd.vertexFunction = [library newFunctionWithName:@"layer_v"];
+			pd.fragmentFunction = [library newFunctionWithName:@"layer_f"];
+		}
+		pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+		pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+		id<MTLRenderPipelineState> fill = [r pipeline:pd];
+		id<MTLRenderPipelineState> show = [r simple:library vertex:@"rect_v" fragment:@"layers_show_f" blend:NO];
+		td.textureType = MTLTextureType2DArray;
+		td.arrayLength = 4;
+		td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		td.storageMode = MTLStorageModeShared;
+		id<MTLTexture> layers = [r texture:td];
+		__block BOOL checked = NO;
+		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {
+			MTLRenderPassDescriptor *pass = [r passTo:layers clear:MTLClearColorMake(0, 0, 0, 1)];
+
+			pass.renderTargetArrayLength = 4;
+			id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+			if (fill != nil) {
+				[e setRenderPipelineState:fill];
+				[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:4];
+			}
+			[e endEncoding];
+			e = [cb renderCommandEncoderWithDescriptor:[r passTo:target clear:MTLClearColorMake(0.2, 0.2, 0.2, 1)]];
+			if (show != nil && layers != nil) {
+				[e setRenderPipelineState:show];
+				[e setFragmentSamplerState:nearest atIndex:0];
+				[e setFragmentTexture:layers atIndex:0];
+				[r rect:(vector_float4){ -1, -1, 2, 2 } colour:(vector_float4){ 1, 1, 1, 1 } time:t on:e];
+			}
+			[e endEncoding];
+			if (!checked && layers != nil) {
+				checked = YES;
+				[cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+					static const uint8_t want[4][3] = { { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 255, 0 } };
+					NSMutableString *line = [NSMutableString string];
+					BOOL right = YES;
+
+					for (NSUInteger i = 0; i < 4; i++) {
+						uint8_t px[4] = { 1, 2, 3, 4 };
+
+						[layers getBytes:px bytesPerRow:4 bytesPerImage:4 fromRegion:MTLRegionMake2D(32, 32, 1, 1) mipmapLevel:0 slice:i];
+						right = right && px[0] == want[i][0] && px[1] == want[i][1] && px[2] == want[i][2];
+						[line appendFormat:@" layer %lu: %u %u %u", (unsigned long)i, px[0], px[1], px[2]];
+					}
+					say([NSString stringWithFormat:@"layered rendering %@:%@ (expected 255 0 0, 0 255 0, 0 0 255, 255 255 0)", right ? @"RIGHT" : @"WRONG", line]);
+				}];
+			}
+		};
+	}];
+
+	/* 23 */
+	[self add:@"UIKit over Metal" expect:@"a slow colour wash (Metal) and over it, drawn by UIKit: a white box sliding left to right and back, smoothly (an animation the render server runs); in it a counter going up every frame (a layer redrawn in place); a spinning grey square (a transform set every frame). Nothing of them left behind, none frozen"
+	    setup:^SceneDraw(Renderer *r) {
+		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {
+			[[cb renderCommandEncoderWithDescriptor:[r passTo:target clear:MTLClearColorMake(0.25 + 0.2 * sin(t), 0.25 + 0.2 * sin(t * 0.7 + 2), 0.3 + 0.2 * sin(t * 0.4 + 4), 1)]] endEncoding];
+		};
+	}];
+	_scenes.lastObject.overlay = YES;
 }
 
 - (void)draw:(Scene *)scene into:(id<CAMetalDrawable>)drawable time:(float)t
@@ -1134,6 +1212,14 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	} else {
 		[[cb renderCommandEncoderWithDescriptor:[self passTo:drawable.texture clear:MTLClearColorMake(0.35, 0, 0, 1)]] endEncoding];
 	}
+	/* a command buffer Metal failed (a pass it would not encode, a fault on the GPU): the scene says so in red from then
+	 * on, instead of showing whatever was left on the screen */
+	[cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+		if (done.status == MTLCommandBufferStatusError && scene.failure == nil) {
+			scene.failure = [NSString stringWithFormat:@"a command buffer failed: %@", done.error.localizedDescription ?: @"no error given"];
+			say([NSString stringWithFormat:@"FAILED: %@: %@", scene.name, scene.failure]);
+		}
+	}];
 	[cb presentDrawable:drawable];
 	[cb commit];
 }
@@ -1159,6 +1245,58 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	CFTimeInterval _started, _fpsFrom;
 	double _fps;
 	BOOL _announced;
+	/* UIKit over Metal (a scene with .overlay) */
+	UIView *_box, *_spinner;
+	UILabel *_counter;
+	NSUInteger _counted;
+	/* pacing, a scene at a time: the display link's callbacks, the wait for a drawable, the drawing */
+	CFTimeInterval _lastCallback, _gapSum, _gapMin, _gapMax, _waitSum, _waitMax, _drawSum, _drawMax;
+	NSUInteger _callbacks, _lateGaps, _noDrawable;
+}
+
+- (void)pacingSay
+{
+	if (_callbacks > 1) {
+		say([NSString stringWithFormat:@"pacing of %lu/%lu: %lu callbacks, %.1f ms apart (%.1f .. %.1f; %lu over 12.5 ms), the drawable waited for "
+		     "%.2f ms (%.1f at most), drawing and commit %.2f ms (%.1f at most), %lu times no drawable", (unsigned long)_index + 1,
+		     (unsigned long)_renderer.scenes.count, (unsigned long)_callbacks, _gapSum / (double)(_callbacks - 1) * 1000, _gapMin * 1000,
+		     _gapMax * 1000, (unsigned long)_lateGaps, _waitSum / (double)_callbacks * 1000, _waitMax * 1000,
+		     _drawSum / (double)_callbacks * 1000, _drawMax * 1000, (unsigned long)_noDrawable]);
+	}
+	_callbacks = _lateGaps = _noDrawable = 0;
+	_gapSum = _gapMax = _waitSum = _waitMax = _drawSum = _drawMax = 0;
+	_gapMin = 1;
+	_lastCallback = 0;
+}
+
+- (void)overlayShow:(BOOL)show
+{
+	if (show && _box == nil) {
+		CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
+
+		_box = [[UIView alloc] initWithFrame:CGRectMake(10, h * 0.45, 150, 70)];
+		_box.backgroundColor = [UIColor colorWithWhite:1 alpha:0.85];
+		_counter = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 150, 70)];
+		_counter.font = [UIFont monospacedDigitSystemFontOfSize:26 weight:UIFontWeightBold];
+		_counter.textAlignment = NSTextAlignmentCenter;
+		_counter.textColor = UIColor.blackColor;
+		[_box addSubview:_counter];
+		[self.view addSubview:_box];
+		_spinner = [[UIView alloc] initWithFrame:CGRectMake(w / 2 - 40, h * 0.7, 80, 80)];
+		_spinner.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.9];
+		[self.view addSubview:_spinner];
+		_counted = 0;
+		[UIView animateWithDuration:1.5 delay:0 options:UIViewAnimationOptionRepeat | UIViewAnimationOptionAutoreverse |
+		 UIViewAnimationOptionCurveLinear animations:^{
+			self->_box.frame = CGRectMake(w - 160, h * 0.45, 150, 70);
+		} completion:nil];
+	} else if (!show && _box != nil) {
+		[_box.layer removeAllAnimations];
+		[_box removeFromSuperview];
+		[_spinner removeFromSuperview];
+		_box = _spinner = nil;
+		_counter = nil;
+	}
 }
 
 - (BOOL)prefersStatusBarHidden
@@ -1201,6 +1339,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	_layer.opaque = YES;
 	_renderer = [[Renderer alloc] initWithDevice:device format:_layer.pixelFormat];
 	_started = _fpsFrom = CACurrentMediaTime();
+	_gapMin = 1;
 	{
 		/* boot-arg metaltest_from=N: begin at scene N (a test run that is after the later ones) */
 		char args[1024] = "";
@@ -1243,6 +1382,7 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 
 - (void)next
 {
+	[self pacingSay];
 	_index = (_index + 1) % MAX(_renderer.scenes.count, 1u);
 	_started = CACurrentMediaTime();
 	_announced = NO;
@@ -1261,6 +1401,21 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	}
 	scene = _renderer.scenes[_index];
 	_frames++;
+	if (_lastCallback != 0) {
+		CFTimeInterval gap = now - _lastCallback;
+
+		_gapSum += gap;
+		_gapMin = MIN(_gapMin, gap);
+		_gapMax = MAX(_gapMax, gap);
+		_lateGaps += gap > 0.0125;
+	}
+	_lastCallback = now;
+	_callbacks++;
+	[self overlayShow:scene.overlay];
+	if (scene.overlay) {
+		_counter.text = [NSString stringWithFormat:@"%lu", (unsigned long)++_counted];
+		_spinner.transform = CGAffineTransformMakeRotation((CGFloat)(now - _started) * 2);
+	}
 	if (now - _fpsFrom >= 0.5 || !_announced) {
 		if (now - _fpsFrom >= 0.5) {
 			_fps = (double)_frames / (now - _fpsFrom);
@@ -1279,10 +1434,19 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 		}
 	}
 	@autoreleasepool {
+		CFTimeInterval t0 = CACurrentMediaTime(), t1;
 		id<CAMetalDrawable> drawable = [_layer nextDrawable];
 
+		t1 = CACurrentMediaTime();
+		_waitSum += t1 - t0;
+		_waitMax = MAX(_waitMax, t1 - t0);
 		if (drawable != nil) {
 			[_renderer draw:scene into:drawable time:(float)(now - _started)];
+			t0 = CACurrentMediaTime();
+			_drawSum += t0 - t1;
+			_drawMax = MAX(_drawMax, t0 - t1);
+		} else {
+			_noDrawable++;
 		}
 	}
 }
