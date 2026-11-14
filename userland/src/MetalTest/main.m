@@ -1252,6 +1252,11 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	/* pacing, a scene at a time: the display link's callbacks, the wait for a drawable, the drawing */
 	CFTimeInterval _lastCallback, _gapSum, _gapMin, _gapMax, _waitSum, _waitMax, _drawSum, _drawMax;
 	NSUInteger _callbacks, _lateGaps, _noDrawable;
+	/* ... and each drawable's time away: from its commit (with the present) to -nextDrawable handing its texture out
+	 * again -- the GPU's work, the compositor's frame, the panel, and whatever tells CAMetalLayer it is free */
+	void *_awayTexture[8];
+	CFTimeInterval _awayAt[8], _awaySum, _awayMin, _awayMax;
+	NSUInteger _awayCount, _awayKinds;
 }
 
 - (void)pacingSay
@@ -1262,7 +1267,15 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 		     (unsigned long)_renderer.scenes.count, (unsigned long)_callbacks, _gapSum / (double)(_callbacks - 1) * 1000, _gapMin * 1000,
 		     _gapMax * 1000, (unsigned long)_lateGaps, _waitSum / (double)_callbacks * 1000, _waitMax * 1000,
 		     _drawSum / (double)_callbacks * 1000, _drawMax * 1000, (unsigned long)_noDrawable]);
+		if (_awayCount != 0) {
+			say([NSString stringWithFormat:@"pacing of %lu/%lu: %lu drawables in turn; one was away %.1f ms on average (%.1f .. %.1f) "
+			     "from its commit to -nextDrawable handing it out again", (unsigned long)_index + 1, (unsigned long)_renderer.scenes.count,
+			     (unsigned long)_awayKinds, _awaySum / (double)_awayCount * 1000, _awayMin * 1000, _awayMax * 1000]);
+		}
 	}
+	_awaySum = _awayMax = 0;
+	_awayMin = 1;
+	_awayCount = 0;
 	_callbacks = _lateGaps = _noDrawable = 0;
 	_gapSum = _gapMax = _waitSum = _waitMax = _drawSum = _drawMax = 0;
 	_gapMin = 1;
@@ -1441,7 +1454,30 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 		_waitSum += t1 - t0;
 		_waitMax = MAX(_waitMax, t1 - t0);
 		if (drawable != nil) {
+			void *texture = (__bridge void *)drawable.texture;
+			NSUInteger slot = 8;
+
+			for (NSUInteger i = 0; i < 8; i++) {
+				if (_awayTexture[i] == texture) {
+					slot = i;
+					break;
+				}
+			}
+			if (slot < 8 && _awayAt[slot] != 0) {
+				CFTimeInterval away = t1 - _awayAt[slot];
+
+				_awaySum += away;
+				_awayMin = MIN(_awayMin, away);
+				_awayMax = MAX(_awayMax, away);
+				_awayCount++;
+			} else if (slot == 8 && _awayKinds < 8) {
+				slot = _awayKinds++;
+				_awayTexture[slot] = texture;
+			}
 			[_renderer draw:scene into:drawable time:(float)(now - _started)];
+			if (slot < 8) {
+				_awayAt[slot] = CACurrentMediaTime();
+			}
 			t0 = CACurrentMediaTime();
 			_drawSum += t0 - t1;
 			_drawMax = MAX(_drawMax, t0 - t1);
