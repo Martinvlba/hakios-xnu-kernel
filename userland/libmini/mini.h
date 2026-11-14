@@ -165,6 +165,7 @@ ssize_t getxattr(const char *path, const char *name, void *value, size_t size, u
 int     setxattr(const char *path, const char *name, const void *value, size_t size, uint32_t position, int options);
 int     ftruncate(int fd, off_t length);
 int     fsync(int fd);
+void    sync(void);
 ssize_t pread(int fd, void *buf, size_t count, off_t offset);
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 int     socket(int domain, int type, int protocol);

@@ -257,6 +257,12 @@ ftruncate(int fd, off_t length)
 	return (int)SC(SYS_ftruncate, fd, length, 0, 0, 0, 0);
 }
 
+void
+sync(void)
+{
+	(void)SC(36 /* SYS_sync */, 0, 0, 0, 0, 0, 0);
+}
+
 int
 fsync(int fd)
 {

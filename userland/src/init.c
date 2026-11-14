@@ -936,6 +936,154 @@ forget_gestalt_if_changed(void)
 	}
 }
 
+/*
+ * A tree copied, with its modes, owners and links (FROM may be relative to the working directory: the staged
+ * applications below are reached that way).
+ */
+static int
+copy_whole_tree(const char *from, const char *to, int depth, unsigned *files)
+{
+	char buf[4096], a[1100], b[1100];
+	struct stat st;
+	off_t position = 0;
+	ssize_t n;
+	int fd, ok = 1;
+
+	if (depth > 40 || lstat(from, &st) != 0) {
+		return 0;
+	}
+	if ((st.st_mode & S_IFMT) == S_IFLNK) {
+		n = readlink(from, buf, sizeof(buf) - 1);
+		if (n <= 0) {
+			return 0;
+		}
+		buf[n] = 0;
+		unlink(to);
+		ok = symlink(buf, to) == 0;
+		lchown(to, (int)st.st_uid, (int)st.st_gid);
+		return ok;
+	}
+	if ((st.st_mode & S_IFMT) != S_IFDIR) {
+		/* (a megabyte a write: copy_file's 4 KB at a time took the 400 MB of the staged applications over ten
+		 * minutes on the data volume, the phone without its log all the while) */
+		static char big[1 << 20];
+		int in = open(from, O_RDONLY, 0), out;
+
+		(*files)++;
+		if (in < 0) {
+			return 0;
+		}
+		out = open(to, O_WRONLY | O_CREAT | O_TRUNC, (int)(st.st_mode & 07777));
+		if (out >= 0) {
+			while ((n = read(in, big, sizeof(big))) > 0) {
+				ok = ok && write(out, big, (size_t)n) == n;
+			}
+			close(out);
+			ok = ok && n == 0 && chmod(to, (int)(st.st_mode & 07777)) == 0 && chown(to, (int)st.st_uid, (int)st.st_gid) == 0;
+		} else {
+			ok = 0;
+		}
+		close(in);
+		return ok;
+	}
+	if (mkdir(to, (int)(st.st_mode & 07777)) != 0 && errno != 17 /* EEXIST */) {
+		return 0;
+	}
+	fd = open(from, O_RDONLY | O_DIRECTORY, 0);
+	if (fd < 0) {
+		return 0;
+	}
+	while (ok && (n = getdirentries(fd, buf, sizeof(buf), &position)) > 0) {
+		for (ssize_t at = 0; ok && at < n; at += ((struct dirent *)(buf + at))->d_reclen) {
+			const char *name = ((struct dirent *)(buf + at))->d_name;
+			size_t la = strlen(from), lb = strlen(to), ln = strlen(name);
+
+			if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+				continue;
+			}
+			if (la + ln + 2 > sizeof(a) || lb + ln + 2 > sizeof(b)) {
+				ok = 0;
+				break;
+			}
+			memcpy(a, from, la);
+			a[la] = '/';
+			memcpy(a + la + 1, name, ln + 1);
+			memcpy(b, to, lb);
+			b[lb] = '/';
+			memcpy(b + lb + 1, name, ln + 1);
+			ok = copy_whole_tree(a, b, depth + 1, files);
+		}
+	}
+	close(fd);
+	chmod(to, (int)(st.st_mode & 07777));
+	chown(to, (int)st.st_uid, (int)st.st_gid);
+	return ok;
+}
+
+/*
+ * THE SYSTEM'S DELETABLE APPLICATIONS (Mail, Calendar, Maps, Notes ...; 11-14). Apple's system volume keeps them in
+ * /private/var/staged_system_apps -- 32 bundles, 400 MB in 16.7.16 -- and a restore puts that directory on the data
+ * volume, where installd installs them from at the first start. Here the data volume is ours and is mounted OVER
+ * the system volume's /private/var: the staged bundles were out of sight, installd made placeholders of a few
+ * hundred kilobytes each (4.5 MB for all 32 under /private/var/containers/Bundle/Application), and their icons
+ * said "Waiting..." for ever. So: the working directory is put into the system volume's directory before the data
+ * volume is mounted over it (it stays reachable through "." afterwards), and, once, the tree is copied to the data
+ * volume; MobileInstallation's note of the build it last migrated for is taken away, so that installd does its
+ * first-start work again with the bundles there. /private/var/db/hakios-staged-apps says it is done.
+ */
+#define STAGED_APPS     "/private/var/staged_system_apps"
+#define STAGED_DONE     "/private/var/db/hakios-staged-apps"
+static int staged_reachable;
+
+static void
+staged_apps_before_mount(void)
+{
+	staged_reachable = chdir(STAGED_APPS) == 0;
+}
+
+static void
+staged_apps_after_mount(void)
+{
+	static const char *const again[] = { "/private/var/installd/Library/MobileInstallation/LastBuildInfo.plist",
+		                             "/private/var/installd/Library/MobileInstallation/MigrationInfo.plist" };
+	struct stat st;
+	unsigned files = 0;
+	int ok, fd;
+
+	if (var_kept && staged_reachable && lstat(STAGED_DONE, &st) != 0) {
+		empty_tree(STAGED_APPS, 0);             /* (a copy a restart cut short) */
+		ok = copy_whole_tree(".", STAGED_APPS, 0, &files);
+		sync();                                 /* half a gigabyte: on the flash before anything else is begun */
+		if (ok) {
+			for (unsigned i = 0; i < sizeof(again) / sizeof(again[0]); i++) {
+				unlink(again[i]);
+			}
+			fd = open(STAGED_DONE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			if (fd >= 0) {
+				close(fd);
+			}
+		}
+		sync();
+		printf("  the system's staged applications: %u files copied to the data volume%s\n", files,
+		    ok ? "; installd will install them" : " -- NOT ALL OF THEM (the copy stopped)");
+	}
+	/* ... and (the copy alone did not do it: the data migrator, whose SystemAppMigrator has installd install the
+	 * staged bundles, says "Migration Needed? NO" once it has run for a build) its record of the last system version
+	 * goes too, once: the next start migrates as after an update. */
+	if (var_kept && lstat(STAGED_DONE, &st) == 0 && lstat(STAGED_DONE "-migrate", &st) != 0) {
+		unlink("/private/var/mobile/Library/Preferences/com.apple.migration.plist");
+		for (unsigned i = 0; i < sizeof(again) / sizeof(again[0]); i++) {
+			unlink(again[i]);
+		}
+		fd = open(STAGED_DONE "-migrate", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd >= 0) {
+			close(fd);
+		}
+		printf("  the data migrator's record of the last system version taken away: it migrates again (the staged applications)\n");
+	}
+	chdir("/");
+}
+
 static void
 mount_writable(void)
 {
@@ -947,6 +1095,7 @@ mount_writable(void)
 	struct stat st;
 
 	printf("\n-- writable filesystem --\n");
+	staged_apps_before_mount();
 	var_kept = mount_data_volume();
 	if (var_kept) {
 		static const char *const own[] = { "/private/var/tmp", "/private/var/run", "/private/var/vm" };
@@ -1003,6 +1152,7 @@ mount_writable(void)
 		}
 		line = end + 1;
 	}
+	staged_apps_after_mount();
 	/*
 	 * logd takes a log directory without this marker for one left by an
 	 * older system, to be converted by logd_helper; these are brand new.

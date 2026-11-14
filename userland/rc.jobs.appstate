@@ -1,0 +1,9 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Where the system's deletable applications are (RC_JOBS=rc.jobs.appstate): the staged copies, what installd has put
+# into the containers, and MobileInstallation's own record -- their icons say "Waiting..." on 16.7.16.
+/redwood/bin/rwtouch wait 40
+/redwood/bin/vol_ls ls /private/var/staged_system_apps /private/var/containers/Bundle/Application /private/var/containers/Bundle /private/var/mobile/Library/MobileInstallation /private/var/installd/Library/MobileInstallation /private/var/db/MobileIdentityData /private/var/installd/Library/Caches
+/redwood/bin/vol_ls du /private/var/containers/Bundle 2 256
+/redwood/bin/vol_ls du /private/var/staged_system_apps 1 100000
+/redwood/bin/vol_ls ls /private/var/db
+/redwood/bin/vol_ls cat /private/var/installd/Library/MobileInstallation/LastBuildInfo.plist 600
