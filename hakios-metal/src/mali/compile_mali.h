@@ -76,6 +76,7 @@ struct mali_kernel_binary {
 	 * size taken from them); where in CODE its variant without that write begins, for everything that is not points
 	 * (0: none needed); and whether the entries are extended for another reason */
 	unsigned writes_psiz, no_psiz_offset, extended_fifo;
+	unsigned writes_layer;          /* a [[render_target_array_index]]: which layer of a layered pass a primitive goes to */
 	void *varyings;
 	unsigned num_resources;
 	struct mali_kernel_resource resources[MALI_KERNEL_MAX_RESOURCES];

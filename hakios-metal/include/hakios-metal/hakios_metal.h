@@ -399,6 +399,11 @@ struct hakios_metal_render_pass {
 	unsigned color0_slice;                    /* color0's layer, face or plane drawn into (MTLRenderPassAttachmentDescriptor.slice) */
 	unsigned depth_level;                     /* the depth attachment's mip level drawn into */
 	unsigned depth_slice;                     /* a depth 2D array's layer drawn into (MTLRenderPassDepthAttachmentDescriptor.slice) */
+	/* LAYERED RENDERING (MTLRenderPassDescriptor.renderTargetArrayLength): 0 or 1 none; 2 to 8: color0 is an array or
+	 * cube texture and each primitive goes to the layer its vertex function's [[render_target_array_index]] names
+	 * (layer 0 without one). Served on the Mali for one colour attachment, no depth or stencil, one sample; a
+	 * pass that loads what was in its layers gets them cleared instead (not loaded yet). */
+	unsigned layers;
 };
 
 /* One draw: PROGRAM over VERTEX_COUNT vertices from VERTEX_START, PRIMITIVE an MTLPrimitiveType (Point 0, Line 1,
