@@ -573,7 +573,8 @@ fi
 # for reading its traps on the PC and stays out.
 if [ -f ../fw-wifi/fw_bcmdhd.bin_4383_a3 ]; then
 	mkdir -p root/fw
-	for f in fw_bcmdhd.bin_4383_a3 bcmdhd.cal_4383_a3 bcmdhd_clm.blob_4383_a3 bcmdhd_txcap.blob_4383_a3; do
+	# (BCM.hcd: the same chip's Bluetooth patch, from /vendor/firmware/brcm -- devices/akita/drivers/bluetooth; 0.6 MB)
+	for f in fw_bcmdhd.bin_4383_a3 bcmdhd.cal_4383_a3 bcmdhd_clm.blob_4383_a3 bcmdhd_txcap.blob_4383_a3 BCM.hcd; do
 		[ -f ../fw-wifi/$f ] && install -m 0644 ../fw-wifi/$f root/fw/
 	done
 fi
