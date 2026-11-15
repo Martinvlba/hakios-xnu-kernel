@@ -5432,7 +5432,10 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     Job j = {};
     j.shader = DRAW;
     j.dst = cb->draws.size();
-    cb->draws.push_back(dj);
+    // (moved, not copied: a copy allocated each of the draw's vectors of push constants again -- the aquarium's 615
+    // draws a frame, with the queue's thread freeing the frame before's at the same time and both waiting for the
+    // allocator's lock; the scalars read below stay as they are)
+    cb->draws.push_back(std::move(dj));
     cb->blits.push_back(j);
     p->retain();
     cb->programs.push_back(p);
