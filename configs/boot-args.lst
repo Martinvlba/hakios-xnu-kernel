@@ -20,6 +20,8 @@ adsp_pause	k
 adsp_return	k
 adsp_step	k
 adsp_wait	k
+aks_say	k
+aks_tell	k
 apfs_cheap	k
 apfs_check	k
 apfs_chunk	k
@@ -82,6 +84,11 @@ cam_vblank	k
 cb_watch	u
 cc_fade	u
 cpufreq	k
+cpuidle	k
+cpuidle_cpus	k
+cpuidle_probe	k
+cpuidle_state	k
+cpuidle_us	k
 cpuload	k
 cpumask	l
 cpus	l
@@ -96,6 +103,7 @@ fb_beat	k
 fb_ca_hz	k
 fb_diff	k
 fb_filter	k
+fb_frameinfo	k
 fb_hz	k
 fb_intf	k
 fb_measure	k
@@ -157,12 +165,14 @@ hakios_kver	k
 haptic	k
 haptic_effect	k
 hv_wdt_pet	k
+idle_trace	u
 loader_return_after	kl
 m2v_utrace	u
 machine_name	k
 membench	k
 metal	ku
 metal_all	u
+metal_arena	u
 metal_defer	u
 metal_dump	u
 metal_fps	u
@@ -171,10 +181,18 @@ metal_gmem_draws	u
 metal_gmem_off	u
 metal_luma_boost	u
 metal_m2v	u
+metal_nocopy_say	u
+metal_nocopy_watch	u
+metal_passsay	u
 metal_plugin	k
+metal_profile	u
+metal_sample	u
+metal_sample_in	u
 metal_skip	u
+metal_stderr	u
 metal_trace	u
 metal_watch	u
+metaltest_from	u
 mic	k
 mic_adc	k
 mic_input	k
@@ -245,6 +263,7 @@ regtrace	k
 return_cpu	k
 return_panic	k
 root_apfs	u
+sb_authsay	u
 sb_cube	u
 sb_debug	u
 sb_delay	u
@@ -271,6 +290,7 @@ sound_guard_as	k
 sound_pause	k
 sound_secs	k
 speaker_probe	k
+staged_again	u
 surf_clear	k
 surf_wrap	k
 surftrace	k
@@ -279,6 +299,7 @@ switcher_wallpaper	u
 syssleep	k
 systrace	k
 systrace_name	k
+telephony_retry	u
 thermal	k
 thermal_log	k
 thermal_poll	k

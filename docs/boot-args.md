@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **364 arguments**: 289 read by the kernel, 14 by the loader, 73 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **385 arguments**: 297 read by the kernel, 14 by the loader, 86 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (84)
+## GPU and display (85)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -30,6 +30,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `fb_ca_hz` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_CA_HZ` |  |
 | `fb_diff` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_DIFF` |  |
 | `fb_filter` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_FILTER` |  |
+| `fb_frameinfo` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_FRAMEINFO` |  |
 | `fb_hz` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_HZ` |  |
 | `fb_intf` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_INTF` |  |
 | `fb_measure` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_MEASURE` |  |
@@ -403,10 +404,12 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (39)
+## User space (59)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `aks_say` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_SAY` |  |
+| `aks_tell` | K | `MiniAppleKeyStore.cpp` | `CONFIG_AKS_TELL` |  |
 | `autounlock` | U | `inject_sb.c` | `CONFIG_AUTOUNLOCK` |  |
 | `bt` | K | `hakios.bt.c` | `CONFIG_BT` |  |
 | `bt_again` | K | `hakios.bt.c` | `CONFIG_BT_AGAIN` |  |
@@ -416,14 +419,21 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `caenv` | U | `inject.c`, `inject_sb.c` | `CONFIG_CAENV` |  |
 | `cb_watch` | U | `inject.c` | `CONFIG_CB_WATCH` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
+| `cpuidle` | K | `psci_smp.c` | `CONFIG_CPUIDLE` |  |
+| `cpuidle_cpus` | K | `psci_smp.c` | `CONFIG_CPUIDLE_CPUS` |  |
+| `cpuidle_probe` | K | `psci_smp.c` | `CONFIG_CPUIDLE_PROBE` |  |
+| `cpuidle_state` | K | `psci_smp.c` | `CONFIG_CPUIDLE_STATE` |  |
+| `cpuidle_us` | K | `psci_smp.c` | `CONFIG_CPUIDLE_US` |  |
 | `display_hz` | U | `inject_cube.m` | `CONFIG_DISPLAY_HZ` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
 | `glsb3` | U | `inject.c` | `CONFIG_GLSB3` |  |
 | `glyes` | U | `inject.c` | `CONFIG_GLYES` |  |
+| `idle_trace` | U | `inject_sb.c` | `CONFIG_IDLE_TRACE` |  |
 | `m2v_utrace` | U | `HakiosMetalCA.m` | `CONFIG_M2V_UTRACE` |  |
 | `metal_all` | U | `HakiosMetalCA.m` | `CONFIG_METAL_ALL` |  |
+| `metal_arena` | U | `HakiosMetalCA.m` | `CONFIG_METAL_ARENA` |  |
 | `metal_defer` | U | `HakiosMetalCA.m` | `CONFIG_METAL_DEFER` |  |
 | `metal_dump` | U | `HakiosMetalCA.m` | `CONFIG_METAL_DUMP` |  |
 | `metal_fps` | U | `HakiosMetalCA.m` | `CONFIG_METAL_FPS` |  |
@@ -432,14 +442,25 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `metal_gmem_off` | U | `HakiosMetalCA.m` | `CONFIG_METAL_GMEM_OFF` |  |
 | `metal_luma_boost` | U | `HakiosMetalCA.m` | `CONFIG_METAL_LUMA_BOOST` |  |
 | `metal_m2v` | U | `HakiosMetalCA.m` | `CONFIG_METAL_M2V` |  |
+| `metal_nocopy_say` | U | `HakiosMetalCA.m` | `CONFIG_METAL_NOCOPY_SAY` |  |
+| `metal_nocopy_watch` | U | `HakiosMetalCA.m` | `CONFIG_METAL_NOCOPY_WATCH` |  |
+| `metal_passsay` | U | `HakiosMetalCA.m` | `CONFIG_METAL_PASSSAY` |  |
+| `metal_profile` | U | `HakiosMetalCA.m` | `CONFIG_METAL_PROFILE` |  |
+| `metal_sample` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SAMPLE` |  |
+| `metal_sample_in` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SAMPLE_IN` |  |
 | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
+| `metal_stderr` | U | `HakiosMetalCA.m` | `CONFIG_METAL_STDERR` |  |
 | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
 | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
+| `metaltest_from` | U | `main.m` | `CONFIG_METALTEST_FROM` |  |
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
+| `sb_authsay` | U | `inject_sb.c` | `CONFIG_SB_AUTHSAY` |  |
 | `sb_cube` | U | `inject_sb.c` | `CONFIG_SB_CUBE` |  |
 | `sb_debug` | U | `inject_sb.c` | `CONFIG_SB_DEBUG` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
+| `staged_again` | U | `init.c` | `CONFIG_STAGED_AGAIN` |  |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
+| `telephony_retry` | U | `inject_sb.c` | `CONFIG_TELEPHONY_RETRY` |  |
 | `tu_debug` | U | `HakiosMetalCA.m` | `CONFIG_TU_DEBUG` |  |
 | `ui_lite` | U | `inject_sb.c` | `CONFIG_UI_LITE` |  |
 | `var_hfs` | U | `init.c` | `CONFIG_VAR_HFS` |  |

@@ -19,6 +19,8 @@ ADSP_PAUSE	arg	adsp_pause	Audio and battery	k	hakios.adsp.c
 ADSP_RETURN	arg	adsp_return	Audio and battery	k	hakios.adsp.c	
 ADSP_STEP	arg	adsp_step	Audio and battery	k	hakios.adsp.c	
 ADSP_WAIT	arg	adsp_wait	Audio and battery	k	hakios.adsp.c	
+AKS_SAY	arg	aks_say	User space	k	MiniAppleKeyStore.cpp	every request said -- who, the selector, the scalars, the structure's size and first bytes
+AKS_TELL	arg	aks_tell	User space	k	MiniAppleKeyStore.cpp	
 APFS_CHEAP	arg	apfs_cheap	Storage and APFS	k	apfs_vfsops.c	
 APFS_CHECK	arg	apfs_check	Storage and APFS	k	hakios.apfs_check.c	walk the whole volume and print only the totals
 APFS_CHUNK	arg	apfs_chunk	Storage and APFS	k	hakios.apfs_check.c	
@@ -75,6 +77,11 @@ CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c
 CAM_VBLANK	arg	cam_vblank	Cameras	k	hakios.camera.c	
 CB_WATCH	arg	cb_watch	User space	u	inject.c	
 CC_FADE	arg	cc_fade	User space	u	inject_sb.c	
+CPUIDLE	arg	cpuidle	User space	k	psci_smp.c	
+CPUIDLE_CPUS	arg	cpuidle_cpus	User space	k	psci_smp.c	which cores (default every one but the boot processor)
+CPUIDLE_PROBE	arg	cpuidle_probe	User space	k	psci_smp.c	
+CPUIDLE_STATE	arg	cpuidle_state	User space	k	psci_smp.c	
+CPUIDLE_US	arg	cpuidle_us	User space	k	psci_smp.c	
 CPULOAD	arg	cpuload	CPU, memory and boot	k	hakios.cpufreq.c	every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py shows it per gesture)
 CPUMASK	arg	cpumask	Loader	l	loader.c	
 DDR	arg	ddr	CPU, memory and boot	k	hakios.cpufreq.c	the memory's bus clock managers ("BCM") in the command database the boot loader left, with what is needed to vote for bandwidth on them -- only read
@@ -87,6 +94,7 @@ FB_BEAT	arg	fb_beat	GPU and display	k	MiniIOMobileFramebuffer.cpp
 FB_CA_HZ	arg	fb_ca_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	the refresh rate told to CoreAnimation (IOMFBDisplayRefresh) when it is not to be fb_hz's
 FB_DIFF	arg	fb_diff	GPU and display	k	MiniIOMobileFramebuffer.cpp	which pixels of the panel each frame changed (it costs: the panel's memory is slow to read)
 FB_FILTER	arg	fb_filter	GPU and display	k	MiniIOMobileFramebuffer.cpp	the picture is scaled to the panel nearest neighbour, as it once was
+FB_FRAMEINFO	arg	fb_frameinfo	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_INTF	arg	fb_intf	GPU and display	k	MiniIOMobileFramebuffer.cpp	the registers of the display interface the panel is on, for a port
 FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how often the panel is really refreshed
@@ -144,11 +152,13 @@ GPU_EXACT	arg	gpu_exact	GPU and display	k	hakios.adreno.c
 GPU_KEEP	arg	gpu_keep	GPU and display	k	hakios.gpu.cpp	
 GPU_LOG	arg	gpu_log	GPU and display	k	hakios.adreno.c	
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
+IDLE_TRACE	arg	idle_trace	User space	u	inject_sb.c	
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	
 METAL	arg	metal	GPU and display	ku	HakiosMetal.m,MiniIOMobileFramebuffer.cpp,inject_sb.c	only the program metal_test (userland/src/metal_test.m): the safe level, for seeing what Metal does with the device
 METAL_ALL	arg	metal_all	User space	u	HakiosMetalCA.m	
+METAL_ARENA	arg	metal_arena	User space	u	HakiosMetalCA.m	
 METAL_DEFER	arg	metal_defer	User space	u	HakiosMetalCA.m	this queue's command buffers recorded by a thread of hakios-metal's own (deferred recording), so that the window server's render thread does not wait
 METAL_DUMP	arg	metal_dump	User space	u	HakiosMetalCA.m	
 METAL_FPS	arg	metal_fps	User space	u	HakiosMetalCA.m	each draw of a sysmem pass timed alone, by program (only sysmem passes are: without metal_gmem=1)
@@ -157,10 +167,18 @@ METAL_GMEM_DRAWS	arg	metal_gmem_draws	User space	u	HakiosMetalCA.m	GMEM for a pa
 METAL_GMEM_OFF	arg	metal_gmem_off	User space	u	HakiosMetalCA.m	
 METAL_LUMA_BOOST	arg	metal_luma_boost	User space	u	HakiosMetalCA.m	
 METAL_M2V	arg	metal_m2v	User space	u	HakiosMetalCA.m	
+METAL_NOCOPY_SAY	arg	metal_nocopy_say	User space	u	HakiosMetalCA.m	
+METAL_NOCOPY_WATCH	arg	metal_nocopy_watch	User space	u	HakiosMetalCA.m	never (the copy as it was).
+METAL_PASSSAY	arg	metal_passsay	User space	u	HakiosMetalCA.m	the first 150 draws of a process other than the window server, each with the state that decides whether its pixels arrive
 METAL_PLUGIN	arg	metal_plugin	GPU and display	k	MiniIOMobileFramebuffer.cpp	Metal makes the bundle's path of this name
+METAL_PROFILE	arg	metal_profile	User space	u	HakiosMetalCA.m	
+METAL_SAMPLE	arg	metal_sample	User space	u	HakiosMetalCA.m	
+METAL_SAMPLE_IN	arg	metal_sample_in	User space	u	HakiosMetalCA.m	
 METAL_SKIP	arg	metal_skip	User space	u	HakiosMetalCA.m	
+METAL_STDERR	arg	metal_stderr	User space	u	HakiosMetalCA.m	
 METAL_TRACE	arg	metal_trace	User space	u	HakiosMetalCA.m	
 METAL_WATCH	arg	metal_watch	User space	u	inject.c	
+METALTEST_FROM	arg	metaltest_from	User space	u	main.m	begin at scene N (a test run that is after the later ones)
 MIC_ADC	arg	mic_adc	Audio and battery	k	hakios.mic.c	
 MIC_INPUT	arg	mic_input	Audio and battery	k	hakios.mic.c	
 MIC_MAIN	arg	mic_main	Audio and battery	k	hakios.mic.c	
@@ -224,6 +242,7 @@ REGTRACE	arg	regtrace	CPU, memory and boot	k	(patch)
 RETURN_CPU	arg	return_cpu	CPU, memory and boot	k	loader_return.c	
 RETURN_PANIC	arg	return_panic	CPU, memory and boot	k	loader_return.c	
 ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
+SB_AUTHSAY	arg	sb_authsay	User space	u	inject_sb.c	
 SB_CUBE	arg	sb_cube	User space	u	inject_sb.c	a cube tumbling over the home screen with the panel's frame rate under it (src/inject_cube.m)
 SB_DEBUG	arg	sb_debug	User space	u	inject_sb.c	a frame counter and the uptime under the status bar, for slow-motion videos (src/inject_cube.m)
 SERIAL	arg	serial	Loader	l	loader.c	
@@ -247,6 +266,7 @@ SOUND_GUARD_AS	arg	sound_guard_as	Audio and battery	k	hakios.sound.c
 SOUND_PAUSE	arg	sound_pause	Audio and battery	k	hakios.sound.c	
 SOUND_SECS	arg	sound_secs	Audio and battery	k	hakios.sound.c	
 SPEAKER_PROBE	arg	speaker_probe	Audio and battery	k	hakios.speaker.c	reads registers and nothing else: the pins, the power names (below)
+STAGED_AGAIN	arg	staged_again	User space	u	init.c	
 SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
 SURF_WRAP	arg	surf_wrap	GPU and display	k	MiniIOSurface.cpp	surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
 SURFTRACE	arg	surftrace	GPU and display	k	MiniIOSurface.cpp	log the first N surfaces created (default 24)
@@ -255,6 +275,7 @@ SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c
 SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)	
 SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
 SYSTRACE_NAME	arg	systrace_name	CPU, memory and boot	k	(patch)	
+TELEPHONY_RETRY	arg	telephony_retry	User space	u	inject_sb.c	
 THERMAL_LOG	arg	thermal_log	Chip, thermal and PMIC	k	hakios.thermal.c	a summary line this often (0: only on a rise; 60)
 THERMAL_TM0	arg	thermal_tm0	Chip, thermal and PMIC	k	hakios.thermal.c	
 THERMAL_TM1	arg	thermal_tm1	Chip, thermal and PMIC	k	hakios.thermal.c	
