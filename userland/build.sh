@@ -148,6 +148,7 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
 /redwood/lib/libhakios.lockdown.dylib lockdownd
+/redwood/lib/libhakios.bt.dylib BlueTool
 /redwood/lib/libhakios.tweaks.dylib Preferences"}
 mkdir -p obj
 
@@ -307,6 +308,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.lockdown.dylib -framework CoreFoundation \
 			-F${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks -framework MobileActivation \
 			-o obj/libhakios.lockdown.dylib src/inject_lockdown.c
+		# ... and inside BlueTool: bluetoothd's "boot" and "init" answered as done (src/inject_bt.c)
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.bt.dylib -o obj/libhakios.bt.dylib src/inject_bt.c
 		$DYN -O2 -dynamiclib -install_name /redwood/lib/libhakios.media.dylib -framework CoreFoundation -framework CoreMedia \
 			-framework CoreVideo -framework IOSurface -lobjc \
 			-o obj/libhakios.media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
@@ -453,6 +456,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	mkdir -p root/lib
 	cp obj/libhakios.dylib obj/libhakios.sb.dylib root/lib/
 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
+	[ -f obj/libhakios.bt.dylib ] && cp obj/libhakios.bt.dylib root/lib/
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.lockdown.dylib ] && cp obj/libhakios.lockdown.dylib root/lib/
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/

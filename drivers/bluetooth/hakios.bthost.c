@@ -44,7 +44,7 @@ void hakios_bthost_written(const uint8_t *bytes, unsigned length);    /* called 
 
 #define SKEL_TXQ                8192u           /* what bluetoothd has written and the controller has not been given yet */
 #define SKEL_FRAME              4096u           /* one packet from the controller */
-#define SKEL_SAID_PACKETS       96u             /* of each direction, said in the log: the host buffer is 64 KB and bluetoothd's own lines want it */
+#define SKEL_SAID_PACKETS       400u            /* of each direction, said in the log: the host buffer is 64 KB and bluetoothd's own lines want it */
 #define SKEL_ANSWER_MS          2000u           /* a command of the probe is given this long */
 
 /*
@@ -220,6 +220,37 @@ skel_quirks(uint8_t *packet, unsigned length)
 		}
 		if (cal) {
 			packet[7] = 0x51;               /* the table's number (a guess that bluetoothd took) */
+		}
+		return 7 + extra;
+	}
+	/*
+	 * The same for a controller that says it the other way -- Command Complete with status 1 (the Pixel 8a's BCM4383 to
+	 * 0xfce2, 0xfd47, 0xfd48: Apple's vendor commands are for Apple's own Broadcom chips, and this one has not got them
+	 * all): answered as done, with the same data after the status.
+	 */
+	if (length > 7 && packet[0] == 0x04 && packet[1] == 0x0e && (packet[5] >> 2) == 0x3f && packet[6] == 0x01) {
+		/* (one that came with bytes after its status, 0xfce9 on the BCM4383: the status alone) */
+		packet[6] = 0x00;
+		return length;
+	}
+	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 && (packet[5] >> 2) == 0x3f && packet[6] == 0x01) {
+		const bool antenna = packet[4] == 0xe2 && packet[5] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36);
+		const bool cal = packet[4] == 0x1b && packet[5] == 0xfd;
+		const bool data = antenna || cal || (packet[4] == 0x48 && packet[5] == 0xfd);
+		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 0));
+		static uint32_t said;
+
+		if (said++ < 16) {
+			say("vendor command %#x: the controller says it does not know it; answered as done (%u bytes of data)",
+			    packet[4] | (packet[5] << 8), extra);
+		}
+		packet[2] = (uint8_t)(4 + extra);
+		packet[6] = 0x00;
+		for (unsigned i = 0; i < extra; i++) {
+			packet[7 + i] = 0x00;
+		}
+		if (cal) {
+			packet[7] = 0x51;
 		}
 		return 7 + extra;
 	}
@@ -545,6 +576,21 @@ skel_bridge(void)
 				skel_vsc_sub = skel_packet[4];
 			}
 			skel_dump("out", skel_packet, n, &skel_said_out);
+			/*
+			 * LE_Read_Periodic_Advertiser_List_Size (0x204a) is not given to the controller: it is one of the EXTENDED
+			 * advertising commands, and a controller that keeps to the specification refuses the legacy ones after it
+			 * (Command Disallowed, 0x0c, to LE_Set_Scan_Parameters 0x200b -- at which bluetoothd restarts, every ten
+			 * seconds: the Pixel 8a's BCM4383, 11-15). bluetoothd asks it once and then uses the legacy commands, which
+			 * Apple's controllers take. Answered here: done, a list of 6 (what this controller said).
+			 */
+			if (n == 4 && skel_packet[0] == 1 && skel_packet[1] == 0x4a && skel_packet[2] == 0x20) {
+				static const uint8_t answer[8] = { 0x04, 0x0e, 0x05, 0x01, 0x4a, 0x20, 0x00, 0x06 };
+
+				memcpy(skel_frame, answer, sizeof(answer));
+				skel_dump("in (ours)", skel_frame, sizeof(answer), &skel_said_in);
+				hakios_btsk_deliver(skel_frame, sizeof(answer));
+				continue;
+			}
 			if (p->wake != NULL) {
 				p->wake();
 			}
