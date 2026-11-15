@@ -121,6 +121,7 @@ struct Bo {
     uint64_t size = 0, va = 0;
     void *cpu = nullptr;
     bool driver_mapped = false;         // mapped by HakiosGPU (0x7c): undone by GEM_CLOSE, not by IOConnectUnmapMemory64
+    uint32_t bind = ~0u;                // newBo's bind flags (~0: not newBo's -- a surface's: never kept in the pool)
 };
 
 struct hakios_metal_device {
@@ -167,16 +168,60 @@ struct hakios_metal_device {
         return IOConnectCallStructMethod(connection, selector, request, size, request, &out) == KERN_SUCCESS ? 0 : -1;
     }
 
+    // THE POOL (11-15): buffers given back are kept a moment and handed out again, zeroed, to whoever asks for the same
+    // size -- making one is three calls into the kernel (create, map, bind) and giving one back three more, and what
+    // draws makes and frees them by the frame: a texture for every CoreGraphics queue's render, a buffer for every
+    // -newBufferWithBytes:; a quarter of the WebGL aquarium's GPU process's time went there (metal_sample=1000).
+    // Data buffers only (BIND_NOEXEC), 16 MB at most each and 64 MB in all, not older than 2 s. metal_bopool=0: none.
+    // (... and not kept by a process that has gone idle: a thread of the device's looks every second while there is a
+    // device; hakios_metal_close cuts it off through `tidy`)
+    struct Pooled { Bo bo; std::chrono::steady_clock::time_point at; };
+    struct PoolTidy { std::mutex m; hakios_metal_device *d = nullptr; };
+    std::shared_ptr<PoolTidy> tidy;
+    std::vector<Pooled> pool;
+    uint64_t pool_bytes = 0, pool_hits = 0, pool_misses = 0;
+    static constexpr uint64_t kPoolMostEach = 16ull << 20, kPoolMost = 64ull << 20;
+
+    void poolTrim(std::chrono::steady_clock::time_point now)        // (lock held)
+    {
+        size_t keep = 0;
+        for (size_t i = 0; i < pool.size(); i++) {
+            if (now - pool[i].at > std::chrono::seconds(2)) {
+                pool_bytes -= pool[i].bo.size;
+                freeBoNow(pool[i].bo);
+            } else {
+                if (keep != i) pool[keep] = pool[i];
+                keep++;
+            }
+        }
+        pool.resize(keep);
+    }
+
     bool newBo(Bo &bo, uint64_t size, uint32_t bind_flags)
     {
         std::lock_guard<std::mutex> g(lock);
         bo_create c = {};
         c.size = (size + 0x3fff) & ~0x3fffULL;
+        for (size_t i = pool.size(); i-- > 0;) {
+            if (pool[i].bo.size == c.size && pool[i].bo.bind == bind_flags) {
+                bo = pool[i].bo;
+                pool_bytes -= bo.size;
+                pool.erase(pool.begin() + (long)i);
+                pool_hits++;
+                memset(bo.cpu, 0, (size_t)bo.size);     // (a new buffer is zeroes)
+                return true;
+            }
+        }
+        pool_misses++;
         if (call(BO_CREATE, &c, sizeof(c)) != 0) {
             fail("no GPU memory of %llu bytes", (unsigned long long)size);
             return false;
         }
-        return mapAndBind(bo, c.handle, c.size, bind_flags);
+        if (!mapAndBind(bo, c.handle, c.size, bind_flags)) {
+            return false;
+        }
+        bo.bind = bind_flags;
+        return true;
     }
 
     // a buffer the kernel holds (HANDLE, SIZE) mapped for the CPU and bound into the GPU's address space (lock held)
@@ -353,6 +398,35 @@ struct hakios_metal_device {
         if (bo.handle == 0) {
             return;
         }
+        static const bool pooling = !bootArg("metal_bopool=0");
+        auto now = std::chrono::steady_clock::now();
+        poolTrim(now);
+        if (pooling && bo.bind == BIND_NOEXEC && bo.cpu != nullptr && bo.size <= kPoolMostEach && pool_bytes + bo.size <= kPoolMost) {
+            pool.push_back({ bo, now });
+            pool_bytes += bo.size;
+            bo = Bo{};
+            if (tidy == nullptr) {
+                tidy = std::make_shared<PoolTidy>();
+                tidy->d = this;
+                std::thread([t = tidy] {
+                    for (;;) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        std::lock_guard<std::mutex> alive(t->m);
+                        if (t->d == nullptr) {
+                            return;
+                        }
+                        std::lock_guard<std::mutex> g(t->d->lock);
+                        t->d->poolTrim(std::chrono::steady_clock::now());
+                    }
+                }).detach();
+            }
+            return;
+        }
+        freeBoNow(bo);
+    }
+
+    void freeBoNow(Bo &bo)                              // (lock held)
+    {
         bind_op op = {};
         op.flags = BIND_UNMAP;
         op.va = bo.va;
@@ -2217,6 +2291,18 @@ hakios_metal_close(hakios_metal_device *d)
 {
     if (d == nullptr) {
         return;
+    }
+    if (d->tidy != nullptr) {
+        std::lock_guard<std::mutex> alive(d->tidy->m);     // (the pool's thread: no device from now on)
+        d->tidy->d = nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> g(d->lock);
+        for (auto &kept : d->pool) {
+            d->freeBoNow(kept.bo);
+        }
+        d->pool.clear();
+        d->pool_bytes = ~0ull >> 1;                         // (nothing more is kept)
     }
     for (Bo &b : d->stream_pool) {
         d->freeBo(b);
