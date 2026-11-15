@@ -134,6 +134,10 @@ DARWIN_JOBS=${JOBS-"
 # sockets (TCP 62078, /var/run/lockdown.sock), not a Mach service, so --rest would never take it, and it has to be
 # named. For a phone whose kernel speaks usbmux on its USB port (the Pixel 8a: usbmux=1). LOCKDOWND=1 puts it in.
 [ "${LOCKDOWND-0}" != 0 ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.mobile.lockdown"
+# BLUETOOTH=1: iOS's bluetoothd and its companions (com.apple.bluetooth*, com.apple.BTServer.*) are let in -- mkjobs.py
+# keeps them out otherwise: without a controller behind the kernel control com.apple.uart.sk.bluetooth bluetoothd has
+# nothing to open. For a phone whose kernel gives it one (the Pixel 8a: bt=2, drivers/bluetooth's BT_HOST).
+[ "${BLUETOOTH-0}" != 0 ] && export ALLOW="${ALLOW:+$ALLOW }bluetooth BTServer"
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libhakios.dylib, src/inject_sb.c is libhakios.sb.dylib, src/inject_media.c is
 # libhakios.media.dylib).

@@ -3,4 +3,4 @@
 # screenshots. With bt=2 and ALLOW="bluetooth BTServer" in the build's environment (devices/akita: Bluetooth).
 /redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8
 /redwood/bin/lsreg -o com.apple.Preferences
-/redwood/bin/rwtouch wait 8 tap 0.5 0.392 wait 60
+/redwood/bin/rwtouch wait 8 tap 0.5 0.452 wait 60
