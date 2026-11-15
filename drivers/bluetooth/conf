@@ -5,3 +5,11 @@
 driver BT
 	file    bsd/dev/hakios.bt.c
 	help    the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1)
+
+driver BT_HOST
+	file    bsd/dev/hakios.bthost.c
+	file    bsd/dev/hakios.btsk.c
+	file    iokit/Kernel/hakios.bluetooth.cpp iokitcpp
+	help    Bluetooth for iOS's bluetoothd, chip-independent: the kernel control com.apple.uart.sk.bluetooth, the Skywalk
+	help    pipe its packets go through, /dev/btwake and its like, the registry's "bluetooth"; a phone's driver gives it
+	help    the controller (hakios_bthost_start)
