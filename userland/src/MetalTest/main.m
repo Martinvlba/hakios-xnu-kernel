@@ -1259,6 +1259,83 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	}];
 
 	/* 24 */
+	[self add:@"Layered depth: four shadow maps in one pass" expect:@"four quarters of grey, darker to lighter: 0.2, 0.4 (top), 0.6, 0.8 (bottom) -- ONE instanced draw with no fragment function sent each instance to its own layer of a depth array texture (cascaded or cube shadow maps in one pass; the console says each layer's depth)"
+	    setup:^SceneDraw(Renderer *r) {
+		id<MTLLibrary> library = [r library:@
+		    "struct LD { float4 pos [[position]]; uint layer [[render_target_array_index]]; };\n"
+		    "vertex LD layer_depth_v(uint vid [[vertex_id]], uint iid [[instance_id]]) {\n"
+		    "  LD o; float2 q = corner(vid); o.pos = float4(q * 2.0 - 1.0, 0.2 + 0.2 * float(iid), 1.0); o.layer = iid; return o; }\n"
+		    "fragment float4 depth_layers_show_f(VO in [[stage_in]], depth2d_array<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+		    "  uint layer = (in.uv.x < 0.5 ? 0 : 1) + (in.uv.y < 0.5 ? 0 : 2); float d = t.sample(s, fract(in.uv * 2.0), layer);\n"
+		    "  return float4(d, d, d, 1.0); }\n"];
+		MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:128 height:128 mipmapped:NO];
+		MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+		NSError *error = nil;
+		id<MTLRenderPipelineState> fill = nil;
+
+		if (library != nil) {
+			pd.vertexFunction = [library newFunctionWithName:@"layer_depth_v"];
+			pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+			pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+			fill = [r.device newRenderPipelineStateWithDescriptor:pd error:&error];
+			if (fill == nil) {
+				[r fail:@"a layered pipeline with no fragment function: %@", error.localizedDescription];
+			}
+		}
+		id<MTLRenderPipelineState> show = [r simple:library vertex:@"rect_v" fragment:@"depth_layers_show_f" blend:NO];
+		td.textureType = MTLTextureType2DArray;
+		td.arrayLength = 4;
+		td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		td.storageMode = MTLStorageModeShared;
+		id<MTLTexture> depth = [r texture:td];
+		dd.depthCompareFunction = MTLCompareFunctionLess;
+		dd.depthWriteEnabled = YES;
+		id<MTLDepthStencilState> depthState = [r.device newDepthStencilStateWithDescriptor:dd];
+		__block BOOL checked = NO;
+		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {
+			MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor new];
+
+			pass.depthAttachment.texture = depth;
+			pass.depthAttachment.loadAction = MTLLoadActionClear;
+			pass.depthAttachment.storeAction = MTLStoreActionStore;
+			pass.depthAttachment.clearDepth = 1;
+			pass.renderTargetArrayLength = 4;
+			id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+			if (fill != nil && e != nil) {
+				[e setRenderPipelineState:fill];
+				[e setDepthStencilState:depthState];
+				[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:4];
+			}
+			[e endEncoding];
+			e = [cb renderCommandEncoderWithDescriptor:[r passTo:target clear:MTLClearColorMake(0.3, 0, 0, 1)]];
+			if (show != nil && depth != nil) {
+				[e setRenderPipelineState:show];
+				[e setFragmentSamplerState:nearest atIndex:0];
+				[e setFragmentTexture:depth atIndex:0];
+				[r rect:(vector_float4){ -1, -1, 2, 2 } colour:(vector_float4){ 1, 1, 1, 1 } time:t on:e];
+			}
+			[e endEncoding];
+			if (!checked && depth != nil) {
+				checked = YES;
+				[cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+					NSMutableString *line = [NSMutableString string];
+					BOOL right = YES;
+
+					for (NSUInteger i = 0; i < 4; i++) {
+						float d = -1;
+
+						[depth getBytes:&d bytesPerRow:4 bytesPerImage:4 fromRegion:MTLRegionMake2D(64, 64, 1, 1) mipmapLevel:0 slice:i];
+						right = right && fabsf(d - (0.2f + 0.2f * (float)i)) < 0.01f;
+						[line appendFormat:@" layer %lu: %.3f", (unsigned long)i, d];
+					}
+					say([NSString stringWithFormat:@"layered depth %@:%@ (expected 0.200, 0.400, 0.600, 0.800; -1: nothing read)", right ? @"RIGHT" : @"WRONG", line]);
+				}];
+			}
+		};
+	}];
+
+	/* 25 */
 	[self add:@"UIKit over Metal" expect:@"a slow colour wash (Metal) and over it, drawn by UIKit: a white box sliding left to right and back, smoothly (an animation the render server runs); in it a counter going up every frame (a layer redrawn in place); a spinning grey square (a transform set every frame). Nothing of them left behind, none frozen"
 	    setup:^SceneDraw(Renderer *r) {
 		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {

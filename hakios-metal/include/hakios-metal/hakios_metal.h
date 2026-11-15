@@ -401,8 +401,9 @@ struct hakios_metal_render_pass {
 	unsigned depth_slice;                     /* a depth 2D array's layer drawn into (MTLRenderPassDepthAttachmentDescriptor.slice) */
 	/* LAYERED RENDERING (MTLRenderPassDescriptor.renderTargetArrayLength): 0 or 1 none; 2 to 8: color0 is an array or
 	 * cube texture and each primitive goes to the layer its vertex function's [[render_target_array_index]] names
-	 * (layer 0 without one). Served on the Mali for one colour attachment, no depth or stencil, one sample; a
-	 * pass that loads what was in its layers gets them cleared instead (not loaded yet). */
+	 * (layer 0 without one). Served on the Mali for one colour attachment and a depth attachment of as many
+	 * layers (or depth alone), no stencil, one sample; a pass that loads what was in its layers gets them cleared
+	 * instead (not loaded yet). */
 	unsigned layers;
 };
 

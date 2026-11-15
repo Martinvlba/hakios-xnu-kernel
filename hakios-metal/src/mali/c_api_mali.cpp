@@ -1049,9 +1049,9 @@ struct DrawJob {
     hakios_metal_texture *pre_target = nullptr;
     // INCREMENTAL RENDERING (emitIr): the preload's fragment shader for every target as a pre-frame shader, its push
     // constants; 0: the pass has no tiler OOM handler (boot-arg metal_noir, or no preload program)
-    // LAYERED RENDERING (11-14): the pass's layers (1: none) and how far apart they lie in the target's memory
+    // LAYERED RENDERING (11-14): the pass's layers (1: none) and how far apart they lie in the targets' memory
     unsigned layers = 1;
-    uint64_t layer_stride = 0;
+    uint64_t layer_stride = 0, z_layer_stride = 0;
     uint64_t ir_frag_spd = 0;
     std::vector<uint32_t> ir_fs_fau;
     hakios_metal_texture *ir_target = nullptr;          // colour attachment 0 (held as the draw's target)
@@ -1397,7 +1397,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
             ext[15] = dj.s_row * dj.height;
         }
         memcpy(area + zsd_at, dj.zsd, 32);
-        if (first && dj.zs_frag_spd != 0 && ir != nullptr) {
+        if (first && dj.zs_frag_spd != 0 && ir != nullptr && dj.layers <= 1) {      // (a layered pass is not loaded)
             // DEPTH/STENCIL LOADED by the pre-frame shader (the descriptor's Z/S preload bits, 19 and 9, load nothing on
             // the Mali: what a pass after another found was its clear values)
             emitZsLoad(d, dj, ir, ir_va);
@@ -1726,12 +1726,17 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         for (unsigned layer = 0; layer < dj.layers; layer++) {
             uint8_t *copy = ir + 0x100 + 0x100 * layer;
             uint64_t copy_va = ir_va + 0x100 + 0x100 * layer;
-            memcpy(copy, pass_area + 0x80, 0x80 + 0x40 * dj.rts);
-            auto *lfb = (uint32_t *)copy, *lrt = (uint32_t *)(copy + 0x80);
+            // (the framebuffer descriptor, its ZS extension if the pass has depth, then the render target)
+            const uint64_t ext_bytes = dj.zs ? 0x40 : 0;
+            memcpy(copy, pass_area + 0x80, 0x80 + ext_bytes + 0x40 * dj.rts);
+            auto *lfb = (uint32_t *)copy, *lext = (uint32_t *)(copy + 0x80), *lrt = (uint32_t *)(copy + 0x80 + ext_bytes);
             lfb[0] = (lfb[0] & 0x00ffffffu) | layer << 24;
             *(uint64_t *)&lfb[2] = layer;
             *(uint64_t *)&lrt[8] += dj.layer_stride * layer;
-            s[n++] = move48(40, copy_va | 1 | (dj.rts - 1) << 2);
+            if (dj.zs && dj.has_z) {
+                *(uint64_t *)&lext[8] += dj.z_layer_stride * layer;            // (that layer of the depth texture)
+            }
+            s[n++] = move48(40, copy_va | 1 | (dj.zs ? 2u : 0u) | (dj.rts - 1) << 2);
             s[n++] = 7ULL << 56;                                                // RUN_FRAGMENT
             s[n++] = WAIT_ALL;
         }
@@ -5263,14 +5268,20 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         // LAYERED RENDERING: see the pass's end in emitDraw
         // (a pass that LOADS its layers is not refused here -- every draw after an encoder's first comes as one that
         // loads -- but nothing is loaded: emitDraw's preload is left out, the layers begin as the tile buffer's clear)
-        if (pass->layers > 8 || t->layers < pass->layers || rts != 1 || dj.zs || t->samples > 1) {
-            fail("%s: a layered pass (%u layers) into a texture of %u layers, %u colour targets%s%s: served are 2 to 8 layers of "
-                "one array or cube texture, no depth or stencil, one sample", p->name, pass->layers,
-                t->layers, rts, dj.zs ? ", depth or stencil" : "", t->samples > 1 ? ", multisampled" : "");
+        // (the colour target: an array or cube of that many layers -- or one that is not stored at all, the stand-in of
+        // a pass of depth alone; the depth target, if any: an array or cube too, and no stencil)
+        const bool colour_ok = t->layers >= pass->layers || !dj.write;
+        const bool depth_ok = !dj.zs || (dj.has_z && !dj.has_s && pass->depth != nullptr && pass->depth->layers >= pass->layers);
+        if (pass->layers > 8 || !colour_ok || !depth_ok || rts != 1 || t->samples > 1) {
+            fail("%s: a layered pass (%u layers) into a colour texture of %u layers%s, %u colour targets%s%s: served are 2 to 8 "
+                "layers of one array or cube colour texture and a depth texture of as many, no stencil, one sample", p->name,
+                pass->layers, t->layers, dj.zs && !depth_ok ? ", a depth or stencil target that is not such an array" : "", rts,
+                dj.has_s ? ", stencil" : "", t->samples > 1 ? ", multisampled" : "");
             return -1;
         }
         dj.layers = pass->layers;
-        dj.layer_stride = t->layer_stride;
+        dj.layer_stride = t->layers >= pass->layers ? t->layer_stride : 0;
+        dj.z_layer_stride = dj.has_z ? pass->depth->layer_stride : 0;
     }
     for (unsigned i = 1; i < rts; i++) {
         const hakios_metal_render_pass::hakios_metal_color_attachment &a = pass->more[i - 1];
