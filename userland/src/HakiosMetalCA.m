@@ -1331,11 +1331,14 @@ HM_REFUSES_OUT_LOUD
 	NSMutableArray *_signals, *_waits;       /* { HakiosMetalEvent, value }: applied at completion / met before the GPU sees it */
 	dispatch_semaphore_t _sent;              /* a held commit: signalled once it has reached the GPU */
 	NSMutableArray *_turned;                 /* HakiosMetalTexture: turned framebuffers drawn here, copied into their surfaces at commit */
+	NSMutableSet *_drawnSurfaces;            /* NSNumber: IOSurface ids of the render passes' colour targets (hm_present_later) */
 }
 - (instancetype)initWithHakiosQueue:(HakiosMetalCommandQueue *)queue;
 - (void)hakiosTurnAtCommit:(id)texture;
 - (hakios_metal_cb *)hakiosCommandBuffer;
 - (double)hakiosCreatedAt;
+- (BOOL)hakiosDraws:(uint32_t)surface;
+- (void)hakiosNoteTargets:(MTLRenderPassDescriptor *)descriptor;
 @end
 
 /* A parallel render encoder: one pass whose draws come from several sub-encoders, filled on any thread in any order and
@@ -6084,6 +6087,144 @@ HM_REFUSES_OUT_LOUD
 @end
 
 /* ============================================================================================================
+ * PRESENTS THAT WAIT FOR THE GPU (11-15). An application that presents a CAMetalDrawable itself ([drawable present]
+ * after its commit, not -presentDrawable: on the command buffer) presented it while the GPU still drew it, and nothing
+ * moved the surface's seed: the compositor's MIRROR of the drawable (hakios_metal.h) kept the picture it was last
+ * filled with -- the drawable's previous use, two frames back. Maps' zoom jumped back for a refresh (the tester; no
+ * "tl: D" line in the logs: Maps never called -presentDrawable:). Now every present of a drawable goes through one
+ * caller's thread: it waits for the command buffers drawing into the drawable that are not finished yet, moves the
+ * seed, and presents. -presentDrawable:'s own present (already after completion) passes straight through.
+ * Boot-arg metal_present_wait=0: as before.
+ * ============================================================================================================ */
+static NSMutableSet *hm_inflight;               /* committed and not completed, this process's (under @synchronized) */
+static __thread BOOL hm_presenting_done;        /* -presentDrawable:'s completed handler: its work is done already */
+static void (*hm_orig_present)(id, SEL);
+static void (*hm_orig_present_at)(id, SEL, CFTimeInterval);
+static void (*hm_orig_present_after)(id, SEL, CFTimeInterval);
+
+static void
+hm_inflight_change(id cb, BOOL add)
+{
+	@synchronized ([HakiosMetalCommandBuffer class]) {
+		if (hm_inflight == nil) {
+			hm_inflight = [[NSMutableSet alloc] init];
+		}
+		if (add) {
+			[hm_inflight addObject:cb];
+		} else {
+			[hm_inflight removeObject:cb];
+		}
+	}
+}
+
+static void
+hm_bump_drawable_seed(id drawable)
+{
+	id texture = [drawable respondsToSelector:@selector(texture)] ? [drawable texture] : nil;
+	IOSurfaceRef surface = [texture respondsToSelector:@selector(iosurface)] ? [texture iosurface] : NULL;
+
+	if (surface != NULL) {
+		IOSurfaceLock(surface, kIOSurfaceLockAvoidSync, NULL);
+		IOSurfaceUnlock(surface, kIOSurfaceLockAvoidSync, NULL);
+	}
+}
+
+/* KIND 0 present, 1 presentAtTime:, 2 presentAfterMinimumDuration: */
+static void
+hm_present_later(id drawable, int kind, CFTimeInterval value)
+{
+	NSArray *pending;
+
+	if (hm_presenting_done) {
+		/* (-presentDrawable:'s: its seed moved already, its buffer is done) */
+		kind == 0 ? hm_orig_present(drawable, @selector(present)) :
+		    kind == 1 ? hm_orig_present_at(drawable, @selector(presentAtTime:), value) :
+		    hm_orig_present_after(drawable, @selector(presentAfterMinimumDuration:), value);
+		return;
+	}
+	{
+		/* only the buffers drawing into this drawable: Maps keeps others in flight (its tiles), which have
+		   nothing to do with the frame shown */
+		id texture = [drawable respondsToSelector:@selector(texture)] ? [drawable texture] : nil;
+		IOSurfaceRef surface = [texture respondsToSelector:@selector(iosurface)] ? [texture iosurface] : NULL;
+		uint32_t sid = surface != NULL ? IOSurfaceGetID(surface) : 0;
+		NSMutableArray *mine = [[NSMutableArray alloc] init];
+
+		@synchronized ([HakiosMetalCommandBuffer class]) {
+			for (HakiosMetalCommandBuffer *cb in hm_inflight) {
+				if (sid != 0 && [cb hakiosDraws:sid]) {
+					[mine addObject:cb];
+				}
+			}
+		}
+		pending = mine;
+	}
+	[drawable retain];
+	/* ON THE CALLER'S THREAD: CoreAnimation attaches a drawable's present to that thread's transaction; presented from
+	   a queue of ours (no run loop) it was committed seconds later -- Maps' map stood still through a pinch and jumped
+	   ~5 s after (the tester's video, 11-15) */
+	{
+		static unsigned presents, waited;
+		static double sum, worst;
+		const double asked = hm_now();
+
+		for (HakiosMetalCommandBuffer *cb in pending) {
+			[cb waitUntilCompleted];
+		}
+		waited += [pending count] != 0;
+		[pending release];
+		hm_bump_drawable_seed(drawable);
+		{
+			const double held = hm_now() - asked;
+
+			sum += held;
+			worst = held > worst ? held : worst;
+			if (++presents % 300 == 0) {
+				hm_print("drawable presents: %u waited %.2f ms on average, %.1f ms at most, %u of them for their GPU "
+					 "work\n", 300, sum / 300 * 1e3, worst * 1e3, waited);
+				sum = worst = 0;
+				waited = 0;
+			}
+		}
+		kind == 0 ? hm_orig_present(drawable, @selector(present)) :
+		    kind == 1 ? hm_orig_present_at(drawable, @selector(presentAtTime:), value) :
+		    hm_orig_present_after(drawable, @selector(presentAfterMinimumDuration:), value);
+		[drawable release];
+	}
+}
+
+static void hm_present_0(id self, SEL _cmd) { (void)_cmd; hm_present_later(self, 0, 0); }
+static void hm_present_1(id self, SEL _cmd, CFTimeInterval t) { (void)_cmd; hm_present_later(self, 1, t); }
+static void hm_present_2(id self, SEL _cmd, CFTimeInterval t) { (void)_cmd; hm_present_later(self, 2, t); }
+
+static void
+hm_hook_drawables(void)
+{
+	static dispatch_once_t once;
+
+	dispatch_once(&once, ^{
+		Class c = objc_getClass("CAMetalDrawable");
+		Method m;
+
+		if (c == Nil || hm_boot_arg_set("metal_present_wait=0")) {
+			return;
+		}
+		if ((m = class_getInstanceMethod(c, @selector(present))) != NULL) {
+			hm_orig_present = (void (*)(id, SEL))method_setImplementation(m, (IMP)hm_present_0);
+		}
+		if ((m = class_getInstanceMethod(c, @selector(presentAtTime:))) != NULL) {
+			hm_orig_present_at = (void (*)(id, SEL, CFTimeInterval))method_setImplementation(m, (IMP)hm_present_1);
+		}
+		if ((m = class_getInstanceMethod(c, @selector(presentAfterMinimumDuration:))) != NULL) {
+			hm_orig_present_after = (void (*)(id, SEL, CFTimeInterval))method_setImplementation(m, (IMP)hm_present_2);
+		}
+		hm_print("drawables' presents wait for the GPU (present %s, atTime %s, afterMinimumDuration %s)\n",
+			 hm_orig_present ? "hooked" : "absent", hm_orig_present_at ? "hooked" : "absent",
+			 hm_orig_present_after ? "hooked" : "absent");
+	});
+}
+
+/* ============================================================================================================
  * The command buffer: hakios-metal's, with Metal's handlers and slot bookkeeping around it
  * ============================================================================================================ */
 
@@ -6162,6 +6303,7 @@ HM_REFUSES_OUT_LOUD
 	[_completed release];
 	[_signals release];
 	[_turned release];
+	[_drawnSurfaces release];
 	[_waits release];
 	if (_sent != NULL) {
 		dispatch_release(_sent);
@@ -6513,6 +6655,31 @@ hm_shadow_targets(MTLRenderPassDescriptor *d, id<MTLCommandBuffer> cb)
 /* A pass that cannot be served ends the command buffer in error and gives NO encoder: a caller then sends its draws
  * to nil, and -commit reports the sentence. (The alternative, an encoder that fails its draws one by one, was measured
  * no clearer in the earlier plug-in, and a nil texture in a drawable was what cost it most -- here the nil is said.) */
+/* the surfaces this buffer's passes draw into: a drawable's present waits only for the buffers that draw it */
+- (void)hakiosNoteTargets:(MTLRenderPassDescriptor *)descriptor
+{
+	for (NSUInteger i = 0; i < 8; i++) {
+		id texture = [[[descriptor colorAttachments] objectAtIndexedSubscript:i] texture];
+		IOSurfaceRef surface = [texture respondsToSelector:@selector(iosurface)] ? [texture iosurface] : NULL;
+
+		if (surface != NULL) {
+			@synchronized (self) {
+				if (_drawnSurfaces == nil) {
+					_drawnSurfaces = [[NSMutableSet alloc] init];
+				}
+				[_drawnSurfaces addObject:@(IOSurfaceGetID(surface))];
+			}
+		}
+	}
+}
+
+- (BOOL)hakiosDraws:(uint32_t)surface
+{
+	@synchronized (self) {
+		return [_drawnSurfaces containsObject:@(surface)];
+	}
+}
+
 - (id)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)descriptor
 {
 	struct hakios_metal_render_pass pass;
@@ -6529,6 +6696,7 @@ hm_shadow_targets(MTLRenderPassDescriptor *d, id<MTLCommandBuffer> cb)
 													     colorTexture:texture] autorelease];
 
 		hm_shadow_targets(descriptor, (id<MTLCommandBuffer>)self);
+		[self hakiosNoteTargets:descriptor];
 
 		[encoder hakiosTakeResolves:descriptor];   /* hm_read_render_pass judged them */
 		return encoder;
@@ -6548,6 +6716,7 @@ hm_shadow_targets(MTLRenderPassDescriptor *d, id<MTLCommandBuffer> cb)
 		return nil;
 	}
 	hm_shadow_targets(descriptor, (id<MTLCommandBuffer>)self);
+	[self hakiosNoteTargets:descriptor];
 	return [[[HakiosMetalParallelRenderCommandEncoder alloc] initWithHakiosCommandBuffer:self pass:&pass colorTexture:texture
 											descriptor:descriptor] autorelease];
 }
@@ -7334,6 +7503,8 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	}
 	_committed = YES;
 	_committedAt = hm_now();
+	hm_hook_drawables();
+	hm_inflight_change(self, YES);
 	/* each turned framebuffer drawn into, laid into its surface by the 2D engine after everything that drew it */
 	for (HakiosMetalTexture *t in _turned) {
 		[t hakiosTurnInto:_cb];
@@ -7441,6 +7612,7 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	NSArray *completed;
 
 	[self error];   /* built now, on the completing thread, so that a handler reading -error gets the sentence */
+	hm_inflight_change(self, NO);
 	/* the events this buffer signals, now that its work is done: before its handlers, which may read them */
 	for (NSArray *sg in _signals) {
 		[[sg objectAtIndex:0] hakiosSignal:[[sg objectAtIndex:1] unsignedLongLongValue]];
@@ -7511,7 +7683,25 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	[drawable retain];
 	[self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
 		(void)cb;
+		/* The surface's seed moves before the present: it is how another process's texture over the surface (the
+		 * compositor's, a MIRROR on the Mali: hakios_metal.h) learns that the pixels changed. Nothing else moves it
+		 * for a surface the GPU drew into, and a compositor that kept its texture went on showing the frame its
+		 * mirror was filled with -- Maps' tiles flashing back to the previous frame while zooming (11-15). */
+		id texture = [drawable respondsToSelector:@selector(texture)] ? [drawable texture] : nil;
+		IOSurfaceRef surface = [texture respondsToSelector:@selector(iosurface)] ? [texture iosurface] : NULL;
+
+		if (surface != NULL) {
+			IOSurfaceLock(surface, kIOSurfaceLockAvoidSync, NULL);
+			IOSurfaceUnlock(surface, kIOSurfaceLockAvoidSync, NULL);
+		}
+		if (hm_boot_arg_set("touch_lat=1")) {
+			/* "tl: D SURFACE seed SEED at US": a drawable presented (tools/frames.py's clock) */
+			hm_print("tl: D %u seed %u at %llu\n", surface != NULL ? IOSurfaceGetID(surface) : 0,
+				 surface != NULL ? IOSurfaceGetSeed(surface) : 0, (unsigned long long)(hm_now() * 1e6));
+		}
+		hm_presenting_done = YES;
 		[drawable present];
+		hm_presenting_done = NO;
 		[drawable release];
 		hm_fps_note(YES, 0, 0, NULL);
 	}];

@@ -5678,7 +5678,17 @@ mirrorOf(hakios_metal_device *d, unsigned id, const Bo &bo, const hakios_metal_d
     std::lock_guard<std::mutex> g(d->mirror_lock);
     auto it = d->mirrors.find(id);
     if (it != d->mirrors.end()) {
+        // a mirror that is there already holds the surface as it was when it was last filled: another process may have
+        // drawn into the surface since (a CAMetalLayer's drawable, presented again), so a new texture over it begins
+        // with a fresh copy -- the wrapper takes the seed of this moment as the mirror's, and would not refill it
         it->second.refs++;
+        mirrorFill(d, it->second);
+        static const bool say = bootArg("touch_lat=1");
+        if (say) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            fprintf(stderr, "tl: M %u again at %llu\n", id, (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000);
+        }
         return it->second.tex;
     }
     hakios_metal_device::Mirror m = {};
