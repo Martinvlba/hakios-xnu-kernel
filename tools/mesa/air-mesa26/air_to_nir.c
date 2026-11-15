@@ -701,6 +701,7 @@ enum air_sysval {
    AIR_SV_THREAD_POS_GRID, AIR_SV_THREAD_POS_TG, AIR_SV_TG_POS_GRID,
    AIR_SV_THREADS_PER_TG, AIR_SV_TGS_PER_GRID, AIR_SV_THREAD_INDEX_TG,
    AIR_SV_THREADS_PER_GRID, AIR_SV_SIMD_LANE, AIR_SV_SIMD_INDEX, AIR_SV_SIMD_WIDTH,
+   AIR_SV_VIEWPORT_INDEX, AIR_SV_AMPLIFICATION_ID,
 };
 
 static const struct { const char *key; enum air_sysval sv; } sysvals[] = {
@@ -722,6 +723,8 @@ static const struct { const char *key; enum air_sysval sv; } sysvals[] = {
    { "air.thread_index_in_simdgroup", AIR_SV_SIMD_LANE },
    { "air.simdgroup_index_in_threadgroup", AIR_SV_SIMD_INDEX },
    { "air.threads_per_simdgroup", AIR_SV_SIMD_WIDTH },
+   { "air.viewport_array_index", AIR_SV_VIEWPORT_INDEX },
+   { "air.amplification_id", AIR_SV_AMPLIFICATION_ID },
 };
 
 static nir_def *
@@ -756,6 +759,14 @@ load_sysval(struct air_ctx *c, enum air_sysval sv)
    case AIR_SV_SIMD_LANE: return nir_load_subgroup_invocation(&c->b);
    case AIR_SV_SIMD_INDEX: return nir_load_subgroup_id(&c->b);
    case AIR_SV_SIMD_WIDTH: return nir_load_subgroup_size(&c->b);
+   /* a fragment function's [[viewport_array_index]] input: which viewport its primitive went to. The drivers
+    * under this front end serve one viewport (-setViewports:count: with more than one is refused), so it is 0 --
+    * CoreRE's fragment functions (17 in iOS 16.7.16) read it for their stereo passes and were refused whole. */
+   case AIR_SV_VIEWPORT_INDEX: return nir_imm_int(&c->b, 0);
+   /* [[amplification_id]]: which of a vertex amplification's copies this is. The drivers here amplify nothing
+    * (-supportsVertexAmplificationCount: is true for 1 alone, a greater count is refused), so it is 0 -- 60 functions
+    * of iOS 16.7.16's libraries (CoreRE's and RealityKit's stereo paths) were refused whole for reading it. */
+   case AIR_SV_AMPLIFICATION_ID: return nir_imm_int(&c->b, 0);
    }
    return NULL;
 }
