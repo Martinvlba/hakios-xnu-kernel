@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# A crash on purpose, for the crash reporter: the Watch application opened (its NTKFaceSnapshotService aborts, a few
+# times), then closed. With ALLOW="ReportCrash osanalytics" in the build's environment; the host then asks for the
+# reports (idevicecrashreport -k DIR).
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8
+/redwood/bin/lsreg -o com.apple.Bridge
+/redwood/bin/rwtouch wait 20 button home wait 5

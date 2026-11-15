@@ -216,10 +216,13 @@ import sys
 # (keybagd is NOT among them since 11-13: Settings sets, changes and removes the passcode through it -- the kernel's
 # AppleKeyStore has a keybag now, and the device tree says no-effaceable-storage, so it keeps its copy without one.
 # Started on demand; it asks the key store and goes away.)
+# (ReportCrash and osanalyticshelper are NOT among them since 11-15: a crash leaves its report in
+# /var/mobile/Library/Logs/CrashReporter, for `idevicecrashreport -k DIR` on a computer. Without them the kernel says
+# "Failed to send exception EXC_CORPSE_NOTIFY. error code: 5" and the crash is gone.)
 DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'locationd', 'softwareupdate',
         'datamigrator', 'backupd', 'thermalmonitord', 'nfcd', 'biometrickitd', 'pearld',
-        'obliterat', 'storage_mounter', 'com.apple.fud', 'sepd', 'seputil', 'camera', 'ReportCrash',
-        'osanalytics', 'lockdown', 'audio', 'jetsamproperties',
+        'obliterat', 'storage_mounter', 'com.apple.fud', 'sepd', 'seputil', 'camera',
+        'lockdown', 'audio', 'jetsamproperties',
         'purplebuddy', 'restore', 'usb', 'accessoryd',
         'mobileassetd', 'bird',
         # these start, crash and are asked for again, over and over. (aggregated, which was among them, is where
@@ -247,6 +250,7 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
         # data protection classes). Not offered, both lookups fail at once; the suggestions they make were not there anyway.
         'com.apple.coreduetd')
 
+ACTIVITIES = ('com.apple.osanalytics.osanalyticshelper',)
 # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
 DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())
 
@@ -324,9 +328,15 @@ if rest:
         program = job.get('Program') or (job.get('ProgramArguments') or [''])[0]
         if not job.get('MachServices') or not present(program):
             continue
+        # (a job of ACTIVITIES keeps its scheduled activities: it asks each one's criteria back when it starts and
+        # traps on none -- osanalyticshelper, the crash reporter's writer: _xpc_api_misuse under
+        # +[OSASubmissionScheduler _setCadenceForActivity:], 20 ms into every start)
+        activities = (job.get('LaunchEvents') or {}).get('com.apple.xpc.activity') if label in ACTIVITIES else None
         for key in ('RunAtLoad', 'KeepAlive', 'StartInterval', 'StartCalendarInterval', 'WatchPaths',
                     'QueueDirectories', 'StartOnMount', 'LaunchEvents'):
             job.pop(key, None)
+        if activities:
+            job['LaunchEvents'] = {'com.apple.xpc.activity': activities}
         job['StandardErrorPath'] = '/dev/console'
         if label in oslog:
             job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
