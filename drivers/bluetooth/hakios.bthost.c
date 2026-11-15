@@ -12,6 +12,7 @@
  * Broadcom controller answers Apple's vendor commands itself, or not: bluetoothd's own log says where it stops.
  */
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -84,6 +85,12 @@ struct hakios_bt_platform {
 	 * bluetoothd says "No bluetooth on this device." and stops.
 	 */
 	int     (*wifi_address)(uint8_t out[6]);
+	/*
+	 * true: the phone's driver calls hakios_bthost_wake() when bytes have come (its interrupt), and receive with wait_ms 0
+	 * returns at once. The bridge then sleeps until bluetoothd writes or the controller speaks, instead of asking every
+	 * 2 ms for ever. false: polled, as upstream's.
+	 */
+	bool    wakes;
 };
 
 /* the phone's operations: given by its driver (hakios_bthost_start) */
@@ -175,12 +182,25 @@ skel_queue_locked(const uint8_t *bytes, size_t length)
 }
 
 /* H4 bytes the Skywalk channel's user wrote (redwood_btsk.c's sync_tx) */
+static int skel_event;                          /* what the bridge sleeps on */
+static volatile bool skel_pending;              /* something to do, said before the wake-up */
+
+/* the phone's driver, from its interrupt: the controller has spoken */
+void hakios_bthost_wake(void);
+void
+hakios_bthost_wake(void)
+{
+	skel_pending = true;
+	wakeup((void *)&skel_event);
+}
+
 void
 hakios_bthost_written(const uint8_t *bytes, unsigned length)
 {
 	lck_mtx_lock(&skel_lock);
 	(void)skel_queue_locked(bytes, length);
 	lck_mtx_unlock(&skel_lock);
+	hakios_bthost_wake();
 }
 
 /*
@@ -308,6 +328,7 @@ skel_ctl_send(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void 
 	}
 	lck_mtx_unlock(&skel_lock);
 	mbuf_freem(m);
+	hakios_bthost_wake();
 	return error;
 }
 
@@ -620,7 +641,7 @@ skel_bridge(void)
 				say("%u bytes written and not a whole H4 packet in 2 s", pending);
 			}
 		}
-		length = skel_receive(2);
+		length = skel_receive(p->wakes ? 0 : 2);
 		if (length > 0) {
 			length = (int)skel_quirks(skel_frame, (unsigned)length);
 			skel_dump("in ", skel_frame, (unsigned)length, &skel_said_in);
@@ -630,6 +651,18 @@ skel_bridge(void)
 				say("receive failed (%d)", length);
 			}
 			delay_for_interval(1, NSEC_PER_MSEC);
+		} else if (p->wakes) {
+			/*
+			 * Nothing came and (above) nothing whole was written: asleep until either happens. The wait is declared
+			 * before the look, so a wake-up between the two is not lost; a second at the most, for a packet half written.
+			 */
+			assert_wait_timeout((event_t)&skel_event, THREAD_UNINT, 1000, NSEC_PER_MSEC);
+			if (skel_pending) {
+				clear_wait(current_thread(), THREAD_AWAKENED);
+			} else {
+				(void)thread_block(THREAD_CONTINUE_NULL);
+			}
+			skel_pending = false;
 		}
 	}
 }
