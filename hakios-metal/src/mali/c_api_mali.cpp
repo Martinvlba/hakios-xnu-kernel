@@ -690,6 +690,9 @@ struct hakios_metal_texture {
     unsigned layers = 1;
     uint64_t layer_stride = 0;
     hakios_metal_texture *parent = nullptr;     // a view's (held)
+    // a depth or stencil texture drawn into with no colour attachment: the colour target a Mali fragment job has all the
+    // same, RGBA8 of this size, never written or read -- made at the first such draw, kept with the texture
+    std::atomic<hakios_metal_texture *> stand_in{nullptr};
     hakios_metal_buffer *buffer = nullptr;      // a buffer texture's (held)
     std::atomic<int> refs{1};
 
@@ -735,6 +738,9 @@ hakios_metal_texture::release()
     }
     if (buffer != nullptr) {
         buffer->release();
+    }
+    if (hakios_metal_texture *s = stand_in.load()) {
+        s->release();
     }
     delete this;
 }
@@ -4085,9 +4091,13 @@ hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_siz
     std::vector<mali_constant> vc(vs_count), fc(fs_count);
     char why[512];
 
-    if (fs_bitcode == nullptr || fs_size == 0) {
-        fail("a pipeline with no fragment function (depth-only: not on the Mali yet)");
-        return nullptr;
+    // A PIPELINE WITH NO FRAGMENT FUNCTION (11-15): depth (and stencil) alone, a shadow map's -- refused until now. Its
+    // fragment stage is a built-in that writes nothing (mali_depth_only_fragment_compile); the draw's colour target, if
+    // the pass has none, a stand-in nothing is written to (hakios_metal_cb_draw...: color0 NULL)
+    const bool depth_only = fs_bitcode == nullptr || fs_size == 0;
+    if (depth_only) {
+        fs_bitcode = nullptr;
+        fs_size = 0;
     }
     for (unsigned i = 0; i < vs_count; i++) {
         vc[i] = { vs_constants[i].index, vs_constants[i].bits };
@@ -4114,7 +4124,8 @@ hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_siz
     }
     if (!found) {
         if (mali_stage_compile(vs_bitcode, vs_size, vc.data(), vs_count, 0, nullptr, &p->vs, why, sizeof(why)) != 0 ||
-            mali_stage_compile(fs_bitcode, fs_size, fc.data(), fs_count, 1, &p->vs, &p->fs, why, sizeof(why)) != 0) {
+            (depth_only ? mali_depth_only_fragment_compile(&p->vs, &p->fs, why, sizeof(why))
+                        : mali_stage_compile(fs_bitcode, fs_size, fc.data(), fs_count, 1, &p->vs, &p->fs, why, sizeof(why))) != 0) {
             fail("%s", why);
             p->release();
             return nullptr;
@@ -4134,7 +4145,9 @@ hakios_metal_program_new_bitcode_constants(const void *vs_bitcode, size_t vs_siz
         }
     }
     p->vs_bitcode.assign((const uint8_t *)vs_bitcode, (const uint8_t *)vs_bitcode + vs_size);
-    p->fs_bitcode.assign((const uint8_t *)fs_bitcode, (const uint8_t *)fs_bitcode + fs_size);
+    if (!depth_only) {
+        p->fs_bitcode.assign((const uint8_t *)fs_bitcode, (const uint8_t *)fs_bitcode + fs_size);
+    }
     p->vs_constants = vc;
     p->fs_constants = fc;
     return p;
@@ -4816,6 +4829,36 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             fs_sampler_count, ix, fs_words, fs_word_count);
         for (auto *v : views) if (v) v->release();     // (the draw holds what it uses)
         return r;
+    }
+    if (pass != nullptr && pass->color0 == nullptr && (pass->depth != nullptr || pass->stencil != nullptr)) {
+        // DEPTH OR STENCIL ALONE (11-15: a shadow map's pass, no colour attachment): the fragment job's colour target is
+        // the depth texture's stand-in -- not stored, so nothing is written to it
+        bool more = false;
+        for (unsigned i = 0; i < 7; i++) more = more || pass->more[i].texture != nullptr;
+        hakios_metal_texture *zs = pass->depth != nullptr ? pass->depth : pass->stencil;
+        if (more || zs->samples > 1) {
+            fail("%s%sa draw without colour attachment 0 %s", p ? p->name : "", p ? ": " : "",
+                more ? "but with others (not on the Mali yet)" : "into a multisampled depth buffer (one sample on the Mali yet)");
+            return -1;
+        }
+        hakios_metal_texture *stand = zs->stand_in.load();
+        if (stand == nullptr) {
+            hakios_metal_texture *made = hakios_metal_texture_new_levels(cb->queue->device, 2, 70, zs->width, zs->height, 1, 4 | 1);
+            if (made == nullptr) {
+                return -1;                              // (the reason is the texture's)
+            }
+            if (zs->stand_in.compare_exchange_strong(stand, made)) {
+                stand = made;
+            } else {
+                made->release();
+            }
+        }
+        struct hakios_metal_render_pass q = *pass;
+        q.color0 = stand;
+        q.store_action = 0;
+        return drawImpl(cb, p, &q, viewport, scissor, primitive, vertex_start, vertex_count, instance_count, base_instance,
+            vs_buffers, vs_offsets, vs_count, fs_buffers, fs_offsets, fs_count, fs_textures, fs_texture_count, fs_samplers,
+            fs_sampler_count, ix, fs_words, fs_word_count);
     }
     hakios_metal_device *d = cb->queue->device;
     const char *refused = nullptr;

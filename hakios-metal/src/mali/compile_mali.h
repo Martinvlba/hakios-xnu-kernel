@@ -132,6 +132,10 @@ int mali_preload_zs_compile(struct mali_kernel_binary *vs, struct mali_kernel_bi
 /* the driver's blit draw: texture 0 through sampler 0 at (x w0 + y w1 + w2, x w3 + y w4 + w5), normalized, of the
  * fragment's position (x, y) */
 int mali_blit_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size);
+/* a fragment function that writes nothing, compiled against VS's varyings: a pipeline with no fragment function draws
+ * depth (and stencil) alone -- a shadow map's */
+int mali_depth_only_fragment_compile(const struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error,
+    size_t error_size);
 /* the driver's resolve draw: the mean of multisample texture 0's SAMPLES samples at the fragment's pixel + (words 0, 1) */
 int mali_resolve_compile(struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, unsigned samples, char *error,
     size_t error_size);

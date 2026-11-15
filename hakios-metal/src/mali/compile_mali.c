@@ -1452,6 +1452,28 @@ done:
 	return result;
 }
 
+int
+mali_depth_only_fragment_compile(const struct mali_kernel_binary *vs, struct mali_kernel_binary *fs, char *error, size_t error_size)
+{
+	void *mem = ralloc_context(NULL);
+	nir_builder b;
+	int result;
+
+	memset(fs, 0, sizeof(*fs));
+	b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+	    pan_get_nir_shader_compiler_options(pan_arch(GPU_ID), MESA_SHADER_FRAGMENT, false), "hakios_depth_only_fs");
+	ralloc_steal(mem, b.shader);
+	b.shader->info.fs.origin_upper_left = true;
+	fs->stage = 2;
+	snprintf(fs->name, sizeof(fs->name), "hakios_depth_only_fs");
+	result = compile_nir(b.shader, MESA_SHADER_FRAGMENT, vs->varyings, fs, error, error_size);
+	ralloc_free(mem);
+	if (result != 0) {
+		mali_kernel_binary_free(fs);
+	}
+	return result;
+}
+
 unsigned
 mali_bitcode_constant_count(const void *bitcode, size_t size)
 {

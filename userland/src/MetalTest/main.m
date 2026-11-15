@@ -1184,6 +1184,81 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 	}];
 
 	/* 23 */
+	[self add:@"Shadow map: a pass of depth alone" expect:@"the depth buffer shown as grey: white where nothing was drawn (far, 1.0), a DARK square turning in the middle (near, 0.3), a mid-grey band across the lower half (0.7) which the square covers. Drawn by a pipeline with NO fragment function into a pass with NO colour attachment (the console says two depths read back)"
+	    setup:^SceneDraw(Renderer *r) {
+		id<MTLLibrary> library = [r library:@
+		    "struct SO { float4 pos [[position]]; };\n"
+		    "vertex SO depth_v(uint vid [[vertex_id]], constant U &u [[buffer(0)]]) {\n"
+		    "  SO o; float2 q = corner(vid) - 0.5; float c = cos(u.b.y), s = sin(u.b.y);\n"
+		    "  float2 p = float2(q.x * c - q.y * s, q.x * s + q.y * c); o.pos = float4(u.a.xy + p * u.a.zw, u.b.x, 1.0); return o; }\n"
+		    "fragment float4 depth_show_f(VO in [[stage_in]], depth2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+		    "  float d = t.sample(s, in.uv); return float4(d, d, d, 1.0); }\n"];
+		MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:512 height:512 mipmapped:NO];
+		MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+		NSError *error = nil;
+		id<MTLRenderPipelineState> fill = nil;
+
+		if (library != nil) {
+			pd.vertexFunction = [library newFunctionWithName:@"depth_v"];
+			pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+			fill = [r.device newRenderPipelineStateWithDescriptor:pd error:&error];
+			if (fill == nil) {
+				[r fail:@"a pipeline with no fragment function: %@", error.localizedDescription];
+			}
+		}
+		id<MTLRenderPipelineState> show = [r simple:library vertex:@"rect_v" fragment:@"depth_show_f" blend:NO];
+		td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		td.storageMode = MTLStorageModeShared;
+		id<MTLTexture> depth = [r texture:td];
+		dd.depthCompareFunction = MTLCompareFunctionLess;
+		dd.depthWriteEnabled = YES;
+		id<MTLDepthStencilState> depthState = [r.device newDepthStencilStateWithDescriptor:dd];
+		__block BOOL checked = NO;
+		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {
+			MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor new];
+
+			pass.depthAttachment.texture = depth;
+			pass.depthAttachment.loadAction = MTLLoadActionClear;
+			pass.depthAttachment.storeAction = MTLStoreActionStore;
+			pass.depthAttachment.clearDepth = 1;
+			id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+			if (fill != nil && e != nil) {
+				/* the band (0.7) first, then the square (0.3) in front of it */
+				Uniforms band = { matrix_identity_float4x4, { 0, -0.5f, 2, 0.6f }, { 0.7f, 0, 0, 0 }, t, 0, 0, 0 };
+				Uniforms square = { matrix_identity_float4x4, { 0, 0, 0.9f, 0.9f }, { 0.3f, t, 0, 0 }, t, 0, 0, 0 };
+
+				[e setRenderPipelineState:fill];
+				[e setDepthStencilState:depthState];
+				[r uniforms:band on:e];
+				[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+				[r uniforms:square on:e];
+				[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+			}
+			[e endEncoding];
+			e = [cb renderCommandEncoderWithDescriptor:[r passTo:target clear:MTLClearColorMake(0.3, 0, 0, 1)]];
+			if (show != nil && depth != nil) {
+				[e setRenderPipelineState:show];
+				[e setFragmentSamplerState:nearest atIndex:0];
+				[e setFragmentTexture:depth atIndex:0];
+				[r rect:(vector_float4){ -1, -1, 2, 2 } colour:(vector_float4){ 1, 1, 1, 1 } time:t on:e];
+			}
+			[e endEncoding];
+			if (!checked && depth != nil) {
+				checked = YES;
+				[cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+					float middle = -1, corner = -1;
+
+					[depth getBytes:&middle bytesPerRow:4 fromRegion:MTLRegionMake2D(256, 256, 1, 1) mipmapLevel:0];
+					[depth getBytes:&corner bytesPerRow:4 fromRegion:MTLRegionMake2D(4, 4, 1, 1) mipmapLevel:0];
+					say([NSString stringWithFormat:@"depth-only pass %@: the middle %.3f (expected 0.300), a corner %.3f (expected 1.000; -1: nothing read)",
+					     fabsf(middle - 0.3f) < 0.01f && fabsf(corner - 1.0f) < 0.001f ? @"RIGHT" : @"WRONG", middle, corner]);
+				}];
+			}
+		};
+	}];
+
+	/* 24 */
 	[self add:@"UIKit over Metal" expect:@"a slow colour wash (Metal) and over it, drawn by UIKit: a white box sliding left to right and back, smoothly (an animation the render server runs); in it a counter going up every frame (a layer redrawn in place); a spinning grey square (a transform set every frame). Nothing of them left behind, none frozen"
 	    setup:^SceneDraw(Renderer *r) {
 		return ^(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> target, float t) {
