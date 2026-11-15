@@ -8901,7 +8901,8 @@ hm_spec_off(void)
  * constants this way: the aquarium's 615 draws a frame made some 1200 buffers a frame, a fifth of its GPU process's
  * time in the kernel for them and a quarter in giving them back (metal_sample=1000). Now the bytes go one after
  * another into a 64 KiB buffer (each at a multiple of 64 bytes), bound at their offset; what is over 16 KiB still
- * gets its own. */
+ * gets its own. (11-15: by then seven tenths of that process's time were those kernel calls and the aquarium ran at
+ * 14-18 frames a second; with this, 48.) */
 #define HM_ARENA_SIZE   65536u
 #define HM_ARENA_MOST   16384u
 - (HakiosMetalBuffer *)hakiosScratch:(const void *)bytes length:(NSUInteger)length stage:(const char *)stage index:(NSUInteger)index
@@ -8910,10 +8911,13 @@ hm_spec_off(void)
 	HakiosMetalBuffer *buffer;
 
 	*offset = 0;
-	static int shared = -1;         /* (metal_arena=1: NOT YET -- the first run with it left the window server spinning) */
+	/* (ON since 11-15; metal_arena=0: a buffer for each, as before. Its first run, 11-13, left the window server
+	 * spinning from Safari's launch on -- not seen again: the home screen, MetalTest and the aquarium ran with it,
+	 * the window server at its idle 10 % afterwards) */
+	static int shared = -1;
 
 	if (shared < 0) {
-		shared = hm_boot_arg_set("metal_arena=1") ? 1 : 0;
+		shared = hm_boot_arg_set("metal_arena=0") ? 0 : 1;
 	}
 	if (shared && bytes != NULL && length != 0 && length <= HM_ARENA_MOST) {
 		void *to;
