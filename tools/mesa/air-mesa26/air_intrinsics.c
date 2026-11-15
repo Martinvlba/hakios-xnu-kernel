@@ -518,6 +518,14 @@ llvm_op(struct air_ctx *c, const struct air_inst *in, const char *name)
       air_set(c, &in->base, air_val_ssa(c, nir_fadd(&c->b, nir_fmul(&c->b, x, y), z)));
       return true;
    }
+   if (!strncmp(name, "llvm.fabs.", 10)) {
+      /* |x|, as the optimiser writes it for a select on the sign (HDRProcessing's packed422 tone mappers) */
+      nir_def *x = air_get_ssa(c, in->operands[1]);
+      if (!x)
+         return false;
+      air_set(c, &in->base, air_val_ssa(c, nir_fabs(&c->b, x)));
+      return true;
+   }
    if (!strncmp(name, "llvm.memcpy.", 12)) {
       /* a copy between two of our pointers, of a constant length */
       struct air_val *dst = air_get(c, in->operands[1]);
