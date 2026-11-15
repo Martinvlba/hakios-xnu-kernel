@@ -1028,6 +1028,115 @@ plain_vibrancy(void)
  * November: 6 to 10 ms a frame in motion, ~30 ms for an application's close). ui_lite=0 turns both off again (what
  * var_store kept from a ui_lite=1 boot); without the boot-arg the settings are left alone.
  */
+/*
+ * THE PHONE NEVER LOCKED BY ITSELF (11-15): SpringBoard's idle timer was reset once a second. There is no telephony
+ * daemon to talk to here, SBTelephonyManager's connection to it fails, and each failure schedules
+ * -[SBTelephonyManager _handleTelephonyDaemonRestart] a second later -- which connects again (and fails again) and
+ * ends in -updateSpringBoard, whose last act is -[SBIdleTimerGlobalCoordinator resetIdleTimer] (found with
+ * idle_trace=1 below). On an iPhone that runs once when CommCenter restarts. Here: the first three go through, then
+ * one every ten minutes -- the retries stop with it, and the screen dims and locks after Settings' Auto-Lock time.
+ * telephony_retry=1 (a boot-arg): as it was. To be taken out when there is a modem to talk to.
+ */
+static void (*original_telephony_restart)(id self, SEL selector);
+
+static void
+telephony_restart(id self, SEL selector)
+{
+	static int calls, skipped;
+	static time_t last;
+	time_t now = time(NULL);
+
+	if (++calls > 3 && now - last < 600) {
+		if (!skipped++) {
+			say("hakios: SpringBoard: the telephony daemon's restart is handled every second (none here): from now on "
+			    "once in ten minutes\n");
+		}
+		return;
+	}
+	last = now;
+	original_telephony_restart(self, selector);
+}
+
+static void
+telephony_quiet(void)
+{
+	char arguments[1024] = "";
+	size_t size = sizeof(arguments) - 1;
+	Class cls = objc_getClass("SBTelephonyManager");
+	Method m = cls ? class_getInstanceMethod(cls, sel_registerName("_handleTelephonyDaemonRestart")) : NULL;
+
+	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 && strstr(arguments, "telephony_retry=1") != NULL) {
+		return;
+	}
+	if (m == NULL) {
+		say("hakios: SpringBoard: no -[SBTelephonyManager _handleTelephonyDaemonRestart]: the idle timer may be reset "
+		    "every second\n");
+		return;
+	}
+	original_telephony_restart = (void (*)(id, SEL))method_setImplementation(m, (IMP)telephony_restart);
+}
+
+/*
+ * idle_trace=1 (a boot-arg, a diagnosis): who resets SpringBoard's idle timer -- each call of
+ * -[SBIdleTimerGlobalCoordinator resetIdleTimerForReason:] / resetIdleTimer said with its callers' addresses in the
+ * shared cache (tools/dsc-backtrace.py names them), the first 40.
+ */
+#include <execinfo.h>
+static void (*original_reset_idle_reason)(id self, SEL selector, id reason);
+static void (*original_reset_idle)(id self, SEL selector);
+static int idle_said;
+
+static void
+idle_say(const char *what)
+{
+	void *frames[14];
+	char line[400];
+	int n = backtrace(frames, 14), at = 0;
+
+	if (idle_said++ >= 40) {
+		return;
+	}
+	for (int i = 1; i < n && at < (int)sizeof(line) - 20; i++) {
+		at += snprintf(line + at, sizeof(line) - at, " %#lx", (uintptr_t)frames[i] - slide);
+	}
+	say("hakios: idle_trace: %s; shared cache slide 0x0; called from:%s\n", what, line);
+}
+
+static void
+reset_idle_reason(id self, SEL selector, id reason)
+{
+	idle_say("resetIdleTimerForReason:");
+	original_reset_idle_reason(self, selector, reason);
+}
+
+static void
+reset_idle(id self, SEL selector)
+{
+	idle_say("resetIdleTimer");
+	original_reset_idle(self, selector);
+}
+
+static void
+idle_trace(void)
+{
+	char arguments[1024] = "";
+	size_t size = sizeof(arguments) - 1;
+	Class cls = objc_getClass("SBIdleTimerGlobalCoordinator");
+	Method m;
+
+	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) != 0 || strstr(arguments, "idle_trace=1") == NULL ||
+	    cls == NULL) {
+		return;
+	}
+	if ((m = class_getInstanceMethod(cls, sel_registerName("resetIdleTimerForReason:"))) != NULL) {
+		original_reset_idle_reason = (void (*)(id, SEL, id))method_setImplementation(m, (IMP)reset_idle_reason);
+	}
+	if ((m = class_getInstanceMethod(cls, sel_registerName("resetIdleTimer"))) != NULL) {
+		original_reset_idle = (void (*)(id, SEL))method_setImplementation(m, (IMP)reset_idle);
+	}
+	say("hakios: idle_trace=1: the idle timer's resets are said\n");
+}
+
 static void
 ui_lite(void)
 {
@@ -2426,6 +2535,8 @@ hakios_springboard_init(void)
 	    AT(0x1f1c91480UL, 0x1f287f320UL), (IMP)snapshot_output_format);
 	plain_vibrancy();
 	no_buddy();
+	telephony_quiet();
+	idle_trace();
 	ui_lite();
 	wallpaper_cache();
 	status_bar_fallback_is_split();
