@@ -1,0 +1,45 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The stock applications that the sweeps by taps did not reach, each opened by its identifier (lsreg -o: no page to
+# find, and an alert left by the one before does not take the tap), looked at for 6 s, a tap where an alert's
+# "Don't Allow" would be, then the home button. The host takes screenshots meanwhile.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8
+/redwood/bin/lsreg -o com.apple.tv
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.iBooks
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.Bridge
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.calculator
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.compass
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.MobileAddressBook
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.Fitness
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.freeform
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.Home
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.Magnifier
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.measure
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.MobileStore
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.news
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.Passbook
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.shortcuts
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.tips
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.VoiceMemos
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.camera
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.podcasts
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
+/redwood/bin/lsreg -o com.apple.Music
+/redwood/bin/rwtouch wait 7 tap 0.31 0.60 wait 3 button home wait 2
