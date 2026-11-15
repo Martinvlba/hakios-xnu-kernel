@@ -16,6 +16,7 @@
  *                                swipe and drag give them):
  *                                for measuring how far behind the finger the screen is (tools/latency.py)
  *   button NAME [MS]             press a button: home, lock, volup, voldown
+ *   screenshot                   the side button and volume up together
  *   read                         print the samples that arrive, forever (to watch the queue)
  *   notify NAME                  post a Darwin notification (com.hakios.unlock: see inject_sb.c)
  *   brightness LEVEL             the display's brightness, 0 to 1, as Control Center's slider sets it
@@ -205,6 +206,19 @@ main(int argc, char **argv)
 			}
 			button(which, ms ? ms : 80);
 			i += ms ? 2 : 1;
+		} else if (strcmp(step, "screenshot") == 0) {
+			/* the side button and volume up together, as a hand presses them: one 20 ms after the other, 120 ms */
+			struct hakios_touch t = { .type = HAKIOS_BUTTON_DOWN, .finger = HAKIOS_BUTTON_LOCK };
+
+			write(device, &t, sizeof(t));
+			usleep(20000);
+			t.finger = HAKIOS_BUTTON_VOLUME_UP;
+			write(device, &t, sizeof(t));
+			usleep(120000);
+			t.type = HAKIOS_BUTTON_UP;
+			write(device, &t, sizeof(t));
+			t.finger = HAKIOS_BUTTON_LOCK;
+			write(device, &t, sizeof(t));
 		} else if (strcmp(step, "swipe") == 0 && left >= 4) {
 			int ms = left >= 5 && argv[i + 5][0] >= '0' && argv[i + 5][0] <= '9' ? atoi(argv[i + 5]) : 0;
 

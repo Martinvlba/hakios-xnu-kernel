@@ -31,6 +31,7 @@
  *     In any other program given this library (INJECT in build.sh) only the last of them is
  *     answered, with that program's layers.
  */
+#include <semaphore.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <IOSurface/IOSurfaceRef.h>
@@ -467,6 +468,34 @@ setup_activation_state(id self, __unused SEL selector)
 	LOCKDOWN_STATE(self) = LOCKDOWN_ACTIVATED;
 }
 
+/*
+ * "The setup assistant has been gone through", for the processes that ask SetupAssistant.framework themselves
+ * (11-15): SpringBoard is kept from the setup assistant (set_setup_required_reason), but
+ * BYSetupAssistantNeedsToRun() still said yes -- so the side button with volume up took no screenshot ("Could not
+ * comply with request to capture for reason: Device has not gone through Buddy", ScreenshotServices inside
+ * SpringBoard), and the activity scheduler held back every background activity that waits for it
+ * ("RequiresBuddyCompletePolicy ... buddyComplete == 0"). On a phone that function's answer is whether the named
+ * semaphore "purplebuddy.sentinel" can be opened (its LaunchSentinelExists(): sem_open without O_CREAT). SpringBoard
+ * makes it when it finds no setup needed and removes it otherwise -- by its own finding, not by the reason the hook
+ * hands on: made at SpringBoard's start it was gone 20 s later. So it is made again after each time SpringBoard
+ * settles the reason, and once more when the system is up. (The key ForceNoBuddy of com.apple.purplebuddy is looked
+ * at on Apple's internal builds only: tried, nothing.)
+ */
+static void
+no_buddy(void)
+{
+	static int said;
+	sem_t *sentinel = sem_open("purplebuddy.sentinel", O_CREAT, 0644, 0);
+
+	if (sentinel != SEM_FAILED) {
+		sem_close(sentinel);
+	}
+	if (!said++ || sentinel == SEM_FAILED) {
+		say("hakios: SpringBoard: the setup assistant marked as gone through (the semaphore purplebuddy.sentinel): %s\n",
+		    sentinel != SEM_FAILED ? "made" : strerror(errno));
+	}
+}
+
 /* -[SBSetupManager _setSetupRequiredReason:]: 0 = no need for the setup assistant */
 static void (*original_set_setup_required_reason)(id self, SEL selector, long reason);
 
@@ -477,6 +506,7 @@ set_setup_required_reason(id self, SEL selector, long reason)
 		say("hakios: SpringBoard wants the setup assistant (reason %ld); not here\n", reason);
 	}
 	original_set_setup_required_reason(self, selector, 0);
+	no_buddy();
 }
 
 /*
@@ -2375,6 +2405,7 @@ hakios_springboard_init(void)
 		int zero = 0;
 
 		sysctlbyname("kern.hakios.boot_bomb", NULL, NULL, &zero, sizeof(zero));
+		no_buddy();
 	});
 	caenv();
 	display_link_rates();
@@ -2394,6 +2425,7 @@ hakios_springboard_init(void)
 	snapshot_format = replace_method_of_kind('+', "XBApplicationSnapshotManifestImpl", "_outputFormatForSnapshot:",
 	    AT(0x1f1c91480UL, 0x1f287f320UL), (IMP)snapshot_output_format);
 	plain_vibrancy();
+	no_buddy();
 	ui_lite();
 	wallpaper_cache();
 	status_bar_fallback_is_split();
