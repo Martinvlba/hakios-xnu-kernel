@@ -1605,6 +1605,11 @@ typedef void (^SceneDraw)(Renderer *r, id<MTLCommandBuffer> cb, id<MTLTexture> t
 		t1 = CACurrentMediaTime();
 		_waitSum += t1 - t0;
 		_waitMax = MAX(_waitMax, t1 - t0);
+		if (t1 - t0 > 0.1) {
+			/* (CACurrentMediaTime is the time since the phone started: the kernel log's clock) */
+			say([NSString stringWithFormat:@"a stall: -nextDrawable took %.0f ms, until %.3f s since the phone started%@", (t1 - t0) * 1000, t1,
+			     drawable == nil ? @" (and gave none)" : @""]);
+		}
 		if (drawable != nil) {
 			void *texture = (__bridge void *)drawable.texture;
 			NSUInteger slot = 8;
