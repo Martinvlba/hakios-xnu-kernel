@@ -198,6 +198,28 @@ static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
 static TUNABLE(uint32_t, gCARefreshHz, "fb_ca_hz", 0);
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
 /*
+ * FRAME INFO (11-15): what tells CoreAnimation WHEN its frames reach the panel. QuartzCore's render server runs on a
+ * timer of its own (CADisplayTimer; it does not ask for the refresh notification) and puts that timer's phase by the
+ * presentation times of its swaps (IOMFBServer::frame_info_callback -> IOMFBDisplay::add_timing ->
+ * CADisplayTimerAlignPhase): notification type 3. IOMobileFramebuffer.framework asks which values there are
+ * (selector 74: the count, and the INDEXth one's name in 64 bytes), turns some on by a mask of those indices (selector
+ * 73: 3, mask) and gets, a swap: the mask of the values that follow (bit 31: each in two 32-bit halves), the swap's
+ * identifier, the values. Answered "none" until now, its timer ran free of the panel's refresh: a frame that came
+ * just after a refresh instead of just before waited a whole one more (an application's Metal layer at 100 frames a
+ * second for the panel's 120, a third of the window server's swaps "a refresh late"). Told here: Presentation_time,
+ * the mach time of the panel's refresh that began to read the swap's frame. fb_frameinfo=0: none, as before.
+ */
+static TUNABLE(uint32_t, gFrameInfoOn, "fb_frameinfo", 1);
+static const char *const kFrameInfoNames[] = {
+	"Presentation_time", "Requested_presentation", "Thermal_throttle", "GP0_Max_BW", "GP1_Max_BW", "GP0_Obs_BW", "GP1_Obs_BW",
+	"Min_FrameTime", "Max_FrameTime", "Vbl_FrameTime", "Presentation_delta", "Performance_headroom", "Frame_APCE",
+	"Bright_ScalingFactor", "BrightOut_NoScale", "RTPLC_Bright_Capped", "RTPLC_RT_Trig",
+};
+#define kFrameInfoCount         (sizeof(kFrameInfoNames) / sizeof(kFrameInfoNames[0]))
+#define kFBNotifyFrameInfo      3
+static void fbFrameInfo(uint32_t swapID, uint64_t presented);     /* (to whoever turned frame info on: below) */
+static uint32_t gFrameInfosTold, gFrameInfosDropped;
+/*
  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
  * to 10 (the phone, 15 October; fb_threads=1 is how it was).
@@ -2324,7 +2346,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				IOLog("MiniIOMobileFramebuffer: zero copy: %u frames scanned out where they were drawn, %u copied; "
 				    "the panel took them %llu us after on average (%llu not within 25 ms)\n", gZCFrames, gZCCopied,
 				    gZCWaits ? waited / 1000 / gZCWaits : 0, gZCWaitLate);
-				IOLog("MiniIOMobileFramebuffer: SwapWait: %u calls, %u waited, %u for a swap not presented yet, %u timed out; "
+				IOLog("MiniIOMobileFramebuffer: frame info: %u presentation times told, %u not taken (fb_frameinfo=%u)\n", gFrameInfosTold,
+			    gFrameInfosDropped, gFrameInfoOn);
+			IOLog("MiniIOMobileFramebuffer: SwapWait: %u calls, %u waited, %u for a swap not presented yet, %u timed out; "
 				    "%u polls, %u answers busy (fb_swapwait=%u)\n", gSwapWaitCalls, gSwapWaitBlocked, gSwapWaitAhead,
 				    gSwapWaitTimeouts, gSwapPolls, gSwapPollsBusy, gSwapWaitOn);
 			}
@@ -2405,6 +2429,12 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 counted:
 	swapShown(swapWord(swap, SWAP_ID));
 	swapScanned(swapWord(swap, SWAP_ID));   /* (here the panel reads it, the surface before let go of: fb_swapwait=3) */
+	if (gFrameInfoOn) {
+		/* the refresh that took it: the display driver's last, where it tells one; else now */
+		uint64_t when = hakios_display_ops != NULL && hakios_display_ops->vblank_time != NULL ? hakios_display_ops->vblank_time() : 0;
+
+		fbFrameInfo(swapWord(swap, SWAP_ID), when != 0 ? when : mach_absolute_time());
+	}
 	if (gTouchLat) {
 		hakios_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));
@@ -2487,6 +2517,10 @@ counted:
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+class IOMobileFramebufferUserClient;
+static IOLock *gFrameInfoLock;                          /* around the next */
+static IOMobileFramebufferUserClient *gFrameInfoClient; /* who turned frame info on (the window server); NULL: nobody */
+
 class IOMobileFramebufferUserClient : public IOUserClient
 {
 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
@@ -2502,6 +2536,11 @@ class IOMobileFramebufferUserClient : public IOUserClient
 	uint64_t                fVSyncTime;             /* when the refresh being waited for is due */
 	bool                    fVSyncRunning;
 	bool                    fClosed;
+	uint32_t                fFrameInfoMask;         /* the frame info turned on (selector 73), by kFrameInfoNames' indices */
+
+public:
+	void frameInfo(uint32_t swapID, uint64_t presented);
+private:
 
 	static void vsyncFired(thread_call_param_t self, thread_call_param_t unused);
 	void vsync(void);
@@ -2537,6 +2576,13 @@ IOMobileFramebufferUserClient::start(IOService * provider)
 		return false;
 	}
 	fLock = IOLockAlloc();
+	if (gFrameInfoLock == NULL) {
+		IOLock *lock = IOLockAlloc();
+
+		if (!OSCompareAndSwapPtr(NULL, lock, &gFrameInfoLock)) {
+			IOLockFree(lock);
+		}
+	}
 	fVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);
 	return fLock != NULL && fVSyncCall != NULL;
 }
@@ -2548,6 +2594,13 @@ IOMobileFramebufferUserClient::clientClose(void)
 		IOLockLock(fLock);
 		fClosed = true;
 		IOLockUnlock(fLock);
+	}
+	if (gFrameInfoLock != NULL) {
+		IOLockLock(gFrameInfoLock);
+		if (gFrameInfoClient == this) {
+			gFrameInfoClient = NULL;
+		}
+		IOLockUnlock(gFrameInfoLock);
 	}
 	if (fVSyncCall != NULL) {
 		thread_call_cancel_wait(fVSyncCall);
@@ -2577,6 +2630,48 @@ IOMobileFramebufferUserClient::free(void)
 		fLock = NULL;
 	}
 	IOUserClient::free();
+}
+
+/* One swap on the panel, told to the client that asked: the mask of what follows, the swap, the presentation time. */
+void
+IOMobileFramebufferUserClient::frameInfo(uint32_t swapID, uint64_t presented)
+{
+	OSAsyncReference64 ref;
+	io_user_reference_t args[3];
+
+	IOLockLock(fLock);
+	if (!fClosed && (fFrameInfoMask & 1) != 0 && fCallbacks[kFBNotifyFrameInfo] != 0 && fPorts[kFBNotifyFrameInfo] != NULL) {
+		setAsyncReference64(ref, fPorts[kFBNotifyFrameInfo], fCallbacks[kFBNotifyFrameInfo], fRefcons[kFBNotifyFrameInfo], fTask);
+		args[0] = 1;                    /* Presentation_time alone, a whole 64-bit value */
+		args[1] = swapID;
+		args[2] = presented;
+		if (sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 3, kIOUserNotifyOptionCanDrop) == kIOReturnSuccess) {
+			gFrameInfosTold++;
+		} else {
+			gFrameInfosDropped++;
+		}
+	}
+	IOLockUnlock(fLock);
+}
+
+static void
+fbFrameInfo(uint32_t swapID, uint64_t presented)
+{
+	IOMobileFramebufferUserClient *client;
+
+	if (gFrameInfoLock == NULL) {
+		return;
+	}
+	IOLockLock(gFrameInfoLock);
+	client = gFrameInfoClient;
+	if (client != NULL) {
+		client->retain();
+	}
+	IOLockUnlock(gFrameInfoLock);
+	if (client != NULL) {
+		client->frameInfo(swapID, presented);
+		client->release();
+	}
 }
 
 IOReturn
@@ -2821,7 +2916,22 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	case kFBMethodSwapSignal:
 	case kFBMethodSwapCancel:
 	case kFBMethodSwapCancelAll:
-	case kFBMethodChangeFrameInfo:
+		return kIOReturnSuccess;
+
+	case kFBMethodChangeFrameInfo:                  /* in: 3, the mask of the frame info wanted from now on */
+		if (args->scalarInputCount >= 2 && in[0] == kFBNotifyFrameInfo && gFrameInfoOn) {
+			IOLockLock(fLock);
+			fFrameInfoMask = (uint32_t) in[1];
+			IOLockUnlock(fLock);
+			IOLockLock(gFrameInfoLock);
+			if (fFrameInfoMask != 0) {
+				gFrameInfoClient = this;
+			} else if (gFrameInfoClient == this) {
+				gFrameInfoClient = NULL;
+			}
+			IOLockUnlock(gFrameInfoLock);
+			IOLog("MiniIOMobileFramebuffer: frame info: mask %#x turned on by %s\n", (uint32_t) in[1], proc_best_name(current_proc()));
+		}
 		return kIOReturnSuccess;
 
 	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */
@@ -2838,13 +2948,18 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		IOLockUnlock(fLock);
 		return kIOReturnSuccess;
 
-	case kFBMethodSupportedFrameInfo:               /* in: type; out: how many, and their tags: none */
+	case kFBMethodSupportedFrameInfo:               /* in: an index; out: how many there are, and that one's name (64 bytes) */
 		if (args->scalarOutputCount >= 1) {
-			out[0] = 0;
+			out[0] = gFrameInfoOn ? kFrameInfoCount : 0;
 			args->scalarOutputCount = 1;
 		}
 		if (args->structureOutput != NULL) {
 			bzero(args->structureOutput, args->structureOutputSize);
+			if (gFrameInfoOn && args->scalarInputCount >= 1 && in[0] < kFrameInfoCount && args->structureOutputSize >= 2) {
+				strlcpy((char *) args->structureOutput, kFrameInfoNames[in[0]], args->structureOutputSize);
+			} else if (gFrameInfoOn && args->scalarInputCount >= 1 && in[0] >= kFrameInfoCount) {
+				return kIOReturnBadArgument;
+			}
 		}
 		return kIOReturnSuccess;
 
