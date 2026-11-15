@@ -138,8 +138,12 @@ SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) miniamfi_handle;
  * extension -- has had the path from containermanagerd and passes it in the environment as
  * CFFIXED_USER_HOME, which is where Foundation takes the home directory from. So that is the
  * answer: it is looked up among the strings exec left at the top of the stack of the process.
- * A process without the variable has no container, and gets what every process got before:
- * success and an untouched buffer.
+ * A process without the variable has no container and is told so: ENOENT. (Until 11-15 it got
+ * success and an untouched buffer. Safari's history service -- an XPC service, started by launchd
+ * with no such variable -- takes success to mean that the buffer holds its container, made a
+ * string of what its stack held there, nil, and a file URL of nil: an exception, an abort at
+ * every start of Safari, and no history. Told that it has no container it asks LaunchServices
+ * for Safari's, -[NSFileManager _safari_getMobileSafariContainerDirectoryURL:isContainerized:].)
  */
 #define SANDBOX_SYSCALL_CONTAINER_PATH  4
 #define SANDBOX_CONTAINER_VARIABLE      "CFFIXED_USER_HOME="
@@ -211,6 +215,7 @@ minisandbox_container_path(user_addr_t arg)
 	}
 
 	end = (const char *)(strings + strings_size);
+	error = ENOENT;
 	for (s = end - argslen; s < end; s += len + 1) {
 		len = strnlen(s, end - s);
 		if (len > prefix_len && s + len < end && strncmp(s, SANDBOX_CONTAINER_VARIABLE, prefix_len) == 0) {
