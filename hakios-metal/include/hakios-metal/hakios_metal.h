@@ -591,6 +591,9 @@ void hakios_metal_cb_fail(hakios_metal_cb *cb, const char *why);
  * GPU work submitted before the presentation, which must include this); may be NULL */
 void hakios_metal_cb_on_scheduled(hakios_metal_cb *cb, void (*scheduled)(hakios_metal_cb *cb, void *context), void *context);
 void hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb, void *context), void *context);
+/* The IOSurfaces CB writes (its passes' targets, copies and kernels into them), up to MAX into OUT; the count. Read
+ * before the commit (the list is let go when the buffer completes). 0 where a back end does not keep it. */
+unsigned hakios_metal_cb_surfaces_written(hakios_metal_cb *cb, unsigned *out, unsigned max);
 void hakios_metal_cb_wait(hakios_metal_cb *cb);
 enum hakios_metal_status hakios_metal_cb_status(hakios_metal_cb *cb);
 /* why it ended in HAKIOS_METAL_ERROR, or "" */

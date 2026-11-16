@@ -2532,6 +2532,23 @@ passElide(hakios_metal_cb *cb)
     }
 }
 
+unsigned
+hakios_metal_cb_surfaces_written(hakios_metal_cb *cb, unsigned *out, unsigned max)
+{
+    unsigned n = 0;
+
+    if (cb == nullptr) {
+        return 0;
+    }
+    for (unsigned sid : cb->busy) {     // (markBusy's list: every surface a pass, copy or kernel writes)
+        if (n < max) {
+            out[n] = sid;
+        }
+        n++;
+    }
+    return n < max ? n : max;
+}
+
 void
 hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb, void *context), void *context)
 {

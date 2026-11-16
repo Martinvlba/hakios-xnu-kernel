@@ -7504,6 +7504,22 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	_committed = YES;
 	_committedAt = hm_now();
 	hm_hook_drawables();
+	{
+		/* every surface the core says this buffer writes -- passes, copies, kernels: Maps fills its drawable without
+		   a render pass into it, and a wait that knew only passes waited for nothing (the compositor then copied a
+		   drawable half drawn: a frame of the new picture with a rectangle of the old) */
+		unsigned written[16];
+		unsigned n = hakios_metal_cb_surfaces_written(_cb, written, 16);
+
+		for (unsigned i = 0; i < n; i++) {
+			@synchronized (self) {
+				if (_drawnSurfaces == nil) {
+					_drawnSurfaces = [[NSMutableSet alloc] init];
+				}
+				[_drawnSurfaces addObject:@(written[i])];
+			}
+		}
+	}
 	hm_inflight_change(self, YES);
 	/* each turned framebuffer drawn into, laid into its surface by the 2D engine after everything that drew it */
 	for (HakiosMetalTexture *t in _turned) {

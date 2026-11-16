@@ -1674,6 +1674,11 @@ void hakios_metal_cb_on_scheduled(hakios_metal_cb* cb, void (*scheduled)(hakios_
     cb->scheduled_context = context;
 }
 
+unsigned hakios_metal_cb_surfaces_written(hakios_metal_cb* cb, unsigned* out, unsigned max) {
+    (void)cb; (void)out; (void)max;
+    return 0;   // (not kept here: the Adreno back end marks surfaces in the kernel driver)
+}
+
 void hakios_metal_cb_commit(hakios_metal_cb* cb, void (*callback)(hakios_metal_cb*, void*), void* context) {
     if (deferring(cb)) return cb->deferrer->post(&cb->pending, [cb, callback, context] { hakios_metal_cb_commit(cb, callback, context); });
     if (cb->scheduled != nullptr) {    // (where the plug-in ran its scheduled handlers before: the Adreno path as it was)
