@@ -249,6 +249,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			{ ${LDID:-ldid} -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
 			  echo "build.sh: no ldid: record_test is unsigned, and the system may not let it record"; }
 		$DYN -o obj/cpu_test src/cpu_test.c
+		# device health report / first-boot self-test (src/healthcheck.c; TODO 86/87): drivers, /var persistence, battery
+		$DYN -framework CoreFoundation -framework IOKit -o obj/healthcheck src/healthcheck.c
 		# which processes take the processors, every few seconds (src/cputop.c; rc.jobs.cputop)
 		$DYN -o obj/cputop src/cputop.c
 		# iOS's thermal pressure level from the kernel's sensors, in thermalmonitord's place (com.hakios.thermalstate)
@@ -443,6 +445,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/thermal_state ] && cp obj/thermal_state root/bin/
+	[ -f obj/healthcheck ] && cp obj/healthcheck root/bin/
 	[ -f obj/klogsave ] && cp obj/klogsave root/bin/
 	[ -f obj/memsay ] && cp obj/memsay root/bin/
 	[ -f obj/filemap_test ] && cp obj/filemap_test root/bin/

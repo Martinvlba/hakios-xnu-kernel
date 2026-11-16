@@ -7,3 +7,4 @@
 # the processors: how many, and -- once the system has settled -- whether they work at the same time
 /redwood/bin/cpu_test
 /redwood/bin/cpu_test 240 &
+/redwood/bin/healthcheck
