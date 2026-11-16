@@ -40,28 +40,38 @@ size=$(wc -c < "$IPSW" | tr -d ' ')
 cd "$(dirname "$0")"
 case "$size" in
 6165698198)
-	BUILD=20F66 VERSION=16.5
+	BUILD=20F66 VERSION=16.5 DEVICE=d22ap MODEL=iPhone10,3_6 ARCH=arm64
 	ROOTFS_DMG=096-04088-077.dmg                    # the root filesystem, APFS
 	CRYPTEX_DMG=096-04666-078.dmg                   # the OS cryptex: dyld shared cache and a few libraries
 	APP_CRYPTEX_DMG=096-03536-083.dmg               # the App cryptex (BuildManifest: Cryptex1,AppOS)
 	;;
 6171035648)
-	BUILD=20H392 VERSION=16.7.16
+	BUILD=20H392 VERSION=16.7.16 DEVICE=d22ap MODEL=iPhone10,3_6 ARCH=arm64
 	ROOTFS_DMG=087-86698-044.dmg
 	CRYPTEX_DMG=087-86593-047.dmg
 	APP_CRYPTEX_DMG=087-86715-047.dmg
 	;;
+6755700733)
+	# iPhone 13 mini (iPhone14,4, d16ap), iOS 16.6.1 20G81 -- the arm64e stepping stone (rebase-13mini.md).
+	# The dyld shared cache is arm64e; member names verified against this IPSW's BuildManifest, 2026-11-16.
+	BUILD=20G81 VERSION=16.6.1 DEVICE=d16ap MODEL=iPhone14,4 ARCH=arm64e
+	ROOTFS_DMG=096-57815-083.dmg                    # OS (the root filesystem, APFS)
+	CRYPTEX_DMG=096-57245-083.dmg                   # Cryptex1,SystemOS (dyld shared cache, arm64e)
+	APP_CRYPTEX_DMG=096-57613-084.dmg               # Cryptex1,AppOS
+	;;
 *)
-	echo "unpack.sh: $IPSW is $size bytes: neither 16.5 20F66 (6165698198) nor 16.7.16 20H392 (6171035648) for iPhone10,3/10,6" >&2
+	echo "unpack.sh: $IPSW is $size bytes: not a build this knows --" >&2
+	echo "  16.5 20F66 (6165698198) or 16.7.16 20H392 (6171035648) for iPhone10,3/10,6 (d22ap, arm64)," >&2
+	echo "  or 16.6.1 20G81 (6755700733) for iPhone14,4 (d16ap, arm64e)." >&2
 	exit 1
 	;;
 esac
-CACHE=${BUILD}__iPhone10,3_6
+CACHE=${BUILD}__${MODEL}
 if [ -f build.conf ] && ! grep -q "^BUILD=$BUILD\$" build.conf; then
-	echo "unpack.sh: this directory holds $(grep '^BUILD=' build.conf) -- move it away first (rootfs cryptex cryptex-app *__iPhone10,3_6 .done-* build.conf ...)" >&2
+	echo "unpack.sh: this directory holds $(grep '^BUILD=' build.conf) -- move it away first (rootfs cryptex cryptex-app *__iPhone* .done-* build.conf ...)" >&2
 	exit 1
 fi
-printf 'BUILD=%s\nVERSION=%s\nCACHE=%s\n' "$BUILD" "$VERSION" "$CACHE" > build.conf
+printf 'BUILD=%s\nVERSION=%s\nCACHE=%s\nDEVICE=%s\nMODEL=%s\nARCH=%s\n' "$BUILD" "$VERSION" "$CACHE" "$DEVICE" "$MODEL" "$ARCH" > build.conf
 UNZBM=../xnu-deps/host/bin/unzbm
 
 for tool in python3 7z cc; do
@@ -141,5 +151,5 @@ if [ ! -f .done-cryptex-app ]; then
 	touch .done-cryptex-app
 fi
 # --- the device tree, for xnuloader/mkidentity.sh -----------------------------------------------
-[ -f DeviceTree.d22ap.im4p ] || python3 ipsw-member.py "$IPSW" Firmware/all_flash/DeviceTree.d22ap.im4p DeviceTree.d22ap.im4p
+[ -f DeviceTree.$DEVICE.im4p ] || python3 ipsw-member.py "$IPSW" Firmware/all_flash/DeviceTree.$DEVICE.im4p DeviceTree.$DEVICE.im4p
 echo "unpack.sh: done: $(du -sh rootfs | cut -f1) rootfs, $(du -sh cryptex | cut -f1) cryptex, $(du -sh cryptex-app | cut -f1) App cryptex, $(du -sh $CACHE | cut -f1) dyld shared cache"

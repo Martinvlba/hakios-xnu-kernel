@@ -2503,8 +2503,8 @@ hm_crash(int sig, siginfo_t *info, void *context)
 	size_t at = 0;
 
 	if (__sync_fetch_and_add(&said, 1) == 0 && uc != NULL && uc->uc_mcontext != NULL) {
-		uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc, lr = (uintptr_t)uc->uc_mcontext->__ss.__lr;
-		uintptr_t fp = (uintptr_t)uc->uc_mcontext->__ss.__fp, sp = (uintptr_t)uc->uc_mcontext->__ss.__sp;
+		uintptr_t pc = (uintptr_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss), lr = (uintptr_t)__darwin_arm_thread_state64_get_lr(uc->uc_mcontext->__ss);
+		uintptr_t fp = (uintptr_t)__darwin_arm_thread_state64_get_fp(uc->uc_mcontext->__ss), sp = (uintptr_t)__darwin_arm_thread_state64_get_sp(uc->uc_mcontext->__ss);
 		char name[64] = "";
 
 		pthread_getname_np(pthread_self(), name, sizeof(name));

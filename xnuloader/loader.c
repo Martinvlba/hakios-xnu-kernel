@@ -917,7 +917,8 @@ jump_to_kernel_from_el2(uint64_t entry, uint64_t boot_args_pa)
                  */
                 "mrs x3, hcr_el2\n"
                 "and x3, x3, #(1 << 34)\n"             /* E2H */
-                "orr x2, x3, #(1 << 31)\n"             /* HCR_EL2: RW (EL1 is AArch64), E2H as it was, nothing else */
+                "orr x2, x3, #(1 << 31)\n"             /* HCR_EL2: RW (EL1 is AArch64), E2H as it was */
+                "orr x2, x2, #(3 << 40)\n"             /* +API|APK: EL0/EL1 pointer-auth, incl. PACGA, runs instead of trapping to EL2 (arm64e userland, PATH 1) */
                 "msr hcr_el2, x2\n"
                 "isb\n"
                 "cbnz x3, 3f\n"
@@ -1253,7 +1254,8 @@ __asm__ (
         "  b.ne 1f\n"
         "  adr x1, loader_el2_secondary_vectors\n"
         "  msr vbar_el2, x1\n"
-        "  mov x1, #(1 << 31)\n"                /* HCR_EL2: RW only */
+        "  mov x1, #(1 << 31)\n"                /* HCR_EL2: RW */
+        "  orr x1, x1, #(3 << 40)\n"            /* +API|APK: EL0/EL1 pointer-auth, incl. PACGA, no trap to EL2 (arm64e userland, PATH 1) */
         "  msr hcr_el2, x1\n"
         "  isb\n"
         "  mov x1, #0x32ff\n"                   /* CPTR_EL2: no traps */
@@ -2008,7 +2010,7 @@ ufs_survey(void)
  * whatever userdata the phone has, with a GUID of its own (BLOCK_DARWIN_FIRST/LAST and _UNIQ were
  * the first phone's, and no write was ever served on another); they are printed instead.
  */
-#define BLOCK_WRITE_FIRST  2097152ULL                  /* darwin's blocks of 4096: past both cryptexes -- 8 GiB since 11-13 (16.7.16's volume and cryptexes end at 2048000; 16.5's at 2042368, which this was) */
+#define BLOCK_WRITE_FIRST  2359296ULL                  /* darwin's blocks of 4096: past both cryptexes -- 9 GiB for d16ap (iPhone14,4 arm64e cryptexes end at 2208768); was 8 GiB/2097152 for d22ap (16.7.16 ended 2048000). Must match hakios.ufs.c UFS_WRITE_FIRST */
 #define BLOCK_DARWIN_MIN   5242875ULL                  /* blocks of 4096: the first phone's darwin, the layout's */
 #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
 
@@ -3942,6 +3944,14 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		dt_end(&w);
 	}
+	dt_end(&w);
+
+	/* MobileGestalt's HomeButtonType (IODeviceTree:/buttons "home-button-type"): 2 = none, i.e. the home
+	 * gesture / home indicator. Without this node MG answers 0 and iOS's BaseBoard only turns the gesture
+	 * on for ArtworkDeviceSubType 2436 (iPhone X); the iPhone 13 mini (subtype 2340) otherwise falls back
+	 * to home-button UI (swipe-up-from-bottom = Control Center). Both HakiOS targets are gesture devices. */
+	dt_begin(&w, "buttons");
+	dt_prop_u32(&w, "home-button-type", 2);
 	dt_end(&w);
 
 	/* IOKit publishes its NVRAM object on this node; without it IOKit asserts. */

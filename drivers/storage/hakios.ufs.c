@@ -93,7 +93,7 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
  * begins and its exact size are the phone's (tools/userdata-carve.py puts it after userdata, whatever
  * that is): at least the layout's 20 GiB.
  */
-#define UFS_WRITE_FIRST    2097152ULL                  /* darwin's blocks of 4096: 8 GiB (xnuloader/loader.c BLOCK_WRITE_FIRST, tools/mkdatavol.py DATA_FIRST) */
+#define UFS_WRITE_FIRST    2359296ULL                  /* darwin's blocks of 4096: 9 GiB, past d16ap's larger arm64e cryptexes (end 2208768); was 8 GiB/2097152 for d22ap (xnuloader/loader.c BLOCK_WRITE_FIRST, tools/mkdatavol.py DATA_FIRST must match) */
 #define UFS_DARWIN_MIN     5242875ULL                  /* the first phone's darwin, in blocks of 4096 */
 
 struct loader_block_part {
@@ -1933,7 +1933,11 @@ hakios_ufs_init(void)
 
 		if (offered == 0 || offered > ufs_parts || ufs_page->write_first != UFS_WRITE_FIRST) {
 			printf("ufs: the loader offers no partition to write into (ufs_write=1 on its command "
-			    "line too, and a loader that knows about writes)\n");
+			    "line too, and a loader that knows about writes), or its write_first %llu != %llu: "
+			    "the storage stays read only\n",
+			    (unsigned long long)ufs_page->write_first, (unsigned long long)UFS_WRITE_FIRST);
+			offered = 0;    /* refuse: a mismatch (or no offer) must NOT set up the write partition -- otherwise a
+			                 * loader/kernel write_first disagreement would place the data volume inside the cryptexes */
 		}
 		for (uint32_t i = 0; offered != 0 && i < ufs_parts; i++) {
 			const char *why = NULL;

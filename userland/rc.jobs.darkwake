@@ -1,0 +1,3 @@
+# The phone dark and on its battery (charge=0 battery_say=6): a minute lit, four minutes locked and dark, then woken
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 30 button lock wait 240 button lock wait 30
+/redwood/bin/rwtouch wait 200

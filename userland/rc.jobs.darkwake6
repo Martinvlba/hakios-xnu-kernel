@@ -1,0 +1,3 @@
+# Six dark/wake cycles (display_sleep=1's robustness): lock, 20 s dark, wake, 10 s lit
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 10 button lock wait 20 button lock wait 10 button lock wait 20 button lock wait 10 button lock wait 20 button lock wait 10 button lock wait 20 button lock wait 10 button lock wait 20 button lock wait 10 button lock wait 20 button lock wait 10 swipe 0.5 0.985 0.5 0.3 200 wait 5
+/redwood/bin/rwtouch wait 200

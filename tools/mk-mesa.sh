@@ -39,6 +39,11 @@
 # the build without it. To tell whether a patch is in a build, read the source in
 # xnu-deps/build/mesa/mesa-$VERSION, which is where this script unpacks and patches it.
 set -e
+# ARCH=arm64 (the default: the iPhone X's userland, d22ap) or arm64e (the iPhone 13 mini's, d16ap: an arm64 library does
+# not load into an arm64e process). arm64 builds where it always did; another architecture beside it, its name on the
+# cross file and on the build and output directories, so that neither build takes the other's objects.
+ARCH=${ARCH:-arm64}
+case $ARCH in arm64) SFX= ;; arm64e) SFX=-arm64e ;; *) echo "$0: ARCH=$ARCH: arm64 or arm64e" >&2; exit 1 ;; esac
 VERSION=25.0.7
 SHA256=592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
@@ -46,7 +51,9 @@ source "$ROOT/xnu-env.sh"
 B=$ROOT/xnu-deps/build/mesa
 SDK=$THEOS/sdks/iPhoneOS16.5.sdk
 CC=$ROOT/xnu-deps/host/bin/xnu-clang
-mkdir -p "$B/out"
+OUT=out$SFX
+CROSS=cross$SFX.ini
+mkdir -p "$B/$OUT"
 cd "$B"
 
 # The sources are the archive's with tools/mesa/*.patch on top. When the patches change, a tree that was
@@ -76,11 +83,11 @@ fi
 export PATH=$B/venv/bin:$PATH
 
 # the compiler is the kernel's wrapper: it names the target (arm64-apple-ios) and the linker (ld64)
-cat > cross.ini <<INI
+cat > $CROSS <<INI
 [binaries]
-c = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK']
-cpp = ['$CC++', '-arch', 'arm64', '-isysroot', '$SDK', '-fuse-cxa-atexit']
-objc = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK']
+c = ['$CC', '-arch', '$ARCH', '-isysroot', '$SDK']
+cpp = ['$CC++', '-arch', '$ARCH', '-isysroot', '$SDK', '-fuse-cxa-atexit']
+objc = ['$CC', '-arch', '$ARCH', '-isysroot', '$SDK']
 ar = 'llvm-ar'
 ranlib = 'llvm-ranlib'
 strip = 'llvm-strip'
@@ -97,29 +104,29 @@ endian = 'little'
 needs_exe_wrapper = true
 INI
 DRIVERS=${DRIVERS:-softpipe,freedreno}
-BUILD=build-${DRIVERS//,/-}
-[ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file cross.ini --wrap-mode=nofallback \
+BUILD=build$SFX-${DRIVERS//,/-}
+[ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file $CROSS --wrap-mode=nofallback \
 	--prefix=/redwood --libdir=lib --buildtype=release -Db_ndebug=true \
 	-Dplatforms= -Dgallium-drivers="$DRIVERS" -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
 	-Dosmesa=true -Dllvm=disabled -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true \
 	-Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dshader-cache=disabled -Dvalgrind=disabled \
 	-Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dtools= -Dgallium-vdpau=disabled -Dgallium-va=disabled \
-	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
-ninja -C $BUILD > ninja.log
+	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup$SFX.log
+ninja -C $BUILD > ninja$SFX.log
 # air_run draws with a translated Metal shader and reads the pixels back; it is
 # the only way to find out whether the Adreno takes work that did not come from
 # the window server. Built only when asked, since it is a test program.
 if [ "${AIR:-}" = 1 ]; then
-	ninja -C $BUILD src/gallium/drivers/freedreno/air_run >> ninja.log
-	cp $BUILD/src/gallium/drivers/freedreno/air_run out/air_run
-	echo "mk-mesa.sh: $B/out/air_run ($(stat -c %s out/air_run) bytes)"
+	ninja -C $BUILD src/gallium/drivers/freedreno/air_run >> ninja$SFX.log
+	cp $BUILD/src/gallium/drivers/freedreno/air_run $OUT/air_run
+	echo "mk-mesa.sh: $B/$OUT/air_run ($(stat -c %s $OUT/air_run) bytes)"
 fi
 
-llvm-strip -x -o out/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
-install_name_tool -id /redwood/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
-nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
-cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml out/gl.xml
+llvm-strip -x -o $OUT/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
+install_name_tool -id /redwood/lib/libOSMesa.8.dylib $OUT/libOSMesa.8.dylib
+nm -gU $OUT/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > $OUT/exported-gl.txt
+cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml $OUT/gl.xml
 # (userland/build.sh comes here again when this no longer matches)
-cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/hakios-drm/* | sha256sum > out/built-from
-echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/out/libOSMesa.8.dylib, $(stat -c %s out/libOSMesa.8.dylib) bytes," \
-	"$(wc -l < out/exported-gl.txt) gl* functions"
+cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/hakios-drm/* | sha256sum > $OUT/built-from
+echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/$OUT/libOSMesa.8.dylib, $(stat -c %s $OUT/libOSMesa.8.dylib) bytes," \
+	"$(wc -l < $OUT/exported-gl.txt) gl* functions"

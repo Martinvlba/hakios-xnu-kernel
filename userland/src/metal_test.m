@@ -79,9 +79,9 @@ fault(int sig, siginfo_t *info, void *uap)
 	uintptr_t pc = 0, lr = 0, fp = 0;
 
 	if (uc != NULL && uc->uc_mcontext != NULL) {
-		pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
-		lr = (uintptr_t)uc->uc_mcontext->__ss.__lr;
-		fp = (uintptr_t)uc->uc_mcontext->__ss.__fp;
+		pc = (uintptr_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss);
+		lr = (uintptr_t)__darwin_arm_thread_state64_get_lr(uc->uc_mcontext->__ss);
+		fp = (uintptr_t)__darwin_arm_thread_state64_get_fp(uc->uc_mcontext->__ss);
 	}
 	/* async-signal-safe enough for a diagnostic that is about to exit anyway */
 	printf("metal_test:     signal %d at address %p\n", sig, info != NULL ? info->si_addr : NULL);

@@ -86,13 +86,18 @@ linkcopy() { if [ "$(uname)" = Darwin ]; then cp -cRp "$1" "$2"; else cp -al "$1
 cd "$(dirname "$(readlink -f "$0")")"
 source ../xnu-env.sh
 
-CC="xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra"
-LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
-DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
 # (DARWIN=DIR: another unpacked build -- sysimage/unpack.sh keeps one at a time; the 16.5 one was moved to
 # ../sysimage/20F66.keep when 16.7.16 came, 2026-11-13. Which build it is: its build.conf)
 DARWIN=${DARWIN:-../sysimage}
 CACHE=$DARWIN/$( (. $DARWIN/build.conf 2>/dev/null; echo ${CACHE:-20F66__iPhone10,3_6}) )
+# the userland architecture of the unpacked build (unpack.sh writes ARCH to build.conf): arm64 for the
+# iPhone X (d22ap, A11); arm64e for the iPhone 13 mini (d16ap, A15, PAC). The injected stubs below and the
+# dyld shared cache file name both follow it. NB arm64e stubs need PAC-signed pointers + chained fixups --
+# this flag is necessary but not sufficient for the arm64e rebase (see rebase-13mini.md, TODO 64).
+ARCH=$( (. $DARWIN/build.conf 2>/dev/null; echo ${ARCH:-arm64}) )
+CC="xnu-clang -arch $ARCH -Os -static -nostdlib -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra"
+LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
+DYN="xnu-clang -arch $ARCH -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
 # which build the hooks' addresses are taken for (src/inject*.c, AT()): src/ios_build.h, written when it changes
 IOS_BUILD=$( (. $DARWIN/build.conf 2>/dev/null; echo ${BUILD:-20F66}) )
 echo "#define HAKIOS_IOS_$IOS_BUILD 1        /* build.sh: $DARWIN/build.conf */" > src/ios_build.h.new
@@ -152,6 +157,8 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
 /redwood/lib/libhakios.lockdown.dylib lockdownd
+/redwood/lib/libhakios.akd.dylib akd
+/redwood/lib/libhakios.installd.dylib installd
 /redwood/lib/libhakios.bt.dylib BlueTool bluetoothd
 /redwood/lib/libhakios.tweaks.dylib Preferences"}
 mkdir -p obj
@@ -312,6 +319,15 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.lockdown.dylib -framework CoreFoundation \
 			-F${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks -framework MobileActivation \
 			-o obj/libhakios.lockdown.dylib src/inject_lockdown.c
+		# ... and inside akd (Apple's AuthKit daemon): our externally-provisioned Anisette so iOS's native
+		# Apple ID sign-in works (src/inject_akd.c). Behind the gate (boot-arg hakios_appleid=1, or the file
+		# /redwood/etc/anisette-url): a normal boot loads it and it does nothing. AuthKit's classes are reached
+		# through the ObjC runtime at run time, so the framework is not linked here.
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.akd.dylib -framework Foundation -framework CoreFoundation \
+			-lobjc -o obj/libhakios.akd.dylib src/inject_akd.c
+		# ... and inside installd: every signature check answered as valid (src/inject_installd.c)
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.installd.dylib -framework CoreFoundation \
+			-lmis -o obj/libhakios.installd.dylib src/inject_installd.c
 		# ... and inside BlueTool: bluetoothd's "boot" and "init" answered as done (src/inject_bt.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.bt.dylib -o obj/libhakios.bt.dylib src/inject_bt.c
 		$DYN -O2 -dynamiclib -install_name /redwood/lib/libhakios.media.dylib -framework CoreFoundation -framework CoreMedia \
@@ -463,6 +479,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/libhakios.bt.dylib ] && cp obj/libhakios.bt.dylib root/lib/
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.lockdown.dylib ] && cp obj/libhakios.lockdown.dylib root/lib/
+	[ -f obj/libhakios.akd.dylib ] && cp obj/libhakios.akd.dylib root/lib/
+	[ -f obj/libhakios.installd.dylib ] && cp obj/libhakios.installd.dylib root/lib/
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/
 	if [ -f obj/HakiosAudio ]; then
 		mkdir -p root/lib/HakiosAudio.driver
@@ -499,6 +517,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		*) echo "$library $names" ;;
 		esac
 	done > root/etc/inject.conf
+	# path B Apple ID: akd anisette inject reads this file for BOTH its gate (existence) and the anisette
+	# URL -- bypasses sysctl kern.bootargs, which akd's sandbox may block. Only when HAKIOS_ANISETTE_URL is set.
+	[ -n "${HAKIOS_ANISETTE_URL:-}" ] && printf '%s' "$HAKIOS_ANISETTE_URL" > root/etc/anisette-url
 	cp $DARWIN/var.skel root/etc/var.skel              # the directories init creates in /private/var
 	# time zones: the template's links go in a circle until the time zone daemon has run (/usr/share/zoneinfo
 	# points back into /var); point them at the data that ships with the system, and use this machine's zone
@@ -720,7 +741,7 @@ python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -
 # CRYPTEXES=flash: the boot volume alone (20 MB) -- the cryptexes are Apple's images as they are on the
 # flash, in darwin right after the Darwin volume (../tools/darwin-write.py put them there), and init mounts
 # them from there, the same containers 1 and 2 of the root's own device.
-if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_$ARCH ]; then
 	rm -rf flashboot flashboot.os
 	mkdir -p flashboot/sbin flashboot/redwood flashboot/dev flashboot/flash flashboot/Cryptexes/OS flashboot/Cryptexes/App
 	cp obj/stage0 flashboot/sbin/launchd
@@ -732,7 +753,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 		if [ -d $DARWIN/cryptex ]; then linkcopy $DARWIN/cryptex flashboot.os; else mkdir -p flashboot.os; fi
 		D=flashboot.os/System/Library/Caches/com.apple.dyld
 		mkdir -p $D
-		for f in $CACHE/dyld_shared_cache_arm64*; do
+		for f in $CACHE/dyld_shared_cache_$ARCH*; do
 			case "$f" in *.symbols) continue ;; esac
 			# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 			ln -f "$f" $D/
@@ -785,7 +806,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 fi
 
 # --- the system image -----------------------------------------------------------------------------
-if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
+if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_$ARCH ] &&
 	{ [ ! -f system.apfs ] || [ obj/stage0 -nt system.apfs ] || [ $DARWIN/system.manifest -nt system.apfs ] ||
 	  [ $DARWIN/cryptex -nt system.apfs ] || [ $DARWIN/cryptex-app -nt system.apfs ] || [ -n "$SYSTEM" ]; }; then
 	# what sysimage/select-system.py has chosen since sysimage/rootfs was extracted is not in it, and would not be
@@ -880,7 +901,7 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	if [ -d $DARWIN/cryptex-app ]; then linkcopy $DARWIN/cryptex-app sysroot/System/Cryptexes/App; fi
 	D=sysroot/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld
 	mkdir -p $D
-	for f in $CACHE/dyld_shared_cache_arm64*; do
+	for f in $CACHE/dyld_shared_cache_$ARCH*; do
 		case "$f" in *.symbols) continue ;; esac     # symbolication data, never mapped
 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 		ln -f "$f" $D/

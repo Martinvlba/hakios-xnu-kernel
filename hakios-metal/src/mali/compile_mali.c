@@ -992,8 +992,9 @@ guard_frames(void *context)
 	if (uc == NULL || uc->uc_mcontext == NULL) {
 		return;
 	}
-	uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc, fp = (uintptr_t)uc->uc_mcontext->__ss.__fp;
-	const uintptr_t sp = (uintptr_t)uc->uc_mcontext->__ss.__sp;
+	uintptr_t pc = (uintptr_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss),
+		fp = (uintptr_t)__darwin_arm_thread_state64_get_fp(uc->uc_mcontext->__ss);
+	const uintptr_t sp = (uintptr_t)__darwin_arm_thread_state64_get_sp(uc->uc_mcontext->__ss);
 	for (int i = 0; i < 14 && at + 40 < sizeof(guard_where); i++) {
 		Dl_info where;
 

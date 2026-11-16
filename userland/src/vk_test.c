@@ -52,9 +52,9 @@ crashed(int sig, siginfo_t *si, void *context)
 	ucontext_t *uc = context;
 
 	printf("vk_test: signal %d at address %p\n", sig, si->si_addr);
-	where("pc", (uintptr_t)uc->uc_mcontext->__ss.__pc);
-	where("lr", (uintptr_t)uc->uc_mcontext->__ss.__lr);
-	uintptr_t fp = (uintptr_t)uc->uc_mcontext->__ss.__fp;
+	where("pc", (uintptr_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss));
+	where("lr", (uintptr_t)__darwin_arm_thread_state64_get_lr(uc->uc_mcontext->__ss));
+	uintptr_t fp = (uintptr_t)__darwin_arm_thread_state64_get_fp(uc->uc_mcontext->__ss);
 	for (int i = 0; i < 16 && fp != 0 && (fp & 7) == 0; i++) {
 		where("frame", ((uintptr_t *)fp)[1]);
 		fp = ((uintptr_t *)fp)[0];

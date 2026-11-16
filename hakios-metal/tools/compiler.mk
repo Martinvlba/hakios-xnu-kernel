@@ -39,7 +39,8 @@ HAKIOS_METAL_MESA_LIBS = -Wl,--start-group $(MESA_BUILD)/src/compiler/air/libair
 # IOS_MESA_SRC and IOS_MESA_BUILD for a build elsewhere.
 IOS_MESA_ROOT  ?= $(abspath $(HAKIOS))/xnu-deps/build/mesa
 IOS_MESA_SRC   ?= $(IOS_MESA_ROOT)/mesa-25.0.7
-IOS_MESA_BUILD ?= $(IOS_MESA_ROOT)/build-softpipe-freedreno
+# (ARCH=arm64e: tools/mk-mesa.sh builds that one in build-arm64e-softpipe-freedreno)
+IOS_MESA_BUILD ?= $(IOS_MESA_ROOT)/build$(if $(filter arm64e,$(ARCH)),-arm64e)-softpipe-freedreno
 
 # Its -D set, read the same way as the host's (kernels.mk): off the ir3.c.o line
 # of its ninja file. It differs from the host's where the libc does (no
@@ -78,7 +79,7 @@ HAKIOS_METAL_IOS_MESA_LIBS = $(IOS_MESA_BUILD)/src/compiler/air/libair.a $(addpr
 # included from there, and let `make -f tools/compiler.mk` work alone.
 HAKIOS    ?= ../workspace
 SDK       ?= $(abspath $(firstword $(wildcard $(THEOS)/sdks/iPhoneOS16.5.sdk $(HAKIOS)/xnu-deps/theos-mac/sdks/iPhoneOS16.5.sdk $(HOME)/theos/sdks/iPhoneOS16.5.sdk)))
-IOS_CXX   ?= $(abspath $(HAKIOS))/xnu-deps/host/bin/xnu-clang++ -arch arm64 -isysroot $(SDK) -miphoneos-version-min=16.0
+IOS_CXX   ?= $(abspath $(HAKIOS))/xnu-deps/host/bin/xnu-clang++ -arch $(or $(ARCH),arm64) -isysroot $(SDK) -miphoneos-version-min=16.0
 
 # --- the smoke program ----------------------------------------------------------
 .PHONY: compiler-smoke ios-compiler-smoke

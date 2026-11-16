@@ -6,13 +6,21 @@
 #
 #   tools/mesa/pan/mk-pan-ios.sh       -> xnu-deps/build/mesa26/build-ios/...  (archives listed in out-ios/archives)
 set -e
+# ARCH=arm64 (the default: the iPhone X's userland, d22ap) or arm64e (the iPhone 13 mini's, d16ap: an arm64 library does
+# not load into an arm64e process). arm64 builds where it always did; another architecture beside it, its name on the
+# cross file and on the build and output directories, so that neither build takes the other's objects.
+ARCH=${ARCH:-arm64}
+case $ARCH in arm64) SFX= ;; arm64e) SFX=-arm64e ;; *) echo "$0: ARCH=$ARCH: arm64 or arm64e" >&2; exit 1 ;; esac
 VERSION=${MESA_VERSION:-26.2.6}
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)
 source "$ROOT/xnu-env.sh"
 B=$ROOT/xnu-deps/build/mesa26
 SDK=$THEOS/sdks/iPhoneOS16.5.sdk
 CC=$ROOT/xnu-deps/host/bin/xnu-clang
-mkdir -p "$B/out-ios"
+BUILD=build-ios$SFX
+OUT=out-ios$SFX
+CROSS=cross-ios$SFX.ini
+mkdir -p "$B/$OUT"
 cd "$B"
 [ -f mesa-$VERSION.tar.xz ] || curl -sL --fail -o mesa-$VERSION.tar.xz https://archive.mesa3d.org/mesa-$VERSION.tar.xz
 [ -d mesa-$VERSION ] || tar xJf mesa-$VERSION.tar.xz
@@ -31,11 +39,11 @@ rm -rf mesa-$VERSION/src/compiler/air
 # Mesa 25 names and does not build here. AIR_SRC= for another.
 cp -r "${AIR_SRC:-$ROOT/tools/mesa/air-mesa26}" mesa-$VERSION/src/compiler/air
 grep -q "subdir('air')" mesa-$VERSION/src/compiler/meson.build || patch -s -d mesa-$VERSION -p1 < "$ROOT/tools/mesa/air-frontend.patch"
-cat > cross-ios.ini <<INI
+cat > $CROSS <<INI
 [binaries]
-c = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK', '-miphoneos-version-min=16.0']
-cpp = ['$CC++', '-arch', 'arm64', '-isysroot', '$SDK', '-miphoneos-version-min=16.0', '-fuse-cxa-atexit']
-objc = ['$CC', '-arch', 'arm64', '-isysroot', '$SDK']
+c = ['$CC', '-arch', '$ARCH', '-isysroot', '$SDK', '-miphoneos-version-min=16.0']
+cpp = ['$CC++', '-arch', '$ARCH', '-isysroot', '$SDK', '-miphoneos-version-min=16.0', '-fuse-cxa-atexit']
+objc = ['$CC', '-arch', '$ARCH', '-isysroot', '$SDK']
 ar = 'llvm-ar'
 ranlib = 'llvm-ranlib'
 strip = 'llvm-strip'
@@ -51,22 +59,22 @@ endian = 'little'
 [properties]
 needs_exe_wrapper = true
 INI
-[ -f build-ios/build.ninja ] || meson setup build-ios mesa-$VERSION --cross-file cross-ios.ini --wrap-mode=nofallback \
+[ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file $CROSS --wrap-mode=nofallback \
 	--buildtype=release -Db_ndebug=true -Dplatforms= -Dgallium-drivers=softpipe -Dvulkan-drivers= -Dglx=disabled \
 	-Degl=disabled -Dgbm=disabled -Dllvm=disabled -Dopengl=true -Dgles1=disabled -Dgles2=enabled -Dzstd=disabled \
 	-Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dlmsensors=disabled \
-	-Dbuild-tests=false -Dshader-cache=disabled -Dxmlconfig=disabled -Dtools=panfrost > meson-ios.log
+	-Dbuild-tests=false -Dshader-cache=disabled -Dxmlconfig=disabled -Dtools=panfrost > meson-ios$SFX.log
 LIBS="src/compiler/air/libair.a src/panfrost/compiler/libpanfrost_compiler.a src/panfrost/compiler/bifrost/libpanfrost_bifrost.a
 src/panfrost/compiler/bifrost/libpanfrost_bifrost_disasm.a src/panfrost/compiler/bifrost/valhall/libpanfrost_valhall_disasm.a
 src/panfrost/compiler/midgard/libpanfrost_midgard.a src/panfrost/compiler/midgard/libpanfrost_midgard_disasm.a
 src/panfrost/model/libpanfrost_model_lib.a src/compiler/nir/libnir.a src/compiler/libcompiler.a src/util/libmesa_util.a
 src/util/blake3/libblake3.a src/c11/impl/libmesa_util_c11.a"
-ninja -C build-ios $LIBS > ninja-ios.log
-for l in $LIBS; do echo "$B/build-ios/$l"; done > out-ios/archives
-echo "mk-pan-ios.sh: $(wc -l < out-ios/archives) archives for arm64 iOS in $B/build-ios"
+ninja -C $BUILD $LIBS > ninja-ios$SFX.log
+for l in $LIBS; do echo "$B/$BUILD/$l"; done > $OUT/archives
+echo "mk-pan-ios.sh: $(wc -l < $OUT/archives) archives for $ARCH iOS in $B/$BUILD"
 # the flags Mesa's iOS build compiles its compiler with (defines, include paths), for a C file that calls it from
 # outside the build -- hakios-metal's src/mali/compile_mali.c (its Makefile reads out-ios/cflags and out-ios/archives)
-(cd build-ios && python3 - <<'PY'
+(cd $BUILD && python3 - <<'PY'
 import json, shlex
 for e in json.load(open('compile_commands.json')):
     if e['file'].endswith('compiler/pan_compiler.c'):
@@ -79,5 +87,5 @@ for e in json.load(open('compile_commands.json')):
             out.append(x)
         print(' '.join(shlex.quote(x) for x in out)); break
 PY
-) > out-ios/cflags
-echo "mk-pan-ios.sh: flags in $B/out-ios/cflags"
+) > $OUT/cflags
+echo "mk-pan-ios.sh: flags in $B/$OUT/cflags"

@@ -74,10 +74,12 @@ extern const void *_dyld_get_shared_cache_range(size_t *length);
  * the same symbols, found by name in the cache's local symbols -- tools/dsc-symbols.py). ios_build.h is written by
  * build.sh from sysimage/build.conf. */
 #include "ios_build.h"
-#ifdef HAKIOS_IOS_20H392
-#define AT(f66, h392) (h392)
+#if defined(HAKIOS_IOS_20G81)
+#define AT(f66, h392, g81) (g81)
+#elif defined(HAKIOS_IOS_20H392)
+#define AT(f66, h392, g81) (h392)
 #else
-#define AT(f66, h392) (f66)
+#define AT(f66, h392, g81) (f66)
 #endif
 
 static uintptr_t slide;
@@ -102,7 +104,7 @@ static unsigned torch_said;
  * _NotifyForCurrentState and _setupDevice lie together, _teardownDevice apart.
  */
 static const struct { uintptr_t from, to; } flashlight_code[] = {
-	{ AT(0x1a1fb0830UL, 0x1a20007b0UL), AT(0x1a1fb0c5cUL, 0x1a2000bdcUL) }, { AT(0x1a1eee5c0UL, 0x1a1f3e540UL), AT(0x1a1eee6e8UL, 0x1a1f3e668UL) },
+	{ AT(0x1a1fb0830UL, 0x1a20007b0UL, 0x1a3e04c54UL), AT(0x1a1fb0c5cUL, 0x1a2000bdcUL, 0x1a3e050acUL) }, { AT(0x1a1eee5c0UL, 0x1a1f3e540UL, 0x1a3d37df0UL), AT(0x1a1eee6e8UL, 0x1a1f3e668UL, 0x1a3d37f3cUL) },
 };
 
 /* +[BWFigCaptureDeviceVendor sharedCaptureDeviceVendor] */
@@ -505,19 +507,19 @@ static struct replacement {
 	bool instance;                  /* an instance method, not a class method */
 	bool done;
 } replacements[] = {
-	{ "BWCoreImageFilterRenderer", "prewarmPortraitFilterVersion:semanticStyleFilters:", AT(0x1a2115c0cUL, 0x1a2165b8cUL),
+	{ "BWCoreImageFilterRenderer", "prewarmPortraitFilterVersion:semanticStyleFilters:", AT(0x1a2115c0cUL, 0x1a2165b8cUL, 0x1a3f7b6a0UL),
 	  (IMP)prewarm_portrait_filter, NULL, false, false },
-	{ "BWFigCaptureDeviceVendor", "sharedCaptureDeviceVendor", AT(0x1a1ef0d04UL, 0x1a1f40c84UL),
+	{ "BWFigCaptureDeviceVendor", "sharedCaptureDeviceVendor", AT(0x1a1ef0d04UL, 0x1a1f40c84UL, 0x1a3d3a5f0UL),
 	  (IMP)shared_vendor, &original_shared_vendor, false, false },
-	{ "BWAudioSourceNode", "start:", AT(0x1a1eefa18UL, 0x1a1f3f998UL), (IMP)audio_source_start, &original_audio_source_start, true, false },
-	{ "FigVideoCaptureConnectionConfiguration", "videoStabilizationMethod", AT(0x1a1e99ef8UL, 0x1a1ee9e78UL),
+	{ "BWAudioSourceNode", "start:", AT(0x1a1eefa18UL, 0x1a1f3f998UL, 0x1a3d392d0UL), (IMP)audio_source_start, &original_audio_source_start, true, false },
+	{ "FigVideoCaptureConnectionConfiguration", "videoStabilizationMethod", AT(0x1a1e99ef8UL, 0x1a1ee9e78UL, 0x1a3ce12f0UL),
 	  (IMP)video_stabilization_method, NULL, true, false },
-	{ "FigVideoCaptureConnectionConfiguration", "videoStabilizationType", AT(0x1a20d8f48UL, 0x1a2128ec8UL),
+	{ "FigVideoCaptureConnectionConfiguration", "videoStabilizationType", AT(0x1a20d8f48UL, 0x1a2128ec8UL, 0x1a3f3c34cUL),
 	  (IMP)video_stabilization_type, NULL, true, false },
-	{ "FigCaptureStillImageSettings", "qualityPrioritization", AT(0x1a1f533dcUL, 0x1a1fa335cUL),
+	{ "FigCaptureStillImageSettings", "qualityPrioritization", AT(0x1a1f533dcUL, 0x1a1fa335cUL, 0x1a3da23dcUL),
 	  (IMP)quality_prioritization, &original_quality_prioritization, true, false },
-	{ "BWGNRNode", "renderSampleBuffer:forInput:", AT(0x1a1ec83b8UL, 0x1a1f18338UL), (IMP)gnr_render, NULL, true, false },
-	{ "BWNodeOutput", "emitSampleBuffer:", AT(0x1a1ea37e0UL, 0x1a1ef3760UL), (IMP)emit_sample_buffer, &original_emit_sample_buffer, true, false },
+	{ "BWGNRNode", "renderSampleBuffer:forInput:", AT(0x1a1ec83b8UL, 0x1a1f18338UL, 0x1a3d1078cUL), (IMP)gnr_render, NULL, true, false },
+	{ "BWNodeOutput", "emitSampleBuffer:", AT(0x1a1ea37e0UL, 0x1a1ef3760UL, 0x1a3ceafbcUL), (IMP)emit_sample_buffer, &original_emit_sample_buffer, true, false },
 };
 
 static void

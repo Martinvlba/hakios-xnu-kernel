@@ -40,14 +40,23 @@ HOSTOUT   = out/host-mesa$(if $(SAN),-$(SAN))
 endif
 # the SDK as hakios lays it out: theos, or on macOS xnu-deps/theos-mac
 SDK       ?= $(abspath $(firstword $(wildcard $(THEOS)/sdks/iPhoneOS16.5.sdk $(HAKIOS)/xnu-deps/theos-mac/sdks/iPhoneOS16.5.sdk $(HOME)/theos/sdks/iPhoneOS16.5.sdk)))
+# ARCH: the userland's architecture, as userland/build.sh has it from the unpacked build's build.conf: arm64 (the
+# iPhone X's, d22ap; the default) or arm64e (the iPhone 13 mini's, d16ap: an arm64 library does not load into its
+# processes). The Mali build of another architecture than arm64 goes beside it, out/ios-mali-$(ARCH), over Mesa's
+# archives of that architecture (ARCH=arm64e tools/mesa/pan/mk-pan-ios.sh -> out-ios-arm64e); out/ios is not divided.
+ARCH      ?= arm64
+ifeq ($(filter arm64 arm64e,$(ARCH)),)
+$(error ARCH=$(ARCH): arm64 or arm64e)
+endif
+ARCHSFX   = $(if $(filter arm64,$(ARCH)),,-$(ARCH))
 ifeq ($(shell uname),Darwin)
-IOS_CXX   ?= xcrun clang++ -arch arm64 -isysroot $(SDK) -miphoneos-version-min=16.0
+IOS_CXX   ?= xcrun clang++ -arch $(ARCH) -isysroot $(SDK) -miphoneos-version-min=16.0
 IOS_AR    ?= ar rcs
 else
 # On Linux the cross compiler is hakios's wrapper around clang and the cctools linker (xnu-deps/host/bin, laid out by
 # xnu-deps/setup.sh), and the archive must be in the form Apple's ld reads: with GNU ar's symbol table the probe failed
 # to link against every symbol of the library.
-IOS_CXX   ?= $(abspath $(HAKIOS))/xnu-deps/host/bin/xnu-clang++ -arch arm64 -isysroot $(SDK) -miphoneos-version-min=16.0
+IOS_CXX   ?= $(abspath $(HAKIOS))/xnu-deps/host/bin/xnu-clang++ -arch $(ARCH) -isysroot $(SDK) -miphoneos-version-min=16.0
 IOS_AR    ?= llvm-ar --format=darwin rcs
 endif
 
@@ -94,9 +103,10 @@ ios: out/ios/libhakios-metal.a $(if $(wildcard $(IR3_CMDLINE_C)),out/ios/hakios-
 # Its compiler (src/mali/compile_mali.c: AIR -> NIR -> Mesa 26.2.5's panfrost) is built with the flags of Mesa's iOS build
 # and Mesa's archives go into the library with it, all written by hakios-kernel's tools/mesa/pan/mk-pan-ios.sh into
 # MALI_MESA (HAKIOS= that tree: make ios-mali HAKIOS=../hackios-kernel). The plug-in that links the library adds -lz.
-ios-mali: out/ios-mali/libhakios-metal.a
+MALI_OUT      = out/ios-mali$(ARCHSFX)
+ios-mali: $(MALI_OUT)/libhakios-metal.a
 
-MALI_MESA    ?= $(HAKIOS)/xnu-deps/build/mesa26/out-ios
+MALI_MESA    ?= $(HAKIOS)/xnu-deps/build/mesa26/out-ios$(ARCHSFX)
 IOS_CC       ?= $(patsubst %clang++,%clang,$(firstword $(IOS_CXX))) $(wordlist 2,99,$(IOS_CXX))
 IOS_LIBTOOL  ?= $(if $(filter Darwin,$(shell uname)),xcrun libtool,$(abspath $(HAKIOS))/xnu-deps/host/bin/libtool)
 
@@ -107,16 +117,16 @@ IOS_LIBTOOL  ?= $(if $(filter Darwin,$(shell uname)),xcrun libtool,$(abspath $(H
 MALI_CACHE_BUILD = $(shell cat src/mali/compile_mali.c src/mali/compile_mali.h $(MALI_MESA)/cflags \
 	$$(cat $(MALI_MESA)/archives 2>/dev/null) 2>/dev/null | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-24)
 
-out/ios-mali/libhakios-metal.a: src/mali/c_api_mali.cpp src/mali/blit_shaders.h src/mali/compile_mali.c src/mali/compile_mali.h \
+$(MALI_OUT)/libhakios-metal.a: src/mali/c_api_mali.cpp src/mali/blit_shaders.h src/mali/compile_mali.c src/mali/compile_mali.h \
 		include/hakios-metal/hakios_metal.h $(MALI_MESA)/cflags $(MALI_MESA)/archives \
 		$(shell cat $(MALI_MESA)/archives 2>/dev/null)
-	@mkdir -p out/ios-mali/obj
+	@mkdir -p $(MALI_OUT)/obj
 	$(IOS_CXX) $(IOS_CXXFLAGS) -Iinclude $(if $(strip $(MALI_CACHE_BUILD)),-DHAKIOS_MALI_CACHE_BUILD='"$(MALI_CACHE_BUILD)"') \
-		-c src/mali/c_api_mali.cpp -o out/ios-mali/obj/c_api_mali.o
+		-c src/mali/c_api_mali.cpp -o $(MALI_OUT)/obj/c_api_mali.o
 	eval $(IOS_CC) $$(cat $(MALI_MESA)/cflags) -DAIR_MESA_NEW_NIR -Werror -Wno-unused-command-line-argument \
-		-c src/mali/compile_mali.c -o out/ios-mali/obj/compile_mali.o
-	rm -f $@ && $(IOS_LIBTOOL) -static -no_warning_for_no_symbols -o $@ out/ios-mali/obj/c_api_mali.o \
-		out/ios-mali/obj/compile_mali.o $$(cat $(MALI_MESA)/archives)
+		-c src/mali/compile_mali.c -o $(MALI_OUT)/obj/compile_mali.o
+	rm -f $@ && $(IOS_LIBTOOL) -static -no_warning_for_no_symbols -o $@ $(MALI_OUT)/obj/c_api_mali.o \
+		$(MALI_OUT)/obj/compile_mali.o $$(cat $(MALI_MESA)/archives)
 
 darwin: ios
 

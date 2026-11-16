@@ -1,0 +1,3 @@
+# PAC-on panic capture: wait until usbmux is up, then exec hello_dyn PAC-on so its panic lands on the live kernel log
+sleep 45
+/redwood/bin/hello_dyn

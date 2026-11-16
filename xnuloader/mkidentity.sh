@@ -1,6 +1,6 @@
 #!/bin/bash
 # Make xnuloader/identity.h: the identity of the iPhone whose files Darwin userland 16.5 was built for, taken
-# from the device tree in the IPSW (Firmware/all_flash/DeviceTree.d22ap.im4p) at build time, on
+# from the device tree in the IPSW (Firmware/all_flash/DeviceTree.$DEVICE.im4p) at build time, on
 # the builder's machine, from their own copy of the firmware. The header is not in the repository.
 #
 #   sysimage/ipsw-member.py        the one file out of your IPSW (34 KB); sysimage/unpack.sh leaves it
@@ -11,13 +11,17 @@
 #   xnuloader/mkidentity.py        the header from the decoded tree
 #
 # usage: xnuloader/mkidentity.sh [DeviceTree.im4p | your.ipsw]
-#                                  (with no argument: sysimage/DeviceTree.d22ap.im4p, or $IPSW)
+#                                  (with no argument: sysimage/DeviceTree.$DEVICE.im4p, or $IPSW)
 #        xnuloader/mkidentity.sh --placeholder       (no IPSW: an identity.h with no Apple data,
 #                                                     enough to build and boot the open kernel under
 #                                                     QEMU with an Apple-free user space, not Darwin)
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
+# which device's identity to bake in: the unpacked build's (sysimage/build.conf, written by unpack.sh) --
+# d22ap (iPhone X) by default, d16ap (iPhone 13 mini) for the arm64e rebase. All DeviceTree member names
+# and the default device tree path follow it.
+DEVICE=$( (. "$TOP/sysimage/build.conf" 2>/dev/null; echo ${DEVICE:-d22ap}) )
 if [ "$1" = --placeholder ] || [ "${PLACEHOLDER:-}" = 1 ]; then
 	python3 "$HERE/mkidentity.py" --placeholder > "$HERE/identity.h.new"
 	mv "$HERE/identity.h.new" "$HERE/identity.h"
@@ -28,14 +32,14 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/mkidentity.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 # nothing is downloaded: the device tree comes from the IPSW you have
 SRC=${1:-}
-[ -n "$SRC" ] || { [ -f "$TOP/sysimage/DeviceTree.d22ap.im4p" ] && SRC=$TOP/sysimage/DeviceTree.d22ap.im4p; } || SRC=${IPSW:-}
+[ -n "$SRC" ] || { [ -f "$TOP/sysimage/DeviceTree.$DEVICE.im4p" ] && SRC=$TOP/sysimage/DeviceTree.$DEVICE.im4p; } || SRC=${IPSW:-}
 if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
 	echo "mkidentity.sh: no device tree. Run sysimage/unpack.sh YOUR.ipsw first, or give the IPSW or" >&2
-	echo "  DeviceTree.d22ap.im4p as the argument (or --placeholder for the open kernel without Darwin)" >&2
+	echo "  DeviceTree.$DEVICE.im4p as the argument (or --placeholder for the open kernel without Darwin)" >&2
 	exit 1
 fi
 case $SRC in
-*.ipsw) python3 "$TOP/sysimage/ipsw-member.py" "$SRC" Firmware/all_flash/DeviceTree.d22ap.im4p "$WORK/dt.im4p"; IM4P=$WORK/dt.im4p ;;
+*.ipsw) python3 "$TOP/sysimage/ipsw-member.py" "$SRC" Firmware/all_flash/DeviceTree.$DEVICE.im4p "$WORK/dt.im4p"; IM4P=$WORK/dt.im4p ;;
 *) IM4P=$SRC ;;
 esac
 python3 "$HERE/im4p.py" "$IM4P" "$WORK/dt.lzfse"
