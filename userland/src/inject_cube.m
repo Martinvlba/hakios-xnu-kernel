@@ -18,9 +18,11 @@
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <mach/mach_time.h>
 #include <stdarg.h>
+#include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 
@@ -285,6 +287,142 @@ hakios_cube_start(void)
 		});
 	} else {
 		cube_say("hakios: cube: no home screen window found in two minutes\n");
+	}
+}
+
+/*
+ * show_taps=1 (11-15): the fingers on the screen, as Android's developer option shows them -- a ring where each finger
+ * is and a trail of dots that fade where it went, over everything (a window of SpringBoard's at the cube's level, which
+ * takes no touch itself). The samples come from /dev/hakios-touch-tap, the kernel's copy of what the touch driver posts
+ * (drivers/input/hakios.input.c): what is drawn is what the kernel saw, before the window server and the application
+ * have had it -- a finger drawn where it is not, or a trail that stops, is the driver's; a finger drawn right under a
+ * swipe the application does not follow is theirs.
+ */
+struct taps_sample {                            /* struct hakios_touch (sys/hakios.input.h) */
+	uint64_t time;
+	uint32_t type, finger, x, y;
+};
+#define TAPS_FINGERS    10
+#define TAPS_DOTS       96
+static UIWindow *taps_window;
+static CAShapeLayer *taps_ring[TAPS_FINGERS];
+static CALayer *taps_dot[TAPS_DOTS];
+static unsigned taps_dot_at;
+
+static void
+taps_sample(struct taps_sample s)
+{
+	CGRect bounds = taps_window.bounds;
+	CGPoint at = CGPointMake(bounds.size.width * s.x / 65535.0, bounds.size.height * s.y / 65535.0);
+
+	if (s.finger >= TAPS_FINGERS || s.type < 1 || s.type > 3) {
+		return;                         /* (a button, or a finger beyond the rings) */
+	}
+	CAShapeLayer *ring = taps_ring[s.finger];
+
+	[CATransaction begin];
+	[CATransaction setDisableActions:YES];
+	ring.position = at;
+	if (s.type == 1) {                      /* down */
+		ring.hidden = NO;
+		ring.opacity = 1;
+	} else if (s.type == 2) {               /* move: a dot left behind, fading */
+		CALayer *dot = taps_dot[taps_dot_at++ % TAPS_DOTS];
+
+		dot.position = at;
+		dot.hidden = NO;
+		dot.opacity = 0.9;
+		[CATransaction setDisableActions:NO];
+		[CATransaction setAnimationDuration:0.8];
+		dot.opacity = 0;
+	} else {                                /* up: the ring fades */
+		[CATransaction setDisableActions:NO];
+		[CATransaction setAnimationDuration:0.35];
+		ring.opacity = 0;
+	}
+	[CATransaction commit];
+}
+
+static bool
+build_taps(void)
+{
+	UIWindow *home = nil;
+
+	for (UIWindow *window in all_windows()) {
+		if ([NSStringFromClass(window.class) containsString:@"HomeScreen"]) {
+			home = window;
+			break;
+		}
+	}
+	if (home == nil) {
+		return false;
+	}
+	taps_window = overlay_window(home, home.bounds);
+	for (unsigned i = 0; i < TAPS_FINGERS; i++) {
+		CAShapeLayer *ring = [CAShapeLayer layer];
+		CGFloat size = 56;
+
+		ring.bounds = CGRectMake(0, 0, size, size);
+		ring.path = CGPathCreateWithEllipseInRect(CGRectInset(ring.bounds, 2, 2), NULL);
+		ring.fillColor = [UIColor.systemOrangeColor colorWithAlphaComponent:0.25].CGColor;
+		ring.strokeColor = UIColor.whiteColor.CGColor;
+		ring.lineWidth = 3;
+		ring.shadowColor = UIColor.blackColor.CGColor;
+		ring.shadowOpacity = 0.6;
+		ring.shadowRadius = 2;
+		ring.shadowOffset = CGSizeZero;
+		ring.hidden = YES;
+		[taps_window.layer addSublayer:ring];
+		taps_ring[i] = ring;
+	}
+	for (unsigned i = 0; i < TAPS_DOTS; i++) {
+		CALayer *dot = [CALayer layer];
+
+		dot.bounds = CGRectMake(0, 0, 10, 10);
+		dot.cornerRadius = 5;
+		dot.backgroundColor = UIColor.systemOrangeColor.CGColor;
+		dot.borderColor = UIColor.whiteColor.CGColor;
+		dot.borderWidth = 1;
+		dot.hidden = YES;
+		[taps_window.layer addSublayer:dot];
+		taps_dot[i] = dot;
+	}
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+		int fd = open("/dev/hakios-touch-tap", O_RDONLY);
+		struct taps_sample s;
+
+		if (fd < 0) {
+			cube_say("hakios: taps: /dev/hakios-touch-tap: %s (a kernel without it?)\n", strerror(errno));
+			return;
+		}
+		cube_say("hakios: taps: drawing the fingers (show_taps=1)\n");
+		while (read(fd, &s, sizeof(s)) == (ssize_t)sizeof(s)) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				taps_sample(s);
+			});
+		}
+		cube_say("hakios: taps: the device stopped: %s\n", strerror(errno));
+		close(fd);
+	});
+	return true;
+}
+
+/* from inject_sb.c (show_taps=1), on SpringBoard's main queue: tried every two seconds until the home screen is there */
+void hakios_taps_start(void);
+void
+hakios_taps_start(void)
+{
+	static unsigned tries;
+
+	if (build_taps()) {
+		return;
+	}
+	if (++tries < 60) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+			hakios_taps_start();
+		});
+	} else {
+		cube_say("hakios: taps: no home screen window found in two minutes\n");
 	}
 }
 

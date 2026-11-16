@@ -10,6 +10,8 @@
  *                                (what is dragged is held where it was taken, neither flung nor sprung back);
  *                                GRAB milliseconds of staying still first, for what has to be picked up
  *                                before it will move -- an icon of the home screen wants about 700
+ *   pinch X Y D0 D1 [MS]         two fingers either side of X Y, D0 apart (a fraction of the width) to D1 apart in
+ *                                MS milliseconds (default 600): D1 > D0 zooms in, D1 < D0 out
  *   hold X Y MS                  touch and stay
  *   zigzag X Y0 Y1 MS N [STEP]   touch at Y0, go to Y1 in MS milliseconds and back again, N times, then let go;
  *                                a sample every STEP milliseconds (default 8, what the touch screen gives, as
@@ -42,14 +44,20 @@
 static int device;
 
 static void
-post(uint32_t type, double x, double y)
+post_finger(uint32_t type, uint32_t finger, double x, double y)
 {
-	struct hakios_touch t = { .type = type, .finger = 0, .x = (uint32_t)(x * 65535.0 + 0.5), .y = (uint32_t)(y * 65535.0 + 0.5) };
+	struct hakios_touch t = { .type = type, .finger = finger, .x = (uint32_t)(x * 65535.0 + 0.5), .y = (uint32_t)(y * 65535.0 + 0.5) };
 
 	if (write(device, &t, sizeof(t)) != (ssize_t)sizeof(t)) {
 		perror("rwtouch: write");
 		exit(1);
 	}
+}
+
+static void
+post(uint32_t type, double x, double y)
+{
+	post_finger(type, 0, x, y);
 }
 
 static void
@@ -93,6 +101,34 @@ sleep_until(uint64_t start, uint64_t at)
  * frame after another: those came out at 21 ms apart, 48 samples a second, fewer than the display's
  * 60 frames, and an application that is moved by the samples drew no more frames than that.)
  */
+/* two fingers either side of (x, y), from d0 apart to d1 apart in ms milliseconds, a sample every SAMPLE_MS */
+static void
+pinch(double x, double y, double d0, double d1, int ms)
+{
+	uint64_t start, total_us = (uint64_t)(ms > 0 ? ms : 1) * 1000;
+
+	post_finger(HAKIOS_TOUCH_DOWN, 0, x - d0 / 2, y);
+	post_finger(HAKIOS_TOUCH_DOWN, 1, x + d0 / 2, y);
+	start = mach_absolute_time();
+	for (uint64_t at = SAMPLE_MS * 1000;; at += SAMPLE_MS * 1000) {
+		double part, d;
+
+		if (at > total_us) {
+			at = total_us;
+		}
+		part = (double)at / (double)total_us;
+		d = d0 + (d1 - d0) * part;
+		sleep_until(start, at);
+		post_finger(HAKIOS_TOUCH_MOVE, 0, x - d / 2, y);
+		post_finger(HAKIOS_TOUCH_MOVE, 1, x + d / 2, y);
+		if (at == total_us) {
+			break;
+		}
+	}
+	post_finger(HAKIOS_TOUCH_UP, 0, x - d1 / 2, y);
+	post_finger(HAKIOS_TOUCH_UP, 1, x + d1 / 2, y);
+}
+
 static void
 drag(double x0, double y0, double x1, double y1, int ms, int hold, int grab)
 {
@@ -223,6 +259,11 @@ main(int argc, char **argv)
 			int ms = left >= 5 && argv[i + 5][0] >= '0' && argv[i + 5][0] <= '9' ? atoi(argv[i + 5]) : 0;
 
 			drag(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]), ms ? ms : 300, 0, 0);
+			i += ms ? 5 : 4;
+		} else if (strcmp(step, "pinch") == 0 && left >= 4) {
+			int ms = left >= 5 && argv[i + 5][0] >= '0' && argv[i + 5][0] <= '9' ? atoi(argv[i + 5]) : 0;
+
+			pinch(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]), ms ? ms : 600);
 			i += ms ? 5 : 4;
 		} else if (strcmp(step, "drag") == 0 && left >= 6) {
 			int grab = left >= 7 && argv[i + 7][0] >= '0' && argv[i + 7][0] <= '9' ? atoi(argv[i + 7]) : 0;

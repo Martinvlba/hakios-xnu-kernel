@@ -2480,6 +2480,7 @@ caenv(void)
 }
 
 void hakios_cube_start(void);           /* src/inject_cube.m */
+void hakios_taps_start(void);           /* src/inject_cube.m: show_taps=1, the fingers drawn on the screen */
 void hakios_debug_start(void);          /* src/inject_cube.m */
 
 __attribute__((constructor))
@@ -2721,6 +2722,19 @@ hakios_springboard_init(void)
 		    (arg == args || arg[-1] == ' ')) {
 			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
 				hakios_cube_start();
+			});
+		}
+	}
+	/* show_taps=1: the fingers drawn where the kernel's touch driver saw them, a ring each and a fading trail (src/inject_cube.m) */
+	{
+		char args[1024] = "";
+		size_t size = sizeof(args) - 1;
+		const char *arg;
+
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (arg = strstr(args, "show_taps=1")) != NULL &&
+		    (arg == args || arg[-1] == ' ')) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+				hakios_taps_start();
 			});
 		}
 	}

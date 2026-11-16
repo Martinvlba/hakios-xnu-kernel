@@ -60,6 +60,14 @@ static LCK_GRP_DECLARE(touch_lck_grp, "hakios-touch");
 static LCK_MTX_DECLARE(touch_lock, &touch_lck_grp);
 static struct hakios_touch touch_queue[TOUCH_QUEUE];
 static uint32_t touch_head, touch_tail;        /* read from head, add at tail */
+/*
+ * /dev/hakios-touch-tap (minor 1): a copy of every sample for a watcher, beside the queue the window server reads
+ * (minor 0; a second reader of that one would take its samples). Filled only while someone has it open; boot-arg
+ * show_taps=1 draws the fingers on the screen from it (userland/src/inject_cube.m, in SpringBoard).
+ */
+static struct hakios_touch tap_queue[TOUCH_QUEUE];
+static uint32_t tap_head, tap_tail;
+static int tap_readers;
 
 /*
  * The way out when nothing else is at hand: five fingers held on the screen for a second and a
@@ -189,8 +197,17 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
 	if (from_driver) {
 		count_fingers(type, finger);
 	}
+	if (tap_readers > 0) {
+		if (tap_tail - tap_head == TOUCH_QUEUE) {
+			tap_head++;
+		}
+		tap_queue[tap_tail++ % TOUCH_QUEUE] = *t;
+	}
 	lck_mtx_unlock(&touch_lock);
 	wakeup(&touch_queue);
+	if (tap_readers > 0) {
+		wakeup(&tap_queue);
+	}
 	if (hakios_touch_interaction != NULL && (type == HAKIOS_TOUCH_DOWN || type == HAKIOS_TOUCH_MOVE)) {
 		hakios_touch_interaction();     /* (a device's clocks raised while a finger is on the glass) */
 	}
@@ -221,22 +238,39 @@ hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
 }
 
 static int
-touch_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
+touch_open(dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
 {
+	if (minor(dev) == 1) {
+		lck_mtx_lock(&touch_lock);
+		if (tap_readers++ == 0) {
+			tap_head = tap_tail = 0;        /* (from now, not what was left) */
+		}
+		lck_mtx_unlock(&touch_lock);
+	}
 	return 0;
 }
 
 static int
-touch_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
+touch_close(dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
 {
+	if (minor(dev) == 1) {
+		lck_mtx_lock(&touch_lock);
+		if (tap_readers > 0) {
+			tap_readers--;
+		}
+		lck_mtx_unlock(&touch_lock);
+	}
 	return 0;
 }
 
 static int
-touch_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+touch_read(dev_t dev, struct uio *uio, __unused int ioflag)
 {
 	struct hakios_touch t;
 	int error = 0, moved = 0;
+	/* minor 0: the queue; minor 1: the watcher's copy of it */
+	struct hakios_touch *ring = minor(dev) == 1 ? tap_queue : touch_queue;
+	uint32_t *head = minor(dev) == 1 ? &tap_head : &touch_head, *tail = minor(dev) == 1 ? &tap_tail : &touch_tail;
 
 	/* a buffer smaller than one record can never be served: say so, instead of blocking for data and then returning 0 (end of file) */
 	if (uio_resid(uio) == 0) {
@@ -246,22 +280,22 @@ touch_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		return EINVAL;
 	}
 	lck_mtx_lock(&touch_lock);
-	while (touch_head == touch_tail) {
-		error = msleep(&touch_queue, &touch_lock, PZERO | PCATCH, "hakios-touch", NULL);
+	while (*head == *tail) {
+		error = msleep(ring, &touch_lock, PZERO | PCATCH, "hakios-touch", NULL);
 		if (error) {
 			lck_mtx_unlock(&touch_lock);
 			return error;
 		}
 	}
-	while (touch_head != touch_tail && uio_resid(uio) >= (user_ssize_t)sizeof(t)) {
-		t = touch_queue[touch_head++ % TOUCH_QUEUE];
+	while (*head != *tail && uio_resid(uio) >= (user_ssize_t)sizeof(t)) {
+		t = ring[(*head)++ % TOUCH_QUEUE];
 		lck_mtx_unlock(&touch_lock);
 		error = uiomove((caddr_t)&t, sizeof(t), uio);
 		lck_mtx_lock(&touch_lock);
 		if (error) {
 			/* the copy-out failed: put the record back at the head so a lost DOWN or UP does not leave a finger stuck (only if the ring still has room for it) */
-			if (touch_tail - touch_head < TOUCH_QUEUE) {
-				touch_queue[--touch_head % TOUCH_QUEUE] = t;
+			if (*tail - *head < TOUCH_QUEUE) {
+				ring[--(*head) % TOUCH_QUEUE] = t;
 			}
 			break;
 		}
@@ -301,7 +335,8 @@ hakios_input_init(void)
 {
 	int major = cdevsw_add(-1, &touch_cdevsw);
 
-	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hakios-touch") == NULL) {
+	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hakios-touch") == NULL ||
+	    devfs_make_node(makedev(major, 1), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0444, "hakios-touch-tap") == NULL) {
 		printf("hakios-touch: cannot create the device\n");
 	}
 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
