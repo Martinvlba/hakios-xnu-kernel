@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..0a2685441c2d 100644
+index 44274016a4cf..469d371e969c 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,73 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,76 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -143,6 +143,8 @@ index 44274016a4cf..0a2685441c2d 100644
 +bsd/dev/hakios.mic.c                     optional hakios_mic
 +bsd/dev/hakios.virtio_sound.c            optional hakios_virtio_sound
 +bsd/dev/hakios.bt.c                      optional hakios_bt
++bsd/dev/hakios.bthost.c                  optional hakios_bt_host
++bsd/dev/hakios.btsk.c                    optional hakios_bt_host
 +bsd/dev/hakios.camera.c                  optional hakios_camera
 +bsd/dev/hakios.torch.c                   optional hakios_torch
 +bsd/dev/hakios.socinfo.c                 optional hakios_socinfo
@@ -172,6 +174,7 @@ index 44274016a4cf..0a2685441c2d 100644
 +bsd/dev/hakios.lx.c                      optional hakios_wifi
 +bsd/dev/hakios.akita_aoc.c               optional hakios_akita_aoc
 +bsd/dev/hakios.akita_amp.c               optional hakios_akita_amp
++bsd/dev/hakios.akita_bt.c                optional hakios_akita_bt
 +bsd/dev/hakios.akita_torch.c             optional hakios_akita_torch
 +bsd/dev/hakios.akita_camera.c            optional hakios_akita_camera
 +bsd/dev/hakios.akita_display.c           optional hakios_akita_display
@@ -196,7 +199,7 @@ index 44274016a4cf..0a2685441c2d 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +222,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +225,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -249,7 +252,7 @@ index 44274016a4cf..0a2685441c2d 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +474,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +477,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -257,7 +260,7 @@ index 44274016a4cf..0a2685441c2d 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +497,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +500,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -265,6 +268,41 @@ index 44274016a4cf..0a2685441c2d 100644
  bsd/kern/kern_event.c			standard
  bsd/kern/kern_control.c			optional networking
  bsd/kern/kern_exec.c			standard
+diff --git a/bsd/dev/arm/kern_machdep.c b/bsd/dev/arm/kern_machdep.c
+index 336b1cc5a82b..aa6a93752e41 100644
+--- a/bsd/dev/arm/kern_machdep.c
++++ b/bsd/dev/arm/kern_machdep.c
+@@ -16,6 +16,7 @@
+ #include        <libkern/libkern.h>
+ #include        <machine/exec.h>
+ #include        <pexpert/arm64/board_config.h>
++#include        <pexpert/pexpert.h>     /* PE_parse_boot_argn: HakiOS hakios_arm64e= gate */
+ 
+ #if __arm64__
+ static cpu_subtype_t cpu_subtype32(void);
+@@ -89,6 +90,22 @@ grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype, cpu_subtype_t execf
+ 				return 10;
+ 			case CPU_SUBTYPE_ARM64_ALL:
+ 				return 9;
++			case CPU_SUBTYPE_ARM64E: {
++				/*
++				 * HakiOS arm64e-on-arm64 bring-up (devices/akita/rebase-13mini.md, PATH 1):
++				 * this ARM64 kernel (A11-class host subtype, no Apple PAC) can run ARM64E
++				 * userland -- the iPhone 13 mini's 16.6.1 slices -- with pointer-auth left
++				 * disabled, since the PAC and AUT instructions execute as NOPs on ARMv8.3 when
++				 * the SCTLR enable bits are clear. Accept arm64e only when booted hakios_arm64e=1
++				 * so the plain-arm64 iPhone X build is unaffected (default: rejected as before).
++				 */
++				int hakios_arm64e = 0;
++				(void)PE_parse_boot_argn("hakios_arm64e", &hakios_arm64e, sizeof(hakios_arm64e));
++				if (hakios_arm64e) {
++					return grade_arm64e_binary(execfeatures);
++				}
++				break;
++			}
+ 			}
+ 			break;
+ 
 diff --git a/bsd/dev/arm/km.c b/bsd/dev/arm/km.c
 index fd7a94b20794..69eaceedd248 100644
 --- a/bsd/dev/arm/km.c
@@ -541,7 +579,7 @@ index 95192dd62449..b00da803b5b4 100644
  
  	/*
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 1d71c66629fb..a22095ccf5f0 100644
+index 1d71c66629fb..0386d4d48105 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -1157,6 +1157,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
@@ -554,7 +592,32 @@ index 1d71c66629fb..a22095ccf5f0 100644
  static int
  exec_mach_imgact(struct image_params *imgp)
  {
-@@ -1315,6 +1318,9 @@ grade:
+@@ -1268,6 +1271,24 @@ grade:
+ 		goto bad;
+ 	}
+ 
++#if HAKIOS_USER_PAC && !defined(HAS_APPLE_PAC)
++	/*
++	 * HakiOS PATH 2: an image runs with user pointer authentication only if it is arm64e (current
++	 * ptrauth ABI) AND the boot-arg policy selects it (hakios_pac_exec_wants_pac(); never with
++	 * hakios_pac=0). Everything else -- arm64, and arm64e not selected -- is PAC-off: IMGPF_NOJOP,
++	 * which becomes the pmap's disable_jop and the task's/thread's disable_user_jop.
++	 */
++	if (mach_header->cputype == CPU_TYPE_ARM64 &&
++	    (mach_header->cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E &&
++	    CPU_SUBTYPE_ARM64_PTR_AUTH_VERSION(mach_header->cpusubtype) == CPU_SUBTYPE_ARM64_PTR_AUTH_CURRENT_VERSION &&
++	    hakios_pac_exec_wants_pac(imgp->ip_ndp->ni_cnd.cn_nameptr,
++	    (size_t)imgp->ip_ndp->ni_cnd.cn_namelen, true)) {
++		imgp->ip_flags &= ~IMGPF_NOJOP;
++	} else {
++		imgp->ip_flags |= IMGPF_NOJOP;
++	}
++#endif /* HAKIOS_USER_PAC && !defined(HAS_APPLE_PAC) */
++
+ #if defined(HAS_APPLE_PAC)
+ 	assert(mach_header->cputype == CPU_TYPE_ARM64
+ 	    );
+@@ -1315,6 +1336,9 @@ grade:
  	 * Actually load the image file we previously decided to load.
  	 */
  	lret = load_machfile(imgp, mach_header, thread, &map, &load_result);
@@ -564,7 +627,22 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	if (lret != LOAD_SUCCESS) {
  		error = load_return_to_errno(lret);
  
-@@ -2197,6 +2203,9 @@ again:
+@@ -1477,6 +1501,14 @@ grade:
+ 	 * a pre-existing task.
+ 	 */
+ 	int cpu_subtype = 0; /* all cpu_subtypes use the same shared region */
++	/*
++	 * HakiOS PATH 2: PAC-on and PAC-off processes use the SAME shared region (cpu_subtype 0 for
++	 * both). The region's nested map holds the cache with its auth pointers unsigned, for the
++	 * PAC-off tasks; a PAC-on task gets private, signed mappings of the auth sections laid over
++	 * it (vm_shared_region_auth_remap()). A second, arm64e-keyed region for PAC-on tasks was
++	 * tried and left the subtype-0 region without a cache (launchd: "NO DYLD CACHE"): the auth
++	 * sections are now found by their slide info (v3), not by the region's subtype.
++	 */
+ #if __has_feature(ptrauth_calls)
+ 	char *shared_region_id = NULL;
+ 	size_t len;
+@@ -2197,6 +2229,9 @@ again:
  	}
  
  	error = exec_check_permissions(imgp);
@@ -574,7 +652,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	if (error) {
  		goto bad;
  	}
-@@ -2640,6 +2649,57 @@ done:
+@@ -2640,6 +2675,57 @@ done:
  	return ret;
  }
  
@@ -632,7 +710,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  /*
   * exec_handle_file_actions
   *
-@@ -2709,7 +2769,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
+@@ -2709,7 +2795,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
  			AUDIT_SUBCALL_ENTER(OPEN, p, uthread);
  
  			NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
@@ -641,7 +719,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  			    imgp->ip_vfs_context);
  
  			error = open1(imgp->ip_vfs_context, ndp,
-@@ -3094,10 +3154,16 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+@@ -3094,10 +3180,16 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
  	int error = 0;
  	struct persona *persona = NULL;
  
@@ -662,7 +740,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
  		if (px_persona->pspi_ngroups > NGROUPS_MAX) {
  			return EINVAL;
-@@ -3105,12 +3171,6 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+@@ -3105,12 +3197,6 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
  	}
  
  	persona = persona_lookup(px_persona->pspi_id);
@@ -675,7 +753,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	if (persona) {
  		persona_put(persona);
  	}
-@@ -3130,9 +3190,6 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+@@ -3130,9 +3216,6 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
  	 * the kauth with a different UID/GID combo
  	 */
  	persona = persona_lookup(px_persona->pspi_id);
@@ -685,7 +763,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  
  	cred = kauth_cred_proc_ref(p);
  
-@@ -3158,6 +3215,48 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+@@ -3158,6 +3241,48 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
  		    px_persona->pspi_gmuid);
  	}
  
@@ -734,7 +812,40 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	ret = persona_proc_adopt(p, persona, cred);
  
  	kauth_cred_unref(&cred);
-@@ -5586,10 +5685,75 @@ bad:
+@@ -4073,7 +4198,7 @@ do_fork1:
+ 	 * as 0 and pretends the call succeeded.
+ 	 */
+ 	error = exec_activate_image(imgp);
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	ml_task_set_jop_pid_from_shared_region(new_task);
+ 	ml_task_set_disable_user_jop(new_task, imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE);
+ 	ml_thread_set_disable_user_jop(imgp->ip_new_thread, imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE);
+@@ -5041,7 +5166,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+ 		 * for vfexec.
+ 		 */
+ 		new_task = get_threadtask(imgp->ip_new_thread);
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 		ml_task_set_disable_user_jop(new_task, imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE);
+ 		ml_thread_set_disable_user_jop(imgp->ip_new_thread, imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE);
+ #endif
+@@ -5068,12 +5193,12 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+ 		error = process_signature(p, imgp);
+ 	}
+ 
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	if (imgp->ip_new_thread && !error) {
+ 		ml_task_set_jop_pid_from_shared_region(new_task);
+ 		ml_thread_set_jop_pid(imgp->ip_new_thread, new_task);
+ 	}
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC */
+ 
+ 	/* flag exec has occurred, notify only if it has not failed due to FP Key error */
+ 	if (exec_done && ((p->p_lflag & P_LTERM_DECRYPTFAIL) == 0)) {
+@@ -5586,10 +5711,75 @@ bad:
   * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
@@ -810,7 +921,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	int error = 0;
  	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
  	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
-@@ -5759,6 +5923,33 @@ exec_extract_strings(struct image_params *imgp)
+@@ -5759,6 +5949,33 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}
  
@@ -844,7 +955,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	/* Save space for envv[] NULL terminator */
  	if (imgp->ip_argspace < new_ptr_size) {
  		error = E2BIG;
-@@ -6636,7 +6827,23 @@ handle_mac_transition:
+@@ -6636,7 +6853,23 @@ handle_mac_transition:
  	}
  
  	/* Update the process' identity version and set the security token */
@@ -869,7 +980,7 @@ index 1d71c66629fb..a22095ccf5f0 100644
  	task_set_uniqueid(task);
  	set_security_token_task_internal(p, task);
  
-@@ -7538,6 +7745,11 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -7538,6 +7771,11 @@ process_signature(proc_t p, struct image_params *imgp)
  	}
  
  done:
@@ -1087,6 +1198,22 @@ index 003cfb074a99..c597065f24f1 100644
  
  	if (sock == NULL) {
  		return EINVAL;
+diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
+index 1756185d9904..fefd2347d0a6 100644
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -473,9 +473,9 @@ load_machfile(
+ 
+ 	result->is_64bit_addr = ((imgp->ip_flags & IMGPF_IS_64BIT_ADDR) == IMGPF_IS_64BIT_ADDR);
+ 	result->is_64bit_data = ((imgp->ip_flags & IMGPF_IS_64BIT_DATA) == IMGPF_IS_64BIT_DATA);
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	pmap_flags |= (imgp->ip_flags & IMGPF_NOJOP) ? PMAP_CREATE_DISABLE_JOP : 0;
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC */
+ #if CONFIG_ROSETTA
+ 	pmap_flags |= (imgp->ip_flags & IMGPF_ROSETTA) ? PMAP_CREATE_ROSETTA : 0;
+ #endif
 diff --git a/bsd/kern/subr_log_stream.c b/bsd/kern/subr_log_stream.c
 index e994afaf0d8a..d80cdd8b4db1 100644
 --- a/bsd/kern/subr_log_stream.c
@@ -1792,10 +1919,33 @@ index 5b51e9c46a8d..6872b94631c9 100644
  	context.vc_thread = current_thread();
  	context.vc_ucred = cred;
 diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
-index 60c8b9eedd50..4384b6fec634 100644
+index 60c8b9eedd50..860eb7942297 100644
 --- a/bsd/vm/vm_unix.c
 +++ b/bsd/vm/vm_unix.c
-@@ -2538,7 +2538,19 @@ after_root_check:
+@@ -2112,10 +2112,12 @@ shared_region_check_np(
+ 				    (uint64_t)uap->start_address));
+ 				error = ENOMEM;
+ 			} else {
+-#if __has_feature(ptrauth_calls)
++#if __has_feature(ptrauth_calls) || HAKIOS_USER_PAC
+ 				/*
+ 				 * Remap any section of the shared library that
+ 				 * has authenticated pointers into private memory.
++				 * (HakiOS PATH 2: only for a PAC-on task; a no-op for every other
++				 * task and with hakios_pac=0.)
+ 				 */
+ 				if (vm_shared_region_auth_remap(shared_region) != KERN_SUCCESS) {
+ 					SHARED_REGION_TRACE_ERROR(("shared_region: %p [%d(%s)] "
+@@ -2126,7 +2128,7 @@ shared_region_check_np(
+ 					    (uint64_t)uap->start_address));
+ 					error = ENOMEM;
+ 				}
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* __has_feature(ptrauth_calls) || HAKIOS_USER_PAC */
+ 
+ 				/* ... and give it to the caller */
+ 				if (error == 0) {
+@@ -2538,7 +2540,19 @@ after_root_check:
  #define PREBOOT_CRYPTEX_PATH "/private/preboot/Cryptexes"
  #endif
  			error = vnode_lookup(PREBOOT_CRYPTEX_PATH, 0, &preboot_vp, vfs_context_current());
@@ -1816,8 +1966,26 @@ index 60c8b9eedd50..4384b6fec634 100644
  				SHARED_REGION_TRACE_ERROR(
  					("shared_region: %p [%d(%s)] map(%p:'%s'): "
  					"not on process' root volume nor preboot volume\n",
+@@ -2977,6 +2991,17 @@ shared_region_map_and_slide_2_np(
+ 
+ 	kr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);
+ done:
++#if HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2: several of the ways this call fails say nothing in the log (the copyins, the
++	 * MAC check, ...), and dyld then reports only "no dyld cache". With hakios_pac on, say it.
++	 */
++	if (kr != 0) {
++		extern void hakios_pac_log(const char *fmt, ...) __printflike(1, 2);
++		hakios_pac_log("hakios_pac: shared_region_map_and_slide_2_np by pid %d (%s) FAILED: %d (%u file(s), %u mapping(s))\n",
++		    proc_getpid(p), p->p_comm, (int)kr, files_count, mappings_count);
++	}
++#endif /* HAKIOS_USER_PAC */
+ 	kfree_data(shared_files, files_count * sizeof(shared_files[0]));
+ 	kfree_data(mappings, mappings_count * sizeof(mappings[0]));
+ 	return kr;
 diff --git a/config/MASTER b/config/MASTER
-index 07147cb3188b..86e9eefb5ec7 100644
+index 07147cb3188b..9deaff1f4fd3 100644
 --- a/config/MASTER
 +++ b/config/MASTER
 @@ -113,6 +113,9 @@ options		CONFIG_WORKLOOP_DEBUG	# <config_workloop_debug>
@@ -1830,8 +1998,19 @@ index 07147cb3188b..86e9eefb5ec7 100644
  options		FIFO		# fifo support			# <fifo>
  options		FDESC		# fdesc_fs support		# <fdesc>
  options		DEVFS		# devfs support			# <devfs>
+@@ -324,6 +327,10 @@ options   CONFIG_PMAP_PPL			# <config_pmap_ppl>
+ options   NOS_ARM_ASM			# <nos_arm_asm>
+ options   NOS_ARM_PMAP			# <nos_arm_pmap>
+ 
++# HakiOS PATH 2: the (ARM64, non-arm64e) kernel manages architected FEAT_PAuth for EL0 only
++# (osfmk/arm64/hakios_pac.c). Compiled in by this option; inert unless boot-arg hakios_pac != 0.
++options   HAKIOS_USER_PAC			# <hakios_user_pac>
++
+ # support dynamic signing of code
+ #
+ options		CONFIG_DYNAMIC_CODE_SIGNING	# <dynamic_codesigning>
 diff --git a/config/MASTER.arm64.bcm2837 b/config/MASTER.arm64.bcm2837
-index 1ed75eea2052..4c67d211fb60 100644
+index 1ed75eea2052..5ec991637a4e 100644
 --- a/config/MASTER.arm64.bcm2837
 +++ b/config/MASTER.arm64.bcm2837
 @@ -16,15 +16,15 @@
@@ -1839,7 +2018,7 @@ index 1ed75eea2052..4c67d211fb60 100644
  #  -------- ----- -- ---------------
  #
 -#  KERNEL_BASE =    [ arm64 config_pmap_ppl xsmall msgb_small config_embedded config_requires_u32_munging ARM_EXTRAS_BASE ]
-+#  KERNEL_BASE =    [ arm64 config_pmap_ppl xsmall msgb_small config_embedded config_requires_u32_munging nos_arm_pmap nos_arm_asm ]
++#  KERNEL_BASE =    [ arm64 config_pmap_ppl xsmall msgb_small config_embedded config_requires_u32_munging nos_arm_pmap nos_arm_asm hakios_user_pac ]
  #  KERNEL_RELEASE = [ KERNEL_BASE ]
  #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug ]
  #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug ]
@@ -2111,10 +2290,10 @@ index 83259ebf9835..8864e5c7cc41 100644
  DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
  endif
 diff --git a/iokit/conf/files b/iokit/conf/files
-index 5fb0a52062e0..7c59afb92c0e 100644
+index 5fb0a52062e0..6e63646f89c0 100644
 --- a/iokit/conf/files
 +++ b/iokit/conf/files
-@@ -79,6 +79,19 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+@@ -79,6 +79,20 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
  iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
  
  iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
@@ -2123,6 +2302,7 @@ index 5fb0a52062e0..7c59afb92c0e 100644
 +iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
 +# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
 +iokit/Kernel/hakios.stubs.cpp            optional iokitcpp
++iokit/Kernel/hakios.bluetooth.cpp        optional hakios_bt_host iokitcpp
 +iokit/Kernel/hakios.gpu.cpp              optional hakios_adreno iokitcpp
 +iokit/Kernel/hakios.battery.cpp          optional hakios_battery iokitcpp
 +iokit/Kernel/hakios.wlan.cpp             optional hakios_wifi_station iokitcpp
@@ -2313,10 +2493,17 @@ index 0316792a3f42..b9c195b09cd1 100644
  # Assume LTO scaling by default, unless it is being explicitly passed on the command-line
  LARGE_BUILD_FOOTPRINT := $(if $(BUILD_LTO),$(BUILD_LTO),1)
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index e26a1d70f470..7d802986ba8c 100644
+index e26a1d70f470..d65013a0c128 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -73,6 +73,9 @@
+@@ -69,10 +69,16 @@
+ #include <libkern/kernel_mach_header.h>
+ #include <libkern/stack_protector.h>
+ #include <libkern/section_keywords.h>
++#if HAKIOS_USER_PAC
++#include <arm64/hakios_pac.h>
++#endif /* HAKIOS_USER_PAC */
+ #include <san/kasan.h>
  #include <sys/kdebug.h>
  
  #include <pexpert/pexpert.h>
@@ -2326,7 +2513,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  #include <console/serial_protos.h>
  
-@@ -335,7 +338,11 @@ arm_setup_pre_sign(void)
+@@ -335,7 +341,11 @@ arm_setup_pre_sign(void)
   */
  
  __startup_func
@@ -2338,7 +2525,7 @@ index e26a1d70f470..7d802986ba8c 100644
  arm_init(
  	boot_args       *args)
  {
-@@ -354,6 +361,7 @@ arm_init(
+@@ -354,6 +364,7 @@ arm_init(
  	const_boot_args = *args;
  	BootArgs = args = &const_boot_args;
  
@@ -2346,7 +2533,7 @@ index e26a1d70f470..7d802986ba8c 100644
  	cpu_data_init(&BootCpuData);
  #if defined(HAS_APPLE_PAC)
  	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
-@@ -362,14 +370,19 @@ arm_init(
+@@ -362,14 +373,19 @@ arm_init(
  #endif /* defined(HAS_APPLE_PAC) */
  
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
@@ -2366,7 +2553,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  #if (DEVELOPMENT || DEBUG)
  	unsigned long const *platform_stall_ptr = NULL;
-@@ -385,6 +398,7 @@ arm_init(
+@@ -385,6 +401,7 @@ arm_init(
  	}
  
  	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_ARM_INIT);
@@ -2374,7 +2561,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  	chosen = NULL; // Force a re-lookup later on since VM addresses are not final at this point
  	dt_entry_size = 0;
-@@ -422,10 +436,13 @@ arm_init(
+@@ -422,10 +439,13 @@ arm_init(
  	}
  #endif
  
@@ -2388,7 +2575,7 @@ index e26a1d70f470..7d802986ba8c 100644
  	assert(master_cpu >= 0 && master_cpu <= ml_get_max_cpu_number());
  
  	BootCpuData.cpu_number = (unsigned short)master_cpu;
-@@ -439,11 +456,14 @@ arm_init(
+@@ -439,11 +459,14 @@ arm_init(
  	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
  	    + ((uintptr_t)&BootCpuData
  	    - (uintptr_t)(args->virtBase)));
@@ -2403,7 +2590,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  	/*
  	 * Preemption is enabled for this thread so that it can lock mutexes without
-@@ -452,12 +472,16 @@ arm_init(
+@@ -452,12 +475,16 @@ arm_init(
  	 * preemption level is not really meaningful for the bootstrap thread.
  	 */
  	thread->machine.preemption_count = 0;
@@ -2420,7 +2607,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  	/*
  	 * Initialize the timer callout world
-@@ -465,6 +489,7 @@ arm_init(
+@@ -465,6 +492,7 @@ arm_init(
  	timer_call_init();
  
  	cpu_init();
@@ -2428,7 +2615,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  	processor_bootstrap();
  
-@@ -514,6 +539,7 @@ arm_init(
+@@ -514,6 +542,7 @@ arm_init(
  #endif  /* __ARM_PAN_AVAILABLE__ */
  
  	arm_vm_init(xmaxmem, args);
@@ -2436,7 +2623,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  	if (debug_boot_arg) {
  		patch_low_glo();
-@@ -527,7 +553,9 @@ arm_init(
+@@ -527,7 +556,9 @@ arm_init(
  
  	/* Setup debugging output. */
  	const unsigned int serial_exists = serial_init();
@@ -2446,7 +2633,7 @@ index e26a1d70f470..7d802986ba8c 100644
  	kprintf("kprintf initialized\n");
  
  	serialmode = 0;
-@@ -569,6 +597,7 @@ arm_init(
+@@ -569,6 +600,7 @@ arm_init(
  		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
  	}
  	PE_create_console();
@@ -2454,7 +2641,7 @@ index e26a1d70f470..7d802986ba8c 100644
  
  	/* setup console output */
  	PE_init_printf(FALSE);
-@@ -647,6 +676,7 @@ arm_init(
+@@ -647,6 +679,7 @@ arm_init(
  	 * against string vulnerabilities
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);
@@ -2462,8 +2649,18 @@ index e26a1d70f470..7d802986ba8c 100644
  	machine_startup(args);
  }
  
-@@ -673,6 +703,9 @@ arm_init_cpu(
+@@ -671,8 +704,19 @@ arm_init_cpu(
  
+ 	cpu_data_ptr->cpu_flags &= ~SleepState;
+ 
++#if HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2: this core comes out of reset (SMP boot, or a PSCI power-down): its PAC key
++	 * registers are gone and start.s put SCTLR_EL1 back to its default. Forget the per-CPU cache;
++	 * the next switch to a user thread reloads (hakios_pac_switch).
++	 */
++	hakios_pac_cpu_invalidate(cpu_data_ptr);
++#endif /* HAKIOS_USER_PAC */
  
  	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 +#if defined(GENERIC_PSCI_SMP)
@@ -2472,7 +2669,19 @@ index e26a1d70f470..7d802986ba8c 100644
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs();
-@@ -823,5 +856,8 @@ arm_init_idle_cpu(
+@@ -798,6 +842,11 @@ arm_init_idle_cpu(
+ 
+ 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+ 
++#if HAKIOS_USER_PAC
++	/* HakiOS PATH 2: back from an idle state that lost the core's registers (see arm_init_cpu) */
++	hakios_pac_cpu_invalidate(cpu_data_ptr);
++#endif /* HAKIOS_USER_PAC */
++
+ #if __arm64__
+ 	wfe_timeout_init();
+ 	pmap_clear_user_ttb();
+@@ -823,5 +872,8 @@ arm_init_idle_cpu(
  
  	fiq_context_init(FALSE);
  
@@ -2481,6 +2690,64 @@ index e26a1d70f470..7d802986ba8c 100644
 +#endif
  	cpu_idle_exit(TRUE);
  }
+diff --git a/osfmk/arm/cpu_data_internal.h b/osfmk/arm/cpu_data_internal.h
+index 19808bd416e7..70598bb98392 100644
+--- a/osfmk/arm/cpu_data_internal.h
++++ b/osfmk/arm/cpu_data_internal.h
+@@ -214,10 +214,18 @@ typedef struct cpu_data {
+ 		CPU_HALTED,
+ 		CPU_HALTED_WITH_STATE
+ 	}                               halt_status;
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	uint64_t                        rop_key;
+ 	uint64_t                        jop_key;
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC */
++#if HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2: what this CPU's architected PAC registers hold (HAKIOS_PAC_CPU_* in
++	 * arm64/hakios_pac.h). rop_key/jop_key above cache the rop_pid/jop_pid whose derived keys are
++	 * loaded in APIB/APDB and APIA/APDA. 0 = nothing known (after reset / power-down).
++	 */
++	uint8_t                         hakios_pac_state;
++#endif /* HAKIOS_USER_PAC */
+ 
+ 	/* large structs with large alignment requirements */
+ #if KPC
+diff --git a/osfmk/arm/machine_routines.h b/osfmk/arm/machine_routines.h
+index d04ecfa99982..cf7142034418 100644
+--- a/osfmk/arm/machine_routines.h
++++ b/osfmk/arm/machine_routines.h
+@@ -1339,6 +1339,9 @@ uint32_t ml_update_cluster_wfe_recommendation(uint32_t wfe_cluster_id, uint64_t
+ #define UNSIGN_PTR(p) \
+ 	SIGN(p) ? ((p) | PAC_MASK) : ((p) & ~PAC_MASK)
+ 
++#endif /* defined(HAS_APPLE_PAC) */
++
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ uint64_t ml_default_rop_pid(void);
+ uint64_t ml_default_jop_pid(void);
+ void ml_task_set_rop_pid(task_t task, task_t parent_task, boolean_t inherit);
+@@ -1347,6 +1350,18 @@ void ml_task_set_jop_pid_from_shared_region(task_t task);
+ void ml_task_set_disable_user_jop(task_t task, uint8_t disable_user_jop);
+ void ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop);
+ void ml_thread_set_jop_pid(thread_t thread, task_t task);
++#endif /* defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC */
++
++#if HAKIOS_USER_PAC
++/*
++ * HakiOS PATH 2 (osfmk/arm64/hakios_pac.c): exec's decision whether an image runs with user
++ * pointer authentication. False unless boot-arg hakios_pac != 0, the image is arm64e, and
++ * (hakios_pac=2, or hakios_pac=1 and the name is in hakios_pac_proc=).
++ */
++bool hakios_pac_exec_wants_pac(const char *name, size_t namelen, bool is_arm64e);
++#endif /* HAKIOS_USER_PAC */
++
++#if defined(HAS_APPLE_PAC)
+ void *ml_auth_ptr_unchecked(void *ptr, unsigned key, uint64_t modifier);
+ 
+ uint64_t ml_enable_user_jop_key(uint64_t user_jop_key);
 diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
 index 39daaf8db949..64ceb1a5f201 100644
 --- a/osfmk/arm/model_dep.c
@@ -2510,10 +2777,10 @@ index 39daaf8db949..64ceb1a5f201 100644
  	}
  	os_atomic_clear_exclusive();
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index fc2096fa0010..8f198ed1b820 100644
+index fc2096fa0010..6e7484cce30b 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
-@@ -93,6 +93,8 @@
+@@ -93,12 +93,17 @@
  
  #include <pexpert/device_tree.h>
  
@@ -2522,7 +2789,52 @@ index fc2096fa0010..8f198ed1b820 100644
  #include <san/kasan.h>
  #include <sys/cdefs.h>
  
-@@ -4676,8 +4678,8 @@ pmap_page_protect_options_with_flush_range(
+ #if defined(HAS_APPLE_PAC)
+ #include <ptrauth.h>
+ #endif
++#if HAKIOS_USER_PAC
++#include <arm64/hakios_pac.h>
++#endif
+ 
+ #ifdef CONFIG_XNUPOST
+ #include <tests/xnupost.h>
+@@ -2125,9 +2130,9 @@ pmap_bootstrap(
+ #if ARM_PARAMETERIZED_PMAP
+ 	kernel_pmap->pmap_pt_attr = native_pt_attr;
+ #endif /* ARM_PARAMETERIZED_PMAP */
+-#if HAS_APPLE_PAC
++#if HAS_APPLE_PAC || HAKIOS_USER_PAC
+ 	kernel_pmap->disable_jop = 0;
+-#endif /* HAS_APPLE_PAC */
++#endif /* HAS_APPLE_PAC || HAKIOS_USER_PAC */
+ 	kernel_pmap->tte = cpu_tte;
+ 	kernel_pmap->ttep = cpu_ttep;
+ 	kernel_pmap->min = UINT64_MAX - (1ULL << (64 - T1SZ_BOOT)) + 1;
+@@ -2847,9 +2852,9 @@ pmap_create_options_internal(
+ 	unsigned        tte_index_max;
+ 	pmap_t          p;
+ 	bool is_64bit = flags & PMAP_CREATE_64BIT;
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	bool disable_jop = flags & PMAP_CREATE_DISABLE_JOP;
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC */
+ 	kern_return_t   local_kr = KERN_SUCCESS;
+ 
+ 	if (size != 0) {
+@@ -2900,9 +2905,9 @@ pmap_create_options_internal(
+ 	}
+ #endif /* CONFIG_ROSETTA */
+ 
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	p->disable_jop = disable_jop;
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC */
+ 
+ 	p->nested_region_true_start = 0;
+ 	p->nested_region_true_end = ~0;
+@@ -4676,8 +4681,8 @@ pmap_page_protect_options_with_flush_range(
  			}
  #endif
  			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
@@ -2533,7 +2845,7 @@ index fc2096fa0010..8f198ed1b820 100644
  			}
  			goto protect_skip_pve_pass1;
  		}
-@@ -6877,7 +6879,8 @@ void
+@@ -6877,7 +6882,8 @@ void
  pmap_sync_page_attributes_phys(
  	ppnum_t pp)
  {
@@ -2543,7 +2855,40 @@ index fc2096fa0010..8f198ed1b820 100644
  }
  
  #if CONFIG_COREDUMP
-@@ -11623,7 +11626,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+@@ -9179,6 +9185,32 @@ pmap_auth_user_ptr(void *value, ptrauth_key key, uint64_t discriminator, uint64_
+ {
+ 	return pmap_auth_user_ptr_internal(value, key, discriminator, jop_key);
+ }
++#elif HAKIOS_USER_PAC
++/*
++ * HakiOS PATH 2 step 2: the same two interfaces on architected FEAT_PAuth (no PPL, so no
++ * _internal variants): osfmk/arm64/hakios_pac.c. As on Apple hardware only the process-independent
++ * (A) keys may be asked for; jop_key is the task's jop_pid. With boot-arg hakios_pac=0 the value
++ * comes back unchanged.
++ */
++void *
++pmap_sign_user_ptr(void *value, ptrauth_key key, uint64_t discriminator, uint64_t jop_key)
++{
++	if ((key != ptrauth_key_asia) && (key != ptrauth_key_asda)) {
++		panic("attempt to sign user pointer without process independent key");
++	}
++	return (void *)hakios_pac_sign_user_ptr((uint64_t)value,
++	           key == ptrauth_key_asia ? HAKIOS_PAC_KEY_IA : HAKIOS_PAC_KEY_DA, discriminator, jop_key);
++}
++
++void *
++pmap_auth_user_ptr(void *value, ptrauth_key key, uint64_t discriminator, uint64_t jop_key)
++{
++	if ((key != ptrauth_key_asia) && (key != ptrauth_key_asda)) {
++		panic("attempt to auth user pointer without process independent key");
++	}
++	return (void *)hakios_pac_auth_user_ptr((uint64_t)value,
++	           key == ptrauth_key_asia ? HAKIOS_PAC_KEY_IA : HAKIOS_PAC_KEY_DA, discriminator, jop_key);
++}
+ #endif /* HAS_APPLE_PAC */
+ 
+ /*
+@@ -11623,7 +11655,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
  #if XNU_MONITOR
  	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
  #else
@@ -2553,7 +2898,7 @@ index fc2096fa0010..8f198ed1b820 100644
  #endif
  }
  
-@@ -11633,7 +11637,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+@@ -11633,7 +11666,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
  #if XNU_MONITOR
  	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
  #else
@@ -2564,7 +2909,7 @@ index fc2096fa0010..8f198ed1b820 100644
  }
  
 diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
-index df672c65b144..d7e1da7c5db2 100644
+index df672c65b144..75facd28efe5 100644
 --- a/osfmk/arm/pmap/pmap.h
 +++ b/osfmk/arm/pmap/pmap.h
 @@ -112,7 +112,13 @@
@@ -2582,15 +2927,63 @@ index df672c65b144..d7e1da7c5db2 100644
  #endif /* defined(ARM_LARGE_MEMORY) */
  
  typedef uint64_t tt_entry_t; /* translation table entry type */
-@@ -442,7 +448,7 @@ struct pmap {
- #if HAS_APPLE_PAC
+@@ -439,11 +445,11 @@ struct pmap {
+ 	/* The nesting bounds have been set. */
+ 	bool nested_bounds_set;
+ 
+-#if HAS_APPLE_PAC
++#if HAS_APPLE_PAC || HAKIOS_USER_PAC
  	bool disable_jop;
  #else
 -	bool reserved10;
+-#endif /* HAS_APPLE_PAC */
 +	bool reserved12;
- #endif /* HAS_APPLE_PAC */
++#endif /* HAS_APPLE_PAC || HAKIOS_USER_PAC */
  
  	bool reserved11;
+ 
+@@ -496,10 +502,13 @@ extern ppnum_t pmap_find_phys_nofault(pmap_t map, addr64_t va);
+ extern void pmap_switch_user(thread_t th, vm_map_t map);
+ extern void pmap_set_pmap(pmap_t pmap, thread_t thread);
+ extern  void pmap_gc(void);
+-#if HAS_APPLE_PAC
++#if HAS_APPLE_PAC || HAKIOS_USER_PAC
++#if HAKIOS_USER_PAC && !HAS_APPLE_PAC
++#include <ptrauth.h>            /* ptrauth_key (the type exists without the intrinsics) */
++#endif
+ extern void * pmap_sign_user_ptr(void *value, ptrauth_key key, uint64_t data, uint64_t jop_key);
+ extern void * pmap_auth_user_ptr(void *value, ptrauth_key key, uint64_t data, uint64_t jop_key);
+-#endif /* HAS_APPLE_PAC */
++#endif /* HAS_APPLE_PAC || HAKIOS_USER_PAC */
+ 
+ /**
+  * Interfaces implemented as macros.
+diff --git a/osfmk/arm/task.h b/osfmk/arm/task.h
+index 8225d8cc86b5..3b75c27fcf17 100644
+--- a/osfmk/arm/task.h
++++ b/osfmk/arm/task.h
+@@ -66,7 +66,7 @@
+ #endif
+ 
+ 
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ #define TASK_ADDITIONS_PAC \
+ 	uint64_t rop_pid; \
+ 	uint64_t jop_pid; \
+diff --git a/osfmk/arm/thread.h b/osfmk/arm/thread.h
+index ee6f82a4b830..d0eff1b00891 100644
+--- a/osfmk/arm/thread.h
++++ b/osfmk/arm/thread.h
+@@ -153,7 +153,7 @@ struct machine_thread {
+ 	unsigned int              preemption_count;       /* preemption count */
+ 	uint16_t                  exception_trace_code;
+ 	uint8_t                   reserved7;
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	uint64_t                  rop_pid;
+ 	uint64_t                  jop_pid;
+ #else
 diff --git a/osfmk/arm64/corecrypto/arm64_isa_compatibility.h b/osfmk/arm64/corecrypto/arm64_isa_compatibility.h
 index b9549da357b4..cca31ea32502 100644
 --- a/osfmk/arm64/corecrypto/arm64_isa_compatibility.h
@@ -2605,7 +2998,7 @@ index b9549da357b4..cca31ea32502 100644
  #else
  #define __USES_V_CRYPTO_INTRINSICS 0
 diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
-index 94e91306b143..934a593af5bf 100644
+index 94e91306b143..711ab69b7753 100644
 --- a/osfmk/arm64/cpu.c
 +++ b/osfmk/arm64/cpu.c
 @@ -47,6 +47,9 @@
@@ -2618,7 +3011,17 @@ index 94e91306b143..934a593af5bf 100644
  #include <mach/processor_info.h>
  #include <vm/pmap.h>
  #include <vm/vm_kern.h>
-@@ -568,7 +571,12 @@ cpu_idle(void)
+@@ -67,6 +70,9 @@
+ #if MONOTONIC
+ #include <kern/monotonic.h>
+ #endif /* MONOTONIC */
++#if HAKIOS_USER_PAC
++#include <arm64/hakios_pac.h>
++#endif /* HAKIOS_USER_PAC */
+ 
+ #if KPERF
+ #include <kperf/kptimer.h>
+@@ -568,7 +574,12 @@ cpu_idle(void)
  #endif /* MONOTONIC */
  
  	if (wfi) {
@@ -2632,7 +3035,7 @@ index 94e91306b143..934a593af5bf 100644
  		platform_cache_idle_enter();
  #endif
  
-@@ -587,6 +595,11 @@ cpu_idle(void)
+@@ -587,6 +598,11 @@ cpu_idle(void)
  		__builtin_arm_dsb(DSB_SY);
  #if HAS_RETENTION_STATE
  		arm64_retention_wfi();
@@ -2644,11 +3047,141 @@ index 94e91306b143..934a593af5bf 100644
  #else
  		__builtin_arm_wfi();
  #endif
+@@ -673,6 +689,88 @@ cpu_idle_exit(boolean_t from_reset)
+ 	Idle_load_context();
+ }
+ 
++/*
++ * HakiOS PATH 2, step 0 (devices/akita/rebase-13mini.md): probe the architected ARMv8.3 FEAT_PAuth
++ * support on each core and whether firmware (SCR_EL3.APK) lets this EL1 kernel write the key registers.
++ * cpu_init() runs with interrupts DISABLED, so this only READS/stores here (no console I/O -- a printf
++ * here panics "Console I/O from interrupt-disabled context"); the results are printed later by
++ * hakios_pac_probe_report(), called from ml_processor_register() with interrupts on.
++ * Default off; boot-arg hakios_pac_probe=1 reads ID_AA64ISAR1/2 per core, =2 also write-tests
++ * APIAKeyLo_EL1 (which RESETS the core if SCR_EL3.APK=0). Clobbering the key is harmless: the kernel
++ * never signs (SCTLR EnIA/IB/DA/DB stay clear).
++ */
++#define HAKIOS_PAC_MAXCPU 16
++int hakios_pac_probe_level;     /* read by hakios_pac_probe_report() in machine_routines.c */
++static uint64_t hakios_pac_isar1[HAKIOS_PAC_MAXCPU], hakios_pac_isar2[HAKIOS_PAC_MAXCPU];
++static uint64_t hakios_pac_keyw[HAKIOS_PAC_MAXCPU], hakios_pac_keyr[HAKIOS_PAC_MAXCPU];
++static int8_t hakios_pac_seen[HAKIOS_PAC_MAXCPU], hakios_pac_tested[HAKIOS_PAC_MAXCPU];
++
++static void
++hakios_pac_probe(void)
++{
++	int lvl = 0;
++
++	if (!PE_parse_boot_argn("hakios_pac_probe", &lvl, sizeof(lvl)) || lvl == 0) {
++		return;
++	}
++	hakios_pac_probe_level = lvl;
++	int cpu = cpu_number();
++	if (cpu < 0 || cpu >= HAKIOS_PAC_MAXCPU) {
++		return;
++	}
++	hakios_pac_isar1[cpu] = __builtin_arm_rsr64("S3_0_c0_c6_1");   /* ID_AA64ISAR1_EL1 */
++	hakios_pac_isar2[cpu] = __builtin_arm_rsr64("S3_0_c0_c6_2");   /* ID_AA64ISAR2_EL1 */
++	hakios_pac_seen[cpu] = 1;
++	if (lvl >= 2) {
++		uint64_t t = 0x0123456789abcdefULL ^ (uint64_t)cpu;
++		__builtin_arm_wsr64("S3_0_c2_c1_0", t);        /* APIAKeyLo_EL1 (traps->reset if SCR_EL3.APK=0) */
++		__asm__ volatile("isb" ::: "memory");
++		hakios_pac_keyr[cpu] = __builtin_arm_rsr64("S3_0_c2_c1_0");
++		hakios_pac_keyw[cpu] = t;
++		hakios_pac_tested[cpu] = 1;
++	}
++}
++
++/*
++ * Flush any seen-but-not-yet-printed cores, from an interrupts-enabled context. The cpu arg is
++ * ignored (cpu_init may store a core's data AFTER ml_processor_register runs for it, and the early
++ * prints also wrap out of the kernel log ring before a usbmux capture can reach them). Calling this
++ * on every CPU registration means the late registrations re-emit the earlier cores, so the data
++ * lands inside the capture window. loader_log_line() also persists each line past the ring.
++ */
++void hakios_pac_probe_report(int cpu);
++void
++hakios_pac_probe_report(int cpu)
++{
++	extern void loader_log_line(const char *line);
++	static int8_t printed[HAKIOS_PAC_MAXCPU];
++	(void)cpu;
++
++	if (hakios_pac_probe_level == 0) {
++		return;
++	}
++	for (int c = 0; c < HAKIOS_PAC_MAXCPU; c++) {
++		if (!hakios_pac_seen[c] || printed[c]) {
++			continue;
++		}
++		printed[c] = 1;
++		char line[160];
++		uint64_t i1 = hakios_pac_isar1[c], i2 = hakios_pac_isar2[c];
++		snprintf(line, sizeof(line), "hakios_pac: cpu %d ISAR1=0x%llx (APA=%u API=%u GPA=%u GPI=%u) ISAR2=0x%llx (APA3=%u GPA3=%u)\n",
++		    c, i1, (unsigned)((i1 >> 4) & 0xf), (unsigned)((i1 >> 8) & 0xf),
++		    (unsigned)((i1 >> 24) & 0xf), (unsigned)((i1 >> 28) & 0xf),
++		    i2, (unsigned)((i2 >> 12) & 0xf), (unsigned)((i2 >> 8) & 0xf));
++		printf("%s", line);
++		loader_log_line(line);
++		if (hakios_pac_tested[c]) {
++			snprintf(line, sizeof(line), "hakios_pac: cpu %d APIAKeyLo_EL1 w=0x%llx r=0x%llx %s\n", c,
++			    hakios_pac_keyw[c], hakios_pac_keyr[c], hakios_pac_keyw[c] == hakios_pac_keyr[c] ? "OK" : "MISMATCH");
++			printf("%s", line);
++			loader_log_line(line);
++		}
++	}
++}
++
+ void
+ cpu_init(void)
+ {
+@@ -680,6 +778,7 @@ cpu_init(void)
+ 	arm_cpu_info_t *cpu_info_p;
+ 
+ 	assert(exception_stack_pointer() != 0);
++	hakios_pac_probe();
+ 
+ 	if (cdp->cpu_type != CPU_TYPE_ARM64) {
+ 		cdp->cpu_type = CPU_TYPE_ARM64;
+@@ -850,6 +949,9 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
+ #if defined(HAS_APPLE_PAC)
+ 	cpu_data_ptr->rop_key = 0;
+ 	cpu_data_ptr->jop_key = ml_default_jop_pid();
++#elif HAKIOS_USER_PAC
++	/* HakiOS PATH 2: nothing is known about this CPU's PAC key registers or SCTLR_EL1.En* yet */
++	hakios_pac_cpu_invalidate(cpu_data_ptr);
+ #endif
+ }
+ 
+diff --git a/osfmk/arm64/machine_machdep.h b/osfmk/arm64/machine_machdep.h
+index 6de53ec18bda..f7a057e4dc55 100644
+--- a/osfmk/arm64/machine_machdep.h
++++ b/osfmk/arm64/machine_machdep.h
+@@ -52,7 +52,7 @@
+ #define ARM_MACHINE_THREAD_PRESERVE_X18                 (1 << ARM_MACHINE_THREAD_PRESERVE_X18_SHIFT)
+ #endif /* !__ARM_KERNEL_PROTECT__ */
+ 
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ #define ARM_MACHINE_THREAD_DISABLE_USER_JOP_SHIFT       1
+ #define ARM_MACHINE_THREAD_DISABLE_USER_JOP             (1 << ARM_MACHINE_THREAD_DISABLE_USER_JOP_SHIFT)
+ #endif
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
-index e76e7e70ab9c..3f8e9a343373 100644
+index e76e7e70ab9c..012f94620f96 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -734,6 +734,15 @@ ml_get_machine_mem(void)
+@@ -27,6 +27,9 @@
+  */
+ 
+ #include <arm64/machine_machdep.h>
++#if HAKIOS_USER_PAC
++#include <arm64/hakios_pac.h>
++#endif /* HAKIOS_USER_PAC */
+ #include <arm64/proc_reg.h>
+ #include <arm/machine_cpu.h>
+ #include <arm/cpu_internal.h>
+@@ -734,6 +737,15 @@ ml_get_machine_mem(void)
  	return machine_info.memory_size;
  }
  
@@ -2664,7 +3197,7 @@ index e76e7e70ab9c..3f8e9a343373 100644
  __attribute__((noreturn))
  void
  halt_all_cpus(boolean_t reboot)
-@@ -745,6 +754,10 @@ halt_all_cpus(boolean_t reboot)
+@@ -745,6 +757,10 @@ halt_all_cpus(boolean_t reboot)
  		printf("CPU halted\n");
  		PEHaltRestart(kPEHaltCPU);
  	}
@@ -2675,7 +3208,7 @@ index e76e7e70ab9c..3f8e9a343373 100644
  	while (1) {
  		;
  	}
-@@ -932,6 +945,99 @@ ml_read_chip_revision(unsigned int *rev __unused)
+@@ -932,6 +948,99 @@ ml_read_chip_revision(unsigned int *rev __unused)
  #endif
  }
  
@@ -2775,7 +3308,7 @@ index e76e7e70ab9c..3f8e9a343373 100644
  void
  ml_parse_cpu_topology(void)
  {
-@@ -945,6 +1051,7 @@ ml_parse_cpu_topology(void)
+@@ -945,6 +1054,7 @@ ml_parse_cpu_topology(void)
  	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
  	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
  	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
@@ -2783,7 +3316,7 @@ index e76e7e70ab9c..3f8e9a343373 100644
  
  	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
  	// so that we trigger a panic later in the boot process, once serial is enabled.
-@@ -1005,6 +1112,20 @@ ml_parse_cpu_topology(void)
+@@ -1005,6 +1115,20 @@ ml_parse_cpu_topology(void)
  		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
  
  		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
@@ -2804,7 +3337,7 @@ index e76e7e70ab9c..3f8e9a343373 100644
  		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
  		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
  		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
-@@ -1107,6 +1228,7 @@ ml_parse_cpu_topology(void)
+@@ -1107,6 +1231,7 @@ ml_parse_cpu_topology(void)
  	cluster_offsets[0] = 0;
  #endif
  	assert(topology_info.boot_cpu != NULL);
@@ -2812,7 +3345,7 @@ index e76e7e70ab9c..3f8e9a343373 100644
  	ml_read_chip_revision(&topology_info.chip_revision);
  
  	/*
-@@ -1427,17 +1549,15 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
+@@ -1427,17 +1552,19 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
  	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
  	if (!is_boot_cpu) {
  		processor_init(processor, this_cpu_datap->cpu_number, pset);
@@ -2835,10 +3368,14 @@ index e76e7e70ab9c..3f8e9a343373 100644
 +	 * processor: see ml_choose_slow_core_partners().)
 +	 */
 +	ml_pair_slow_processors(this_cpu_datap->cpu_number);
++
++	/* HakiOS PATH 2 step 0: print this core's FEAT_PAuth probe (stored in cpu_init with interrupts off) */
++	extern void hakios_pac_probe_report(int cpu);
++	hakios_pac_probe_report(this_cpu_datap->cpu_number);
  
  	*processor_out = processor;
  	*ipi_handler_out = cpu_signal_handler;
-@@ -2237,8 +2357,16 @@ _enable_virtual_timer(void)
+@@ -2237,8 +2364,16 @@ _enable_virtual_timer(void)
  	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
  
  	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);
@@ -2855,6 +3392,205 @@ index e76e7e70ab9c..3f8e9a343373 100644
  }
  
  void
+@@ -2439,7 +2574,7 @@ ex_cb_invoke(
+ 	return EXCB_ACTION_NONE;
+ }
+ 
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ void
+ ml_task_set_disable_user_jop(task_t task, uint8_t disable_user_jop)
+ {
+@@ -2456,6 +2591,10 @@ ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop)
+ 	} else {
+ 		thread->machine.arm_machine_flags &= ~ARM_MACHINE_THREAD_DISABLE_USER_JOP;
+ 	}
++#if HAKIOS_USER_PAC
++	/* exec only does this to a thread that has not run yet; if it ever is the running one, reload now */
++	hakios_pac_thread_changed(thread);
++#endif /* HAKIOS_USER_PAC */
+ }
+ 
+ void
+@@ -2486,6 +2625,15 @@ ml_task_set_jop_pid(task_t task, task_t parent_task, boolean_t inherit)
+ void
+ ml_task_set_jop_pid_from_shared_region(task_t task)
+ {
++#if HAKIOS_USER_PAC && !defined(HAS_APPLE_PAC)
++	/*
++	 * HakiOS PATH 2, Phase A: there are no per-shared-region keys in this (non-arm64e) kernel
++	 * (shared_region_find_key() and task->shared_region_id only exist with ptrauth_calls), so
++	 * every task takes the one per-boot JOP id. Shared-cache pages signed once by the pager are
++	 * then valid in every PAC-on process. Step 2 decides whether to key by shared region.
++	 */
++	task->jop_pid = ml_default_jop_pid();
++#else /* !(HAKIOS_USER_PAC && !defined(HAS_APPLE_PAC)) */
+ 	vm_shared_region_t sr = vm_shared_region_get(task);
+ 	/*
+ 	 * If there's no shared region, we can assign the key arbitrarily.  This
+@@ -2509,14 +2657,18 @@ ml_task_set_jop_pid_from_shared_region(task_t task)
+ 		task->jop_pid = early_random();
+ 	}
+ 	task_unlock(task);
++#endif /* HAKIOS_USER_PAC && !defined(HAS_APPLE_PAC) */
+ }
+ 
+ void
+ ml_thread_set_jop_pid(thread_t thread, task_t task)
+ {
+ 	thread->machine.jop_pid = task->jop_pid;
++#if HAKIOS_USER_PAC
++	hakios_pac_thread_changed(thread);
++#endif /* HAKIOS_USER_PAC */
+ }
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC */
+ 
+ #if DEVELOPMENT || DEBUG
+ static uint64_t minor_badness_suffered = 0;
+diff --git a/osfmk/arm64/pcb.c b/osfmk/arm64/pcb.c
+index 7b98a3323d3a..adec1e931527 100644
+--- a/osfmk/arm64/pcb.c
++++ b/osfmk/arm64/pcb.c
+@@ -54,6 +54,9 @@
+ #include <arm/machdep_call.h>
+ #include <arm/misc_protos.h>
+ #include <arm/cpuid.h>
++#if HAKIOS_USER_PAC
++#include <arm64/hakios_pac.h>
++#endif /* HAKIOS_USER_PAC */
+ 
+ #include <vm/vm_map.h>
+ #include <vm/vm_protos.h>
+@@ -152,6 +155,14 @@ machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
+ 		__builtin_arm_dsb(DSB_ISH);
+ 	}
+ 
++#if HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2: load the incoming user thread's architected PAC keys and SCTLR_EL1.En*
++	 * (interrupts are off here; `old` still owns this CPU's cpu_data). One predicted branch
++	 * and nothing else when boot-arg hakios_pac is 0.
++	 */
++	hakios_pac_switch(old, new);
++#endif /* HAKIOS_USER_PAC */
+ 
+ 	machine_thread_switch_cpu_data(old, new);
+ }
+@@ -244,7 +255,7 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
+ 	thread->machine.cthread_self = 0;
+ 	thread->machine.kpcb = NULL;
+ 	thread->machine.exception_trace_code = 0;
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	thread->machine.rop_pid = task->rop_pid;
+ 	thread->machine.jop_pid = task->jop_pid;
+ 	if (task->disable_user_jop) {
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index 133b07fd6155..b3cdd98a9303 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -1739,9 +1739,9 @@ typedef enum {
+ 	ESR_EC_SVC_64              = 0x15,
+ 	ESR_EC_HVC_64              = 0x16,
+ 	ESR_EC_MSR_TRAP            = 0x18,
+-#if __has_feature(ptrauth_calls)
++#if __has_feature(ptrauth_calls) || HAKIOS_USER_PAC
+ 	ESR_EC_PAC_FAIL            = 0x1C,
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* __has_feature(ptrauth_calls) || HAKIOS_USER_PAC */
+ 	ESR_EC_IABORT_EL0          = 0x20,
+ 	ESR_EC_IABORT_EL1          = 0x21,
+ 	ESR_EC_PC_ALIGN            = 0x22,
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 2cc442e05791..7fcb164e406e 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -37,6 +37,9 @@
+ #include <arm64/machine_machdep.h>
+ #include <arm64/monotonic.h>
+ #include <arm64/instructions.h>
++#if HAKIOS_USER_PAC
++#include <arm64/hakios_pac.h>
++#endif
+ 
+ #include <kern/debug.h>
+ #include <kern/restartable.h>
+@@ -143,6 +146,8 @@ static void handle_mach_continuous_time_trap(arm_saved_state_t *);
+ static void handle_msr_trap(arm_saved_state_t *state, uint32_t esr);
+ #if __has_feature(ptrauth_calls)
+ static void handle_pac_fail(arm_saved_state_t *state, uint32_t esr) __dead2;
++#elif HAKIOS_USER_PAC
++static void hakios_handle_user_pac_fail(arm_saved_state_t *state, uint32_t esr) __dead2;
+ #endif
+ 
+ extern kern_return_t arm_fast_fault(pmap_t, vm_map_address_t, vm_prot_t, bool, bool);
+@@ -719,6 +724,23 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
+ 		handle_pac_fail(state, esr);
+ 		__builtin_unreachable();
+ 
++#elif HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2: these cores have FEAT_FPAC, so a failed aut* in a PAC-on process traps here
++	 * (EC 0x1c) instead of poisoning the pointer. Report it like Apple's handle_pac_fail()
++	 * (EXC_BAD_ACCESS / EXC_ARM_PAC_FAIL -> SIGBUS) and log it. Cannot happen with hakios_pac=0
++	 * (SCTLR_EL1.En* never set) or from the kernel (it has no aut*): then, as before, the
++	 * catch-all below.
++	 */
++	case ESR_EC_PAC_FAIL:
++		if (hakios_pac_mode != HAKIOS_PAC_MODE_OFF && is_user &&
++		    PSR64_IS_USER64(get_saved_state_cpsr(state))) {
++			hakios_handle_user_pac_fail(state, esr);
++			__builtin_unreachable();
++		}
++		handle_uncategorized(state);
++		break;
++
+ #endif /* __has_feature(ptrauth_calls) */
+ 
+ 	case ESR_EC_IABORT_EL0:
+@@ -873,6 +895,41 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
+ #endif
+ }
+ 
++#if HAKIOS_USER_PAC && !__has_feature(ptrauth_calls)
++/*
++ * HakiOS PATH 2: FPAC fault of a PAC-on user thread. The user half of Apple's handle_pac_fail():
++ * EXC_BAD_ACCESS with codes { EXC_ARM_PAC_FAIL, the instruction }. (Apple also sets
++ * EXC_PTRAUTH_BIT, which its exception_triage() strips again after telemetry and the
++ * pac-exception-fatal policy; neither exists here.) ESR bits 1:0 are the key, numbered like
++ * ptrauth_key: 0 IA, 1 IB, 2 DA, 3 DB.
++ */
++static void
++hakios_handle_user_pac_fail(arm_saved_state_t *state, uint32_t esr)
++{
++	static const char * const key_names[4] = { "IA", "IB", "DA", "DB" };
++	exception_type_t           exception = EXC_BAD_ACCESS;
++	mach_exception_data_type_t codes[2]  = {EXC_ARM_PAC_FAIL};
++	mach_msg_type_number_t     numcodes  = 2;
++	uint32_t                   instr     = 0;
++	char                       name[32];
++	int                        pid;
++
++	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
++
++	hakios_pac_task_name(current_task(), name, sizeof(name), &pid);
++	hakios_pac_log("hakios_pac: PAC FAIL %s[%d] key %s esr 0x%x pc 0x%llx instr 0x%08x lr 0x%llx "
++	    "sp 0x%llx x16 0x%llx x17 0x%llx\n",
++	    name, pid, key_names[esr & 0x3], esr, (uint64_t)get_saved_state_pc(state), instr,
++	    (uint64_t)get_saved_state_lr(state), (uint64_t)get_saved_state_sp(state),
++	    (uint64_t)get_saved_state_reg(state, 16), (uint64_t)get_saved_state_reg(state, 17));
++
++	codes[1] = instr;
++
++	exception_triage(exception, codes, numcodes);
++	__builtin_unreachable();
++}
++#endif /* HAKIOS_USER_PAC && !__has_feature(ptrauth_calls) */
++
+ /*
+  * Uncategorized exceptions are a catch-all for general execution errors.
+  * ARM64_TODO: For now, we assume this is for undefined instruction exceptions.
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
 index e5336e5a1cce..a54e35035cde 100644
 --- a/osfmk/arm64/start.s
@@ -3191,6 +3927,652 @@ index e5336e5a1cce..a54e35035cde 100644
  
  #if !VMAPPLE
  	MOV64   x1, SCTLR_EL1_DEFAULT
+diff --git a/osfmk/arm64/status.c b/osfmk/arm64/status.c
+index b595c5624433..ed13d995610f 100644
+--- a/osfmk/arm64/status.c
++++ b/osfmk/arm64/status.c
+@@ -40,6 +40,9 @@
+ #if __has_feature(ptrauth_calls)
+ #include <ptrauth.h>
+ #endif
++#if HAKIOS_USER_PAC
++#include <arm64/hakios_pac.h>
++#endif
+ 
+ #include <libkern/coreanalytics/coreanalytics.h>
+ 
+@@ -317,6 +320,552 @@ thread_generate_sigreturn_token(
+ }
+ #endif //__has_feature(ptrauth_calls)
+ 
++#if HAKIOS_USER_PAC && !__has_feature(ptrauth_calls)
++/*
++ * HakiOS PATH 2 step 4: the user thread-state ABI of an arm64e process on architected FEAT_PAuth.
++ *
++ * The four functions below (to_user, from_user, siguctx, function pointers) are Apple's
++ * __has_feature(ptrauth_calls) bodies of the machine_thread_*_convert_* routines, statement for
++ * statement: same key, same discriminator, same blend, same flag handling. Only the mechanism
++ * differs: hakios_pac_sign_user_ptr() / hakios_pac_auth_user_ptr() (what this tree's
++ * pmap_sign_user_ptr() / pmap_auth_user_ptr() call) with the thread's jop_pid, as Apple passes it
++ * (every pointer here is A-keyed: IA for pc/lr/function pointers, DA for sp/fp/uctx/nonce).
++ *
++ *   field            key   discriminator
++ *   __opaque_pc      IA    "pc" (0x7481); blend(user diversifier, "pc") when not kernel-signed
++ *   __opaque_lr      IA    "lr" (0x77d3); blend(user diversifier, "lr") when not kernel-signed;
++ *                          left alone (IB, signed by EL0 itself) under FLAGS_IB_SIGNED_LR
++ *   __opaque_sp      DA    "sp" (0xcbed)
++ *   __opaque_fp      DA    "fp" (0x4517)
++ *   sigreturn token  DA    "nonce" (0xb743), bits 51:48 / 55:52 of the result kept in ts64->flags
++ *   uctx             DA    "uctx" (0xd4a6)
++ *   sa_tramp, bsdthread_register's threadstart / wqthread: IA, 0 (authenticated only)
++ *
++ * What Apple's kernel signs besides these (ml_sign_thread_state: thread_state_initialize,
++ * thread_setentrypoint, machine_thread_dup, thread_set_wq_state64, ...) protects the saved state
++ * inside the kernel with the kernel's own keys; it never reaches EL0 and has no counterpart here.
++ *
++ * Kept out of the way of everything else: with boot-arg hakios_pac=0, and whenever neither the
++ * calling thread nor the target thread belongs to a PAC-on process, the state is not touched at
++ * all (not even FLAGS_NO_PTRAUTH is set), exactly as before this code existed.
++ */
++
++/* Apple's "JOP disabled" test of a thread */
++static inline bool
++hakios_ts_jop_disabled(thread_t t)
++{
++	return (t->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) ||
++	       !thread_is_64bit_addr(t);
++}
++
++/* a thread of a PAC-on user process (kernel threads never have DISABLE_USER_JOP set) */
++static inline bool
++hakios_ts_pac_user(thread_t t)
++{
++	return !hakios_ts_jop_disabled(t) && get_threadtask(t) != kernel_task;
++}
++
++/* does any of this apply to the pair (calling thread, target thread)? */
++static inline bool
++hakios_ts_applies(thread_t thread)
++{
++	if (__probable(hakios_pac_mode == HAKIOS_PAC_MODE_OFF)) {
++		return false;
++	}
++	return hakios_ts_pac_user(thread) || hakios_ts_pac_user(current_thread());
++}
++
++/*
++ * Debug log (hakios_pac_log(): silent with hakios_pac=0, and nothing here runs then anyway):
++ * the first HAKIOS_TS_LOG_PER_PROC signings / authentications of each process, and every
++ * authentication MISMATCH (up to a global cap). Unlocked counters: a lost update only changes
++ * how many lines appear.
++ */
++#define HAKIOS_TS_LOG_SLOTS             64
++#define HAKIOS_TS_LOG_PER_PROC          16
++#define HAKIOS_TS_LOG_TOTAL_MAX         4096
++#define HAKIOS_TS_LOG_MISMATCH_MAX      256
++
++static struct {
++	int             pid;
++	uint32_t        n;
++} hakios_ts_log_tab[HAKIOS_TS_LOG_SLOTS];
++static uint32_t hakios_ts_log_total;
++static uint32_t hakios_ts_log_mismatches;
++
++static const char *
++hakios_ts_key_name(int key)
++{
++	return key == HAKIOS_PAC_KEY_IA ? "IA" : key == HAKIOS_PAC_KEY_DA ? "DA" :
++	       key == HAKIOS_PAC_KEY_IB ? "IB" : "DB";
++}
++
++static bool
++hakios_ts_log_budget(thread_t thread, char *name, size_t namesize, int *pid)
++{
++	hakios_pac_task_name(get_threadtask(thread), name, namesize, pid);
++
++	if (hakios_ts_log_total >= HAKIOS_TS_LOG_TOTAL_MAX) {
++		return false;
++	}
++	__typeof__(&hakios_ts_log_tab[0]) slot = &hakios_ts_log_tab[(unsigned int)*pid % HAKIOS_TS_LOG_SLOTS];
++	if (slot->pid != *pid) {
++		slot->pid = *pid;
++		slot->n = 0;
++	}
++	if (slot->n >= HAKIOS_TS_LOG_PER_PROC) {
++		return false;
++	}
++	slot->n++;
++	hakios_ts_log_total++;
++	return true;
++}
++
++/* pmap_sign_user_ptr(in, key, disc, thread->machine.jop_pid) */
++static uint64_t
++hakios_ts_sign(thread_t thread, const char *what, int key, uint64_t disc, uint64_t in)
++{
++	const uint64_t out = hakios_pac_sign_user_ptr(in, key, disc, thread->machine.jop_pid);
++	char name[32];
++	int pid;
++
++	if (hakios_ts_log_budget(thread, name, sizeof(name), &pid)) {
++		hakios_pac_log("hakios_pac: ts sign %s[%d] %s key %s disc 0x%llx: 0x%llx -> 0x%llx\n",
++		    name, pid, what, hakios_ts_key_name(key), disc, in, out);
++	}
++	return out;
++}
++
++/* pmap_auth_user_ptr(in, key, disc, thread->machine.jop_pid): stripped, or poisoned on a mismatch */
++static uint64_t
++hakios_ts_auth(thread_t thread, const char *what, int key, uint64_t disc, uint64_t in)
++{
++	const uint64_t out = hakios_pac_auth_user_ptr(in, key, disc, thread->machine.jop_pid);
++	const uint64_t stripped = hakios_pac_strip_user_ptr(in, key);
++	char name[32];
++	int pid;
++
++	if (out != stripped) {
++		if (hakios_ts_log_mismatches < HAKIOS_TS_LOG_MISMATCH_MAX) {
++			hakios_ts_log_mismatches++;
++			hakios_pac_task_name(get_threadtask(thread), name, sizeof(name), &pid);
++			hakios_pac_log("hakios_pac: ts auth MISMATCH %s[%d] %s key %s disc 0x%llx: got 0x%llx, "
++			    "expected 0x%llx -> poisoned 0x%llx\n",
++			    name, pid, what, hakios_ts_key_name(key), disc, in,
++			    hakios_pac_sign_user_ptr(stripped, key, disc, thread->machine.jop_pid), out);
++		}
++	} else if (hakios_ts_log_budget(thread, name, sizeof(name), &pid)) {
++		hakios_pac_log("hakios_pac: ts auth %s[%d] %s key %s disc 0x%llx: 0x%llx -> 0x%llx\n",
++		    name, pid, what, hakios_ts_key_name(key), disc, in, out);
++	}
++	return out;
++}
++
++/* Apple's thread_generate_sigreturn_token() */
++static inline uint32_t
++hakios_ts_sigreturn_token(uint64_t ptr, thread_t thread)
++{
++	user64_addr_t token = (user64_addr_t)ptr;
++	token ^= (user64_addr_t)thread_get_sigreturn_token(thread);
++	token = (user64_addr_t)hakios_pac_sign_user_ptr(token,
++	    HAKIOS_PAC_KEY_DA, HAKIOS_PAC_DISC_NONCE,
++	    thread->machine.jop_pid);
++	token >>= 32;
++	return (uint32_t)token;
++}
++
++/* Apple's machine_thread_state_convert_to_user() */
++static kern_return_t
++hakios_thread_state_convert_to_user(
++	thread_t thread,
++	thread_flavor_t flavor,
++	thread_state_t tstate,
++	mach_msg_type_number_t *count,
++	thread_set_status_flags_t tssf_flags)
++{
++	arm_thread_state64_t *ts64;
++	bool preserve_flags = !!(tssf_flags & TSSF_PRESERVE_FLAGS);
++	bool stash_sigreturn_token = !!(tssf_flags & TSSF_STASH_SIGRETURN_TOKEN);
++	bool random_div = !!(tssf_flags & TSSF_RANDOM_USER_DIV);
++	bool thread_div = !!(tssf_flags & TSSF_THREAD_USER_DIV);
++	uint32_t old_flags;
++	bool kernel_signed_pc = true;
++	bool kernel_signed_lr = true;
++	uint32_t userland_diversifier = 0;
++
++	switch (flavor) {
++	case ARM_THREAD_STATE:
++	{
++		arm_unified_thread_state_t *unified_state = (arm_unified_thread_state_t *)tstate;
++
++		if (*count < ARM_UNIFIED_THREAD_STATE_COUNT || !is_thread_state64(unified_state)) {
++			return KERN_SUCCESS;
++		}
++		ts64 = thread_state64(unified_state);
++		break;
++	}
++	case ARM_THREAD_STATE64:
++	{
++		if (*count < ARM_THREAD_STATE64_COUNT) {
++			return KERN_SUCCESS;
++		}
++		ts64 = (arm_thread_state64_t *)tstate;
++		break;
++	}
++	default:
++		return KERN_SUCCESS;
++	}
++
++	/* HakiOS: no PAC-on process involved -> the state stays as it always was */
++	if (!hakios_ts_applies(thread)) {
++		return KERN_SUCCESS;
++	}
++
++	// Note that kernel threads never have disable_user_jop set
++	if (hakios_ts_jop_disabled(current_thread()) || hakios_ts_jop_disabled(thread)) {
++		ts64->flags = __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH;
++		return KERN_SUCCESS;
++	}
++
++	old_flags = ts64->flags;
++	ts64->flags = 0;
++	if (ts64->lr) {
++		// lr might contain an IB-signed return address (strip is a no-op on unsigned addresses)
++		uint64_t stripped_lr = hakios_pac_strip_user_ptr(ts64->lr, HAKIOS_PAC_KEY_IB);
++		if (ts64->lr != stripped_lr) {
++			// Need to allow already-signed lr value to round-trip as is
++			ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
++		}
++		// Note that an IB-signed return address that happens to have a 0 signature value
++		// will round-trip correctly even if IA-signed again below (and IA-authd later)
++	}
++
++	if (preserve_flags) {
++		assert(random_div == false);
++		assert(thread_div == false);
++
++		/* Restore the diversifier and other opaque flags */
++		ts64->flags |= (old_flags & __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK);
++		userland_diversifier = old_flags & __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK;
++		if (!(old_flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC)) {
++			kernel_signed_pc = false;
++		}
++		if (!(old_flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR)) {
++			kernel_signed_lr = false;
++		}
++	} else {
++		/* Set a non zero userland diversifier */
++		if (random_div) {
++			do {
++				read_random(&userland_diversifier, sizeof(userland_diversifier));
++				userland_diversifier &=
++				    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK;
++			} while (userland_diversifier == 0);
++		} else if (thread_div) {
++			userland_diversifier = thread_get_sigreturn_diversifier(thread) &
++			    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK;
++		}
++		ts64->flags |= userland_diversifier;
++	}
++
++	if (kernel_signed_pc) {
++		ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC;
++	}
++
++	if (kernel_signed_lr) {
++		ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR;
++	}
++
++	if (ts64->pc) {
++		uint64_t discriminator = HAKIOS_PAC_DISC_PC;
++		if (!kernel_signed_pc && userland_diversifier != 0) {
++			discriminator = hakios_pac_blend((uint64_t)userland_diversifier, HAKIOS_PAC_DISC_PC);
++		}
++
++		ts64->pc = hakios_ts_sign(thread, "pc", HAKIOS_PAC_KEY_IA, discriminator, ts64->pc);
++	}
++	if (ts64->lr && !(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR)) {
++		uint64_t discriminator = HAKIOS_PAC_DISC_LR;
++		if (!kernel_signed_lr && userland_diversifier != 0) {
++			discriminator = hakios_pac_blend((uint64_t)userland_diversifier, HAKIOS_PAC_DISC_LR);
++		}
++
++		ts64->lr = hakios_ts_sign(thread, "lr", HAKIOS_PAC_KEY_IA, discriminator, ts64->lr);
++	}
++	if (ts64->sp) {
++		ts64->sp = hakios_ts_sign(thread, "sp", HAKIOS_PAC_KEY_DA, HAKIOS_PAC_DISC_SP, ts64->sp);
++	}
++	if (ts64->fp) {
++		ts64->fp = hakios_ts_sign(thread, "fp", HAKIOS_PAC_KEY_DA, HAKIOS_PAC_DISC_FP, ts64->fp);
++	}
++
++	/* Stash the sigreturn token */
++	if (stash_sigreturn_token) {
++		if (kernel_signed_pc) {
++			uint32_t token = hakios_ts_sigreturn_token(ts64->pc, thread);
++			__DARWIN_ARM_THREAD_STATE64_SET_SIGRETURN_TOKEN(ts64, token,
++			    __DARWIN_ARM_THREAD_STATE64_SIGRETURN_PC_MASK);
++		}
++
++		if (kernel_signed_lr) {
++			uint32_t token = hakios_ts_sigreturn_token(ts64->lr, thread);
++			__DARWIN_ARM_THREAD_STATE64_SET_SIGRETURN_TOKEN(ts64, token,
++			    __DARWIN_ARM_THREAD_STATE64_SIGRETURN_LR_MASK);
++		}
++	}
++
++	return KERN_SUCCESS;
++}
++
++/*
++ * Apple's machine_thread_state_check_pac_state(): there it only sends a CoreAnalytics event
++ * (a kernel-signed pc/lr came back changed from an exception handler); here a log line.
++ */
++static void
++hakios_thread_state_check_pac_state(
++	thread_t thread,
++	arm_thread_state64_t *ts64,
++	arm_thread_state64_t *old_ts64)
++{
++	if (((ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC) &&
++	    ts64->pc != old_ts64->pc) || (!(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR) &&
++	    (ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR) && (ts64->lr != old_ts64->lr ||
++	    (old_ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR)))) {
++		char name[32];
++		int pid;
++
++		if (hakios_ts_log_mismatches < HAKIOS_TS_LOG_MISMATCH_MAX) {
++			hakios_ts_log_mismatches++;
++			hakios_pac_task_name(get_threadtask(thread), name, sizeof(name), &pid);
++			hakios_pac_log("hakios_pac: ts %s[%d] exception reply changed a kernel-signed pc/lr: "
++			    "pc 0x%llx (was 0x%llx) lr 0x%llx (was 0x%llx) flags 0x%x (was 0x%x)\n",
++			    name, pid, ts64->pc, old_ts64->pc, ts64->lr, old_ts64->lr,
++			    ts64->flags, old_ts64->flags);
++		}
++	}
++}
++
++/* Apple's machine_thread_state_check_sigreturn_token() (its CoreAnalytics event is a log line here) */
++static bool
++hakios_thread_state_check_sigreturn_token(
++	arm_thread_state64_t *ts64,
++	thread_t thread)
++{
++	bool token_matched = true;
++	bool kernel_signed_pc = !!(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC);
++	bool kernel_signed_lr = !!(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR);
++	uint32_t pc_token = 0, lr_token = 0;
++
++	if (kernel_signed_pc) {
++		/* Compute the sigreturn token */
++		pc_token = hakios_ts_sigreturn_token(ts64->pc, thread);
++		if (!__DARWIN_ARM_THREAD_STATE64_CHECK_SIGRETURN_TOKEN(ts64, pc_token,
++		    __DARWIN_ARM_THREAD_STATE64_SIGRETURN_PC_MASK)) {
++			token_matched = false;
++		}
++	}
++
++	if (kernel_signed_lr) {
++		/* Compute the sigreturn token */
++		lr_token = hakios_ts_sigreturn_token(ts64->lr, thread);
++		if (!__DARWIN_ARM_THREAD_STATE64_CHECK_SIGRETURN_TOKEN(ts64, lr_token,
++		    __DARWIN_ARM_THREAD_STATE64_SIGRETURN_LR_MASK)) {
++			token_matched = false;
++		}
++	}
++
++	if (token_matched) {
++		return true;
++	}
++
++	if (hakios_ts_log_mismatches < HAKIOS_TS_LOG_MISMATCH_MAX) {
++		char name[32];
++		int pid;
++
++		hakios_ts_log_mismatches++;
++		hakios_pac_task_name(get_threadtask(thread), name, sizeof(name), &pid);
++		hakios_pac_log("hakios_pac: ts sigreturn token MISMATCH %s[%d] flags 0x%x pc 0x%llx lr 0x%llx: "
++		    "expected pc nibble 0x%x (%d) lr nibble 0x%x (%d)\n",
++		    name, pid, ts64->flags, ts64->pc, ts64->lr,
++		    (pc_token & __DARWIN_ARM_THREAD_STATE64_SIGRETURN_PC_MASK) >> 16, kernel_signed_pc,
++		    (lr_token & __DARWIN_ARM_THREAD_STATE64_SIGRETURN_LR_MASK) >> 20, kernel_signed_lr);
++	}
++	return false;
++}
++
++/* Apple's machine_thread_state_convert_from_user() */
++static kern_return_t
++hakios_thread_state_convert_from_user(
++	thread_t thread,
++	thread_flavor_t flavor,
++	thread_state_t tstate,
++	mach_msg_type_number_t count,
++	thread_state_t old_tstate,
++	mach_msg_type_number_t old_count,
++	thread_set_status_flags_t tssf_flags)
++{
++	arm_thread_state64_t *ts64;
++	arm_thread_state64_t *old_ts64 = NULL;
++	uint64_t userland_diversifier = 0;
++	bool kernel_signed_pc;
++	bool kernel_signed_lr;
++	bool random_div = !!(tssf_flags & TSSF_RANDOM_USER_DIV);
++	bool thread_div = !!(tssf_flags & TSSF_THREAD_USER_DIV);
++
++	switch (flavor) {
++	case ARM_THREAD_STATE:
++	{
++		arm_unified_thread_state_t *unified_state = (arm_unified_thread_state_t *)tstate;
++
++		if (count < ARM_UNIFIED_THREAD_STATE_COUNT || !is_thread_state64(unified_state)) {
++			return KERN_SUCCESS;
++		}
++		ts64 = thread_state64(unified_state);
++
++		arm_unified_thread_state_t *old_unified_state = (arm_unified_thread_state_t *)old_tstate;
++		if (old_unified_state && old_count >= ARM_UNIFIED_THREAD_STATE_COUNT) {
++			old_ts64 = thread_state64(old_unified_state);
++		}
++		break;
++	}
++	case ARM_THREAD_STATE64:
++	{
++		if (count != ARM_THREAD_STATE64_COUNT) {
++			return KERN_SUCCESS;
++		}
++		ts64 = (arm_thread_state64_t *)tstate;
++
++		if (old_count == ARM_THREAD_STATE64_COUNT) {
++			old_ts64 = (arm_thread_state64_t *)old_tstate;
++		}
++		break;
++	}
++	default:
++		return KERN_SUCCESS;
++	}
++
++	/* HakiOS: no PAC-on process involved -> the state stays as it always was */
++	if (!hakios_ts_applies(thread)) {
++		return KERN_SUCCESS;
++	}
++
++	// Note that kernel threads never have disable_user_jop set
++	if (hakios_ts_jop_disabled(current_thread())) {
++		if (hakios_ts_jop_disabled(thread)) {
++			ts64->flags = __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH;
++			return KERN_SUCCESS;
++		}
++		// A JOP-disabled process must not set thread state on a JOP-enabled process
++		if (hakios_ts_log_mismatches < HAKIOS_TS_LOG_MISMATCH_MAX) {
++			char name[32];
++			int pid;
++
++			hakios_ts_log_mismatches++;
++			hakios_pac_task_name(get_threadtask(thread), name, sizeof(name), &pid);
++			hakios_pac_log("hakios_pac: ts set_state on PAC-on %s[%d] by a PAC-off process refused "
++			    "(KERN_PROTECTION_FAILURE, as Apple)\n", name, pid);
++		}
++		return KERN_PROTECTION_FAILURE;
++	}
++
++	if (ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH) {
++		if (hakios_ts_jop_disabled(thread)) {
++			return KERN_SUCCESS;
++		}
++		// Disallow setting unsigned thread state on JOP-enabled processes.
++		// Ignore flag and treat thread state arguments as signed, ptrauth
++		// poisoning will cause resulting thread state to be invalid
++		ts64->flags &= ~__DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH;
++	}
++
++	if (ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR) {
++		// lr might contain an IB-signed return address (strip is a no-op on unsigned addresses)
++		uint64_t stripped_lr = hakios_pac_strip_user_ptr(ts64->lr, HAKIOS_PAC_KEY_IB);
++		if (ts64->lr == stripped_lr) {
++			// Don't allow unsigned pointer to be passed through as is. Ignore flag and
++			// treat as IA-signed below (where auth failure may poison the value).
++			ts64->flags &= ~__DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
++		}
++		// Note that an IB-signed return address that happens to have a 0 signature value
++		// will also have been IA-signed (without this flag being set) and so will IA-auth
++		// correctly below.
++	}
++
++	kernel_signed_pc = !!(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC);
++	kernel_signed_lr = !!(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED_LR);
++	/*
++	 * Replace pc/lr with old state if allow only
++	 * user ptr flag is passed and ptrs are marked
++	 * kernel signed.
++	 */
++	if ((tssf_flags & TSSF_CHECK_USER_FLAGS) &&
++	    (kernel_signed_pc || kernel_signed_lr)) {
++		if (old_ts64 && old_count == count) {
++			/* Send a CA event if the thread state does not match */
++			hakios_thread_state_check_pac_state(thread, ts64, old_ts64);
++
++			/* Check if user ptrs needs to be replaced */
++			if ((tssf_flags & TSSF_ALLOW_ONLY_USER_PTRS) &&
++			    kernel_signed_pc) {
++				ts64->pc = old_ts64->pc;
++			}
++
++			if ((tssf_flags & TSSF_ALLOW_ONLY_USER_PTRS) &&
++			    !(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR) &&
++			    kernel_signed_lr) {
++				ts64->lr = old_ts64->lr;
++				if (old_ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR) {
++					ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
++				} else {
++					ts64->flags &= ~__DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
++				}
++			}
++		}
++	}
++
++	/* Validate sigreturn token */
++	if (tssf_flags & TSSF_CHECK_SIGRETURN_TOKEN) {
++		bool token_matched = hakios_thread_state_check_sigreturn_token(ts64, thread);
++		if ((tssf_flags & TSSF_ALLOW_ONLY_MATCHING_TOKEN) && !token_matched) {
++			return KERN_PROTECTION_FAILURE;
++		}
++	}
++
++	/* Get the userland diversifier */
++	if (random_div && old_ts64 && old_count == count) {
++		/* Get the random diversifier from the old thread state */
++		userland_diversifier = (uint64_t)(old_ts64->flags &
++		    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK);
++	} else if (thread_div) {
++		userland_diversifier = (uint64_t)(thread_get_sigreturn_diversifier(thread) &
++		    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK);
++	}
++
++	if (ts64->pc) {
++		uint64_t discriminator = HAKIOS_PAC_DISC_PC;
++		if (!kernel_signed_pc && userland_diversifier != 0) {
++			discriminator = hakios_pac_blend(userland_diversifier, HAKIOS_PAC_DISC_PC);
++		}
++		ts64->pc = hakios_ts_auth(thread, "pc", HAKIOS_PAC_KEY_IA, discriminator, ts64->pc);
++	}
++	if (ts64->lr && !(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR)) {
++		uint64_t discriminator = HAKIOS_PAC_DISC_LR;
++		if (!kernel_signed_lr && userland_diversifier != 0) {
++			discriminator = hakios_pac_blend(userland_diversifier, HAKIOS_PAC_DISC_LR);
++		}
++		ts64->lr = hakios_ts_auth(thread, "lr", HAKIOS_PAC_KEY_IA, discriminator, ts64->lr);
++	}
++	if (ts64->sp) {
++		ts64->sp = hakios_ts_auth(thread, "sp", HAKIOS_PAC_KEY_DA, HAKIOS_PAC_DISC_SP, ts64->sp);
++	}
++	if (ts64->fp) {
++		ts64->fp = hakios_ts_auth(thread, "fp", HAKIOS_PAC_KEY_DA, HAKIOS_PAC_DISC_FP, ts64->fp);
++	}
++
++	return KERN_SUCCESS;
++}
++#endif /* HAKIOS_USER_PAC && !__has_feature(ptrauth_calls) */
++
+ /*
+  * Translate thread state arguments to userspace representation
+  */
+@@ -476,6 +1025,12 @@ machine_thread_state_convert_to_user(
+ 	}
+ 
+ 	return KERN_SUCCESS;
++#elif HAKIOS_USER_PAC
++	/* HakiOS PATH 2 step 4; hakios_pac=0: one load, one branch, nothing touched */
++	if (__probable(hakios_pac_mode == HAKIOS_PAC_MODE_OFF)) {
++		return KERN_SUCCESS;
++	}
++	return hakios_thread_state_convert_to_user(thread, flavor, tstate, count, tssf_flags);
+ #else
+ 	// No conversion to userspace representation on this platform
+ 	(void)thread; (void)flavor; (void)tstate; (void)count; (void)tssf_flags;
+@@ -743,6 +1298,13 @@ machine_thread_state_convert_from_user(
+ 	}
+ 
+ 	return KERN_SUCCESS;
++#elif HAKIOS_USER_PAC
++	/* HakiOS PATH 2 step 4; hakios_pac=0: one load, one branch, nothing touched */
++	if (__probable(hakios_pac_mode == HAKIOS_PAC_MODE_OFF)) {
++		return KERN_SUCCESS;
++	}
++	return hakios_thread_state_convert_from_user(thread, flavor, tstate, count,
++	           old_tstate, old_count, tssf_flags);
+ #else
+ 	// No conversion from userspace representation on this platform
+ 	(void)thread; (void)flavor; (void)tstate; (void)count;
+@@ -777,6 +1339,23 @@ machine_thread_siguctx_pointer_convert_to_user(
+ 		    thread->machine.jop_pid);
+ 	}
+ 
++	return KERN_SUCCESS;
++#elif HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2 step 4: Apple's body above. The sigreturn validation token
++	 * (sendsig / sigreturn: uctx signed DA "uctx", XOR the thread's random token).
++	 */
++	if (__probable(hakios_pac_mode == HAKIOS_PAC_MODE_OFF)) {
++		return KERN_SUCCESS;
++	}
++	if (hakios_ts_jop_disabled(current_thread())) {
++		return KERN_SUCCESS;
++	}
++
++	if (*uctxp) {
++		*uctxp = hakios_ts_sign(thread, "uctx", HAKIOS_PAC_KEY_DA, HAKIOS_PAC_DISC_UCTX, *uctxp);
++	}
++
+ 	return KERN_SUCCESS;
+ #else
+ 	// No conversion to userspace representation on this platform
+@@ -815,6 +1394,27 @@ machine_thread_function_pointers_convert_from_user(
+ 		fptrs++;
+ 	}
+ 
++	return KERN_SUCCESS;
++#elif HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2 step 4: Apple's body above. sigaction's sa_tramp and bsdthread_register's
++	 * threadstart / wqthread arrive IA-signed with discriminator 0; the kernel keeps them stripped
++	 * and later puts them in a saved pc as they are.
++	 */
++	if (__probable(hakios_pac_mode == HAKIOS_PAC_MODE_OFF)) {
++		return KERN_SUCCESS;
++	}
++	if (hakios_ts_jop_disabled(current_thread())) {
++		return KERN_SUCCESS;
++	}
++
++	while (count--) {
++		if (*fptrs) {
++			*fptrs = hakios_ts_auth(thread, "fptr", HAKIOS_PAC_KEY_IA, 0, *fptrs);
++		}
++		fptrs++;
++	}
++
+ 	return KERN_SUCCESS;
+ #else
+ 	// No conversion from userspace representation on this platform
 diff --git a/osfmk/conf/Makefile b/osfmk/conf/Makefile
 index 050f34a53c49..c58ff62cd419 100644
 --- a/osfmk/conf/Makefile
@@ -3217,7 +4599,7 @@ index 9d98c50094a0..9e3476124e54 100644
 +osfmk/minicrypto/mc_provider.c	standard
 +osfmk/minicrypto/mc_aes.c	standard
 diff --git a/osfmk/conf/files.arm64 b/osfmk/conf/files.arm64
-index c40d57bcc677..1b7a1fcdfcdf 100644
+index c40d57bcc677..6c5a1188690f 100644
 --- a/osfmk/conf/files.arm64
 +++ b/osfmk/conf/files.arm64
 @@ -25,8 +25,8 @@ osfmk/arm64/WKdmCompress_4k.s	standard
@@ -3231,7 +4613,7 @@ index c40d57bcc677..1b7a1fcdfcdf 100644
  osfmk/arm64/bcopy.s standard
  osfmk/arm64/bzero.s standard
  osfmk/arm/caches.c		standard
-@@ -104,3 +104,8 @@ osfmk/arm64/machine_remote_time.c optional config_mach_bridge_recv_time
+@@ -104,3 +104,9 @@ osfmk/arm64/machine_remote_time.c optional config_mach_bridge_recv_time
  osfmk/arm64/corecrypto/sha256_compress_arm64.s	standard
  
  osfmk/arm/counter.c	standard
@@ -3240,6 +4622,7 @@ index c40d57bcc677..1b7a1fcdfcdf 100644
 +osfmk/arm64/user_exception_trace.c	standard
 +osfmk/arm64/gic_v3_irq.c	optional nos_arm_asm
 +osfmk/arm64/psci_smp.c	optional nos_arm_asm
++osfmk/arm64/hakios_pac.c	optional hakios_user_pac
 diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
 index 384118e8d7a9..2573d2ebd4e6 100644
 --- a/osfmk/console/video_console.c
@@ -3495,7 +4878,7 @@ index 8e29586464de..0a7de6fc4be7 100644
  				if (idle_reason == 0) {
  					idle_reason = 4;
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
-index bec97fbf7243..203e1f48783f 100644
+index bec97fbf7243..3b11841e0b77 100644
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
 @@ -156,6 +156,7 @@
@@ -3506,7 +4889,20 @@ index bec97fbf7243..203e1f48783f 100644
  #endif
  #endif
  
-@@ -721,6 +722,9 @@ kernel_bootstrap_thread(void)
+@@ -703,6 +704,12 @@ kernel_bootstrap_thread(void)
+ #endif
+ 	(void) spllo();         /* Allow interruptions */
+ 
++#if HAKIOS_USER_PAC
++	/* HakiOS PATH 2 step 2: self-test of the user-PAC signing primitives (no-op unless hakios_pac != 0) */
++	extern void hakios_pac_selftest(void);
++	hakios_pac_selftest();
++#endif
++
+ 	/*
+ 	 * This will start displaying progress to the user, start as early as possible
+ 	 */
+@@ -721,6 +728,9 @@ kernel_bootstrap_thread(void)
  	kernel_bootstrap_log("vnguard_policy_init");
  	vnguard_policy_init();
  #endif
@@ -3516,6 +4912,52 @@ index bec97fbf7243..203e1f48783f 100644
  #endif
  
  #if CONFIG_DTRACE
+diff --git a/osfmk/kern/task.c b/osfmk/kern/task.c
+index 24ed3268f2a3..1a81cd9d42b7 100644
+--- a/osfmk/kern/task.c
++++ b/osfmk/kern/task.c
+@@ -1014,7 +1014,7 @@ task_init(void)
+ 
+ 	ipc_task_enable(kernel_task);
+ 
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	kernel_task->rop_pid = ml_default_rop_pid();
+ 	kernel_task->jop_pid = ml_default_jop_pid();
+ 	// kernel_task never runs at EL0, but machine_thread_state_convert_from/to_user() relies on
+@@ -1372,6 +1372,16 @@ task_create_internal(
+ 	ml_task_set_rop_pid(new_task, parent_task, inherit_memory);
+ 	ml_task_set_jop_pid(new_task, parent_task, inherit_memory);
+ 	ml_task_set_disable_user_jop(new_task, inherit_memory ? parent_task->disable_user_jop : FALSE);
++#elif HAKIOS_USER_PAC
++	/*
++	 * HakiOS PATH 2: as above, except that a task that does not inherit starts PAC-OFF
++	 * (disable_user_jop TRUE) and stays so until exec decides otherwise (exec_mach_imgact ->
++	 * IMGPF_NOJOP -> ml_task_set_disable_user_jop). A fork child (inherit_memory) keeps its
++	 * parent's ids and mode: its memory holds pointers signed with them.
++	 */
++	ml_task_set_rop_pid(new_task, parent_task, inherit_memory);
++	ml_task_set_jop_pid(new_task, parent_task, inherit_memory);
++	ml_task_set_disable_user_jop(new_task, inherit_memory ? parent_task->disable_user_jop : TRUE);
+ #endif
+ 
+ 
+diff --git a/osfmk/kern/task.h b/osfmk/kern/task.h
+index fd619351f1a9..d334f03c5945 100644
+--- a/osfmk/kern/task.h
++++ b/osfmk/kern/task.h
+@@ -405,8 +405,10 @@ struct task {
+ #define TRW_LRETURNWAIT          0x01           /* task is waiting for fork/posix_spawn/exec to complete */
+ #define TRW_LRETURNWAITER        0x02           /* task is waiting for TRW_LRETURNWAIT to get cleared */
+ 
+-#if __has_feature(ptrauth_calls)
++#if __has_feature(ptrauth_calls) || HAKIOS_USER_PAC
+ 	bool                            shared_region_auth_remapped;    /* authenticated sections ready for use */
++#endif /* __has_feature(ptrauth_calls) || HAKIOS_USER_PAC */
++#if __has_feature(ptrauth_calls)
+ 	char                            *shared_region_id;              /* determines which ptr auth key to use */
+ #endif /* __has_feature(ptrauth_calls) */
+ 	struct vm_shared_region         *shared_region;
 diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
 index 384ef23fe0e1..d5ab6db0edbc 100644
 --- a/osfmk/kern/thread.c
@@ -3583,6 +5025,1218 @@ index 8b46efb05c86..e161ca426b1a 100644
  extern kern_return_t
  kern_work_interval_set_workload_id(mach_port_name_t port_name,
      struct kern_work_interval_workload_id_args *workload_id_args);
+diff --git a/osfmk/vm/pmap.h b/osfmk/vm/pmap.h
+index 8a97ec8f11b5..a5487d654fc5 100644
+--- a/osfmk/vm/pmap.h
++++ b/osfmk/vm/pmap.h
+@@ -690,7 +690,7 @@ extern const pmap_t     kernel_pmap;            /* The kernel's map */
+ #else
+ 
+ #define PMAP_CREATE_STAGE2         0
+-#if __arm64e__
++#if __arm64e__ || HAKIOS_USER_PAC
+ #define PMAP_CREATE_DISABLE_JOP    0x4
+ #else
+ #define PMAP_CREATE_DISABLE_JOP    0
+diff --git a/osfmk/vm/vm_dyld_pager.c b/osfmk/vm/vm_dyld_pager.c
+index a744cd3e55c2..fc7532518b7e 100644
+--- a/osfmk/vm/vm_dyld_pager.c
++++ b/osfmk/vm/vm_dyld_pager.c
+@@ -62,6 +62,12 @@
+ #include <ptrauth.h>
+ #include <arm/misc_protos.h>
+ #endif /* defined(HAS_APPLE_PAC) */
++#if HAKIOS_USER_PAC && !defined(HAS_APPLE_PAC)
++#include <arm64/hakios_pac.h>
++#define HAKIOS_DYLD_PAGER_PAC 1         /* PATH 2 step 3: sign the fixups of PAC-on tasks */
++#else
++#define HAKIOS_DYLD_PAGER_PAC 0
++#endif
+ 
+ /*
+  * DYLD page in linking pager.
+@@ -152,6 +158,23 @@ struct dyld_pager {
+ #if defined(HAS_APPLE_PAC)
+ 	uint64_t                dyld_a_key;
+ #endif /* defined(HAS_APPLE_PAC) */
++#if HAKIOS_DYLD_PAGER_PAC
++	/*
++	 * HakiOS PATH 2 step 3. A dyld pager is made by ONE task (map_with_linking_np) for one image
++	 * and mapped only into that task's map: these are the owner's PAC mode and key ids, taken once
++	 * in dyld_pager_create(), like Apple's dyld_a_key. All false/0 for a PAC-off owner and with
++	 * hakios_pac=0, and then nothing below is looked at.
++	 */
++	bool                    dyld_hk_sign;        /* owner is PAC-on: sign the auth fixups */
++	uint64_t                dyld_hk_jop_id;      /* owner's jop_pid: IA/DA keys */
++	uint64_t                dyld_hk_rop_id;      /* owner's rop_pid: IB/DB keys */
++	int                     dyld_hk_pid;         /* owner, for the log only */
++	uint32_t                dyld_hk_pages;       /* pages fixed up (atomic) */
++	uint32_t                dyld_hk_signed[4];   /* pointers signed, per key IA/IB/DA/DB (atomic) */
++	uint32_t                dyld_hk_null;        /* auth fixups left 0 (a NULL target is not signed) */
++	uint32_t                dyld_hk_plain;       /* non-auth rebases/binds on those pages */
++	uint32_t                dyld_hk_foreign;     /* page-ins asked for by a task in the other mode */
++#endif /* HAKIOS_DYLD_PAGER_PAC */
+ };
+ 
+ 
+@@ -543,6 +566,278 @@ fixupPageAuth64(
+ }
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
++#if !defined(HAS_APPLE_PAC)
++/*
++ * HakiOS PATH 1 (devices/akita/rebase-13mini.md): this ARM64 kernel (no Apple PAC) runs ARM64E
++ * userland -- the iPhone 13 mini's 16.6.1 binaries -- with pointer-auth DISABLED (the loader sets
++ * HCR_EL2.API|APK so PACGA does not trap, and PACIA/AUTIA are NOPs with the SCTLR enable bits clear).
++ * So we must still APPLY the arm64e chained fixups (DYLD_CHAINED_PTR_ARM64E / _USERLAND / _USERLAND24),
++ * but write each target UNSIGNED -- there is no key to sign with and the CPU would not check it anyway.
++ * This mirrors fixupPageAuth64() exactly except the two auth cases drop signPointer() and store the raw
++ * target. Without it, format 12 (ARM64E_USERLAND24) hit the "unknown pointer_format" default and every
++ * arm64e binary's first fixed-up page took SIGBUS (initproc/launchd died -> "initproc failed to start").
++ */
++static kern_return_t
++fixupPageAuth64_nopac(
++	uint64_t                              userVA __unused,
++	vm_offset_t                           contents,
++	vm_offset_t                           end_contents,
++	dyld_pager_t                          pager,
++	struct dyld_chained_starts_in_segment *segInfo,
++	uint32_t                              pageIndex,
++	bool                                  offsetBased)
++{
++	void                 *link_info = pager->dyld_link_info;
++	uint32_t             link_info_size = pager->dyld_link_info_size;
++	struct mwl_info_hdr  *hdr = (struct mwl_info_hdr *)link_info;
++	uint64_t             *bindsArray = (uint64_t*)((uintptr_t)link_info + hdr->mwli_binds_offset);
++
++	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
++		printf("%s(): out of range segInfo->page_start[pageIndex]", __func__);
++		return KERN_FAILURE;
++	}
++	uint16_t firstStartOffset = segInfo->page_start[pageIndex];
++	if (firstStartOffset == DYLD_CHAINED_PTR_START_NONE) {
++		return KERN_SUCCESS;
++	}
++	uint64_t *chain = (uint64_t *)(contents + firstStartOffset);
++	uint64_t targetAdjust = (offsetBased ? hdr->mwli_image_address : hdr->mwli_slide);
++	uint64_t delta = 0;
++	do {
++		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
++			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
++			    (long long)chain, (long long)contents, (long long)end_contents);
++			return KERN_FAILURE;
++		}
++		uint64_t value = *chain;
++		delta = (value >> 51) & 0x7FF;
++		bool isAuth = (value & 0x8000000000000000ULL);
++		bool isBind = (value & 0x4000000000000000ULL);
++		if (isAuth) {
++			/* PAC off: store the target unsigned (ignore key/diversity/addrDiv) */
++			if (isBind) {
++				uint32_t bindOrdinal = value & 0x00FFFFFF;
++				if (bindOrdinal >= hdr->mwli_binds_count) {
++					printf("%s(): out of range bind ordinal %u (max %u)",
++					    __func__, bindOrdinal, hdr->mwli_binds_count);
++					return KERN_FAILURE;
++				}
++				*chain = bindsArray[bindOrdinal];
++			} else {
++				/* auth rebases carry only a 32-bit offset from the image base */
++				*chain = (value & 0xFFFFFFFF) + hdr->mwli_image_address;
++			}
++		} else {
++			if (isBind) {
++				uint32_t bindOrdinal = value & 0x00FFFFFF;
++				if (bindOrdinal >= hdr->mwli_binds_count) {
++					printf("%s(): out of range bind ordinal %u (max %u)",
++					    __func__, bindOrdinal, hdr->mwli_binds_count);
++					return KERN_FAILURE;
++				} else {
++					uint64_t addend19 = (value >> 32) & 0x0007FFFF;
++					if (addend19 & 0x40000) {
++						addend19 |=  0xFFFFFFFFFFFC0000ULL;
++					}
++					*chain = bindsArray[bindOrdinal] + addend19;
++				}
++			} else {
++				uint64_t target = (value & 0x7FFFFFFFFFFULL);
++				uint64_t high8  = (value << 13) & 0xFF00000000000000ULL;
++				*chain = target + targetAdjust + high8;
++			}
++		}
++		chain += delta;
++	} while (delta != 0);
++	return KERN_SUCCESS;
++}
++#endif /* !defined(HAS_APPLE_PAC) */
++
++#if HAKIOS_DYLD_PAGER_PAC
++/*
++ * HakiOS PATH 2 step 3: the same walk as fixupPageAuth64_nopac() above, for a pager whose owner
++ * runs PAC-ON (pager->dyld_hk_sign). It is Apple's fixupPageAuth64() + signPointer() on
++ * hakios_pac_sign_user_ptr():
++ *
++ *   auth pointer   { target:32 | diversity:16 | addrDiv:1 | key:2 | next:11 | bind:1 | auth:1 }
++ *                  (auth bind: ordinal:24 in the low bits instead of the target)
++ *       value = pac<key>(target, addrDiv ? blend(slot VA, diversity) : diversity)
++ *       under the owner's key: key 0 IA / 2 DA from its jop_pid, 1 IB / 3 DB from its rop_pid.
++ *       A NULL target (a missing weak import) stays 0: dyld and Apple's kernel do not sign NULL.
++ *   plain pointer  slid / bound, unsigned: exactly what _nopac writes.
++ *
++ * "slot VA" is the address of the pointer's own storage IN THE OWNER'S ADDRESS SPACE:
++ * userVA (the page's address there, worked out by dyld_pager_data_request() from the regions
++ * map_with_linking_np gave: dyld_address[r] + (object offset - dyld_file_offset[r]); the pager is
++ * mapped at exactly dyld_address[r], vm_map_with_linking()) + the slot's offset in the page.
++ * It is NOT the kernel address the page is being filled through.
++ *
++ * Counters for the log go to *st (the caller adds them to the pager's).
++ */
++struct hakios_dyld_fixup_stats {
++	uint32_t signed_by_key[4];
++	uint32_t null_auth;
++	uint32_t plain;
++};
++
++/* the first signed pointers of the boot are logged whole, and checked with the auth primitive */
++#define HAKIOS_DYLD_PTR_LOG_MAX         12
++static uint32_t hakios_dyld_ptr_logged;
++
++static inline uint64_t
++hakios_dyld_sign(
++	uint64_t                        target,
++	uint64_t                        slotVA,
++	uint64_t                        value,          /* the packed chain entry */
++	dyld_pager_t                    pager,
++	struct hakios_dyld_fixup_stats  *st)
++{
++	const int      key = (int)((value >> 49) & 0x3);        /* == hakios_pac_key_t == ptrauth_key */
++	const bool     addrDiv = ((value & (1ULL << 48)) != 0);
++	const uint64_t diversity = (value >> 32) & 0xFFFF;
++	const uint64_t disc = addrDiv ? hakios_pac_blend(slotVA, diversity) : diversity;
++	const uint64_t id = (key == HAKIOS_PAC_KEY_IA || key == HAKIOS_PAC_KEY_DA) ?
++	    pager->dyld_hk_jop_id : pager->dyld_hk_rop_id;
++	uint64_t       signedval;
++
++	/* don't sign NULL */
++	if (target == 0) {
++		st->null_auth++;
++		return 0;
++	}
++	signedval = hakios_pac_sign_user_ptr(target, key, disc, id);
++	st->signed_by_key[key]++;
++
++	if (__improbable(hakios_dyld_ptr_logged < HAKIOS_DYLD_PTR_LOG_MAX) &&
++	    os_atomic_inc_orig(&hakios_dyld_ptr_logged, relaxed) < HAKIOS_DYLD_PTR_LOG_MAX) {
++		static const char *const names[4] = { "IA", "IB", "DA", "DB" };
++		uint64_t back = hakios_pac_auth_user_ptr(signedval, key, disc, id);
++		hakios_pac_log("hakios_pac: dyld fixup pid %d slot 0x%llx %s%s div 0x%04llx disc 0x%llx: 0x%llx -> 0x%llx (%s)\n",
++		    pager->dyld_hk_pid, slotVA, names[key], addrDiv ? "+addr" : "", diversity, disc,
++		    target, signedval, back == target ? "auth ok" : "AUTH MISMATCH");
++	}
++	return signedval;
++}
++
++static kern_return_t
++fixupPageAuth64_hakios(
++	uint64_t                              userVA,
++	vm_offset_t                           contents,
++	vm_offset_t                           end_contents,
++	dyld_pager_t                          pager,
++	struct dyld_chained_starts_in_segment *segInfo,
++	uint32_t                              pageIndex,
++	bool                                  offsetBased,
++	struct hakios_dyld_fixup_stats        *st)
++{
++	void                 *link_info = pager->dyld_link_info;
++	uint32_t             link_info_size = pager->dyld_link_info_size;
++	struct mwl_info_hdr  *hdr = (struct mwl_info_hdr *)link_info;
++	uint64_t             *bindsArray = (uint64_t*)((uintptr_t)link_info + hdr->mwli_binds_offset);
++
++	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
++		printf("%s(): out of range segInfo->page_start[pageIndex]", __func__);
++		return KERN_FAILURE;
++	}
++	uint16_t firstStartOffset = segInfo->page_start[pageIndex];
++	if (firstStartOffset == DYLD_CHAINED_PTR_START_NONE) {
++		return KERN_SUCCESS;
++	}
++	uint64_t *chain = (uint64_t *)(contents + firstStartOffset);
++	uint64_t targetAdjust = (offsetBased ? hdr->mwli_image_address : hdr->mwli_slide);
++	uint64_t delta = 0;
++	do {
++		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
++			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
++			    (long long)chain, (long long)contents, (long long)end_contents);
++			return KERN_FAILURE;
++		}
++		uint64_t value = *chain;
++		delta = (value >> 51) & 0x7FF;
++		bool isAuth = (value & 0x8000000000000000ULL);
++		bool isBind = (value & 0x4000000000000000ULL);
++		if (isAuth) {
++			/* where this pointer is stored in the owner's address space */
++			uint64_t slotVA = userVA + ((uintptr_t)chain - contents);
++			if (isBind) {
++				uint32_t bindOrdinal = value & 0x00FFFFFF;
++				if (bindOrdinal >= hdr->mwli_binds_count) {
++					printf("%s(): out of range bind ordinal %u (max %u)",
++					    __func__, bindOrdinal, hdr->mwli_binds_count);
++					return KERN_FAILURE;
++				}
++				*chain = hakios_dyld_sign(bindsArray[bindOrdinal], slotVA, value, pager, st);
++			} else {
++				/* auth rebases carry only a 32-bit offset from the image base */
++				uint64_t target = (value & 0xFFFFFFFF) + hdr->mwli_image_address;
++				*chain = hakios_dyld_sign(target, slotVA, value, pager, st);
++			}
++		} else {
++			st->plain++;
++			if (isBind) {
++				uint32_t bindOrdinal = value & 0x00FFFFFF;
++				if (bindOrdinal >= hdr->mwli_binds_count) {
++					printf("%s(): out of range bind ordinal %u (max %u)",
++					    __func__, bindOrdinal, hdr->mwli_binds_count);
++					return KERN_FAILURE;
++				} else {
++					uint64_t addend19 = (value >> 32) & 0x0007FFFF;
++					if (addend19 & 0x40000) {
++						addend19 |=  0xFFFFFFFFFFFC0000ULL;
++					}
++					*chain = bindsArray[bindOrdinal] + addend19;
++				}
++			} else {
++				uint64_t target = (value & 0x7FFFFFFFFFFULL);
++				uint64_t high8  = (value << 13) & 0xFF00000000000000ULL;
++				*chain = target + targetAdjust + high8;
++			}
++		}
++		chain += delta;
++	} while (delta != 0);
++	return KERN_SUCCESS;
++}
++
++/*
++ * The ARM64E formats for a PAC-on owner: sign, count, and say so in the log on this pager's
++ * 1st, 2nd, 4th, 8th... page (a running total: a process that dies early still shows what it got).
++ */
++static void
++fixup_page_hakios(
++	uint64_t                              userVA,
++	vm_offset_t                           contents,
++	vm_offset_t                           end_contents,
++	dyld_pager_t                          pager,
++	struct dyld_chained_starts_in_segment *segInfo,
++	uint32_t                              pageIndex,
++	bool                                  offsetBased)
++{
++	struct hakios_dyld_fixup_stats st = {};
++	kern_return_t kr;
++	uint32_t pages;
++
++	kr = fixupPageAuth64_hakios(userVA, contents, end_contents, pager, segInfo, pageIndex, offsetBased, &st);
++
++	for (int k = 0; k < 4; k++) {
++		if (st.signed_by_key[k] != 0) {
++			os_atomic_add(&pager->dyld_hk_signed[k], st.signed_by_key[k], relaxed);
++		}
++	}
++	os_atomic_add(&pager->dyld_hk_null, st.null_auth, relaxed);
++	os_atomic_add(&pager->dyld_hk_plain, st.plain, relaxed);
++	pages = os_atomic_inc(&pager->dyld_hk_pages, relaxed);
++
++	if (kr != KERN_SUCCESS || (pages & (pages - 1)) == 0) {
++		hakios_pac_log("hakios_pac: dyld pager %p pid %d: %u page(s) signed so far (this one 0x%llx: IA %u IB %u DA %u DB %u null %u plain %u%s); total IA %u IB %u DA %u DB %u\n",
++		    pager, pager->dyld_hk_pid, pages, userVA,
++		    st.signed_by_key[0], st.signed_by_key[1], st.signed_by_key[2], st.signed_by_key[3],
++		    st.null_auth, st.plain, kr != KERN_SUCCESS ? ", CHAIN ERROR" : "",
++		    pager->dyld_hk_signed[0], pager->dyld_hk_signed[1],
++		    pager->dyld_hk_signed[2], pager->dyld_hk_signed[3]);
++	}
++}
++#endif /* HAKIOS_DYLD_PAGER_PAC */
++
+ 
+ /*
+  * Handle dyld fixups for a page.
+@@ -635,6 +930,31 @@ fixup_page(
+ 	case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
+ 		fixupPageAuth64(userVA, contents, end_contents, pager, segInfo, pageIndex, true);
+ 		break;
++#else /* !defined(HAS_APPLE_PAC) -- HakiOS PATH 1: apply arm64e chains with PAC disabled (unsigned targets) */
++	/*
++	 * HakiOS PATH 2 step 3: ... and SIGNED when the pager's owner runs PAC-on (dyld_hk_sign, fixed
++	 * when the pager was made; false for every PAC-off task and with hakios_pac=0, which then take
++	 * the _nopac path exactly as before).
++	 */
++	case DYLD_CHAINED_PTR_ARM64E:
++#if HAKIOS_DYLD_PAGER_PAC
++		if (__improbable(pager->dyld_hk_sign)) {
++			fixup_page_hakios(userVA, contents, end_contents, pager, segInfo, pageIndex, false);
++			break;
++		}
++#endif /* HAKIOS_DYLD_PAGER_PAC */
++		fixupPageAuth64_nopac(userVA, contents, end_contents, pager, segInfo, pageIndex, false);
++		break;
++	case DYLD_CHAINED_PTR_ARM64E_USERLAND:
++	case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
++#if HAKIOS_DYLD_PAGER_PAC
++		if (__improbable(pager->dyld_hk_sign)) {
++			fixup_page_hakios(userVA, contents, end_contents, pager, segInfo, pageIndex, true);
++			break;
++		}
++#endif /* HAKIOS_DYLD_PAGER_PAC */
++		fixupPageAuth64_nopac(userVA, contents, end_contents, pager, segInfo, pageIndex, true);
++		break;
+ #endif /* defined(HAS_APPLE_PAC) */
+ 	case DYLD_CHAINED_PTR_64:
+ 		fixupPage64(contents, end_contents, link_info, segInfo, pageIndex, false);
+@@ -701,6 +1021,29 @@ dyld_pager_data_request(
+ 	assert(pager->dyld_is_mapped); /* pager is mapped */
+ 	hdr = (struct mwl_info_hdr *)pager->dyld_link_info;
+ 
++#if HAKIOS_DYLD_PAGER_PAC
++	/*
++	 * HakiOS PATH 2 step 3: the page is filled for the pager's OWNER (signed or not, with the
++	 * owner's keys), whoever faults it in. The only other tasks that can reach this object are the
++	 * owner's fork children (same mode and key ids: task_create_internal) and tasks reading the
++	 * owner's memory (vm_read / vm_remap: they are meant to see the owner's bytes). Should a user
++	 * task of the OTHER mode ever fault here, say so: the bytes it gets are right for the owner,
++	 * not for it.
++	 */
++	if (__improbable(hakios_pac_mode != HAKIOS_PAC_MODE_OFF)) {
++		task_t ftask = current_task();
++		if (ftask != kernel_task && hakios_pac_task_signs(ftask) != pager->dyld_hk_sign &&
++		    os_atomic_inc(&pager->dyld_hk_foreign, relaxed) <= 4) {
++			char fname[32];
++			int fpid;
++			hakios_pac_task_name(ftask, fname, sizeof(fname), &fpid);
++			hakios_pac_log("hakios_pac: dyld pager %p (owner pid %d, %s) paged in by pid %d (%s), a %s task: offset 0x%llx\n",
++			    pager, pager->dyld_hk_pid, pager->dyld_hk_sign ? "PAC-on" : "PAC-off",
++			    fpid, fname, pager->dyld_hk_sign ? "PAC-off" : "PAC-on", (uint64_t)offset);
++		}
++	}
++#endif /* HAKIOS_DYLD_PAGER_PAC */
++
+ 	/*
+ 	 * Gather in a UPL all the VM pages requested by VM.
+ 	 */
+@@ -980,6 +1323,19 @@ dyld_pager_terminate_internal(
+ 	assert(!pager->dyld_is_mapped);
+ 	assert(os_ref_get_count_raw(&pager->dyld_ref_count) == 1);
+ 
++#if HAKIOS_DYLD_PAGER_PAC
++	if (__improbable(pager->dyld_hk_sign)) {
++		static uint32_t hakios_dyld_pagers_done_logged;
++		if (os_atomic_inc_orig(&hakios_dyld_pagers_done_logged, relaxed) < 200) {
++			hakios_pac_log("hakios_pac: dyld pager %p pid %d done: %u page(s), signed IA %u IB %u DA %u DB %u, null auth %u, plain %u, foreign page-ins %u\n",
++			    pager, pager->dyld_hk_pid, pager->dyld_hk_pages,
++			    pager->dyld_hk_signed[0], pager->dyld_hk_signed[1],
++			    pager->dyld_hk_signed[2], pager->dyld_hk_signed[3],
++			    pager->dyld_hk_null, pager->dyld_hk_plain, pager->dyld_hk_foreign);
++		}
++	}
++#endif /* HAKIOS_DYLD_PAGER_PAC */
++
+ 	if (pager->dyld_backing_object != VM_OBJECT_NULL) {
+ 		vm_object_deallocate(pager->dyld_backing_object);
+ 		pager->dyld_backing_object = VM_OBJECT_NULL;
+@@ -1170,7 +1526,7 @@ dyld_pager_lookup(
+  */
+ static dyld_pager_t
+ dyld_pager_create(
+-#if !defined(HAS_APPLE_PAC)
++#if !defined(HAS_APPLE_PAC) && !HAKIOS_DYLD_PAGER_PAC
+ 	__unused
+ #endif /* defined(HAS_APPLE_PAC) */
+ 	task_t            task,
+@@ -1210,6 +1566,40 @@ dyld_pager_create(
+ #if defined(HAS_APPLE_PAC)
+ 	pager->dyld_a_key = (task->map && task->map->pmap && !task->map->pmap->disable_jop) ? task->jop_pid : 0;
+ #endif /* defined(HAS_APPLE_PAC) */
++#if HAKIOS_DYLD_PAGER_PAC
++	/*
++	 * HakiOS PATH 2 step 3: the owner's mode, once and for all. exec fixed the map's disable_jop
++	 * (load_machfile: PMAP_CREATE_DISABLE_JOP) and the task's ids before any of its code ran, and
++	 * dyld only gets here from that code.
++	 */
++	pager->dyld_hk_sign = false;
++	pager->dyld_hk_jop_id = 0;
++	pager->dyld_hk_rop_id = 0;
++	pager->dyld_hk_pid = -1;
++	pager->dyld_hk_pages = 0;
++	pager->dyld_hk_signed[0] = pager->dyld_hk_signed[1] = 0;
++	pager->dyld_hk_signed[2] = pager->dyld_hk_signed[3] = 0;
++	pager->dyld_hk_null = 0;
++	pager->dyld_hk_plain = 0;
++	pager->dyld_hk_foreign = 0;
++	if (__improbable(hakios_pac_task_signs(task))) {
++		static uint32_t hakios_dyld_pagers_logged;
++		char name[32];
++
++		pager->dyld_hk_sign = true;
++		hakios_pac_task_ids(task, &pager->dyld_hk_jop_id, &pager->dyld_hk_rop_id);
++		hakios_pac_task_name(task, name, sizeof(name), &pager->dyld_hk_pid);
++		if (os_atomic_inc_orig(&hakios_dyld_pagers_logged, relaxed) < 200) {
++			struct mwl_info_hdr *lhdr = (struct mwl_info_hdr *)link_info;
++			hakios_pac_log("hakios_pac: dyld pager %p for PAC-on pid %d (%s): format %u, image 0x%llx, %u region(s), first 0x%llx+0x%llx, %u bind(s): fixups will be SIGNED\n",
++			    pager, pager->dyld_hk_pid, name, lhdr->mwli_pointer_format,
++			    (uint64_t)lhdr->mwli_image_address, region_cnt,
++			    region_cnt ? (uint64_t)regions[0].mwlr_address : 0ULL,
++			    region_cnt ? (uint64_t)regions[0].mwlr_size : 0ULL,
++			    lhdr->mwli_binds_count);
++		}
++	}
++#endif /* HAKIOS_DYLD_PAGER_PAC */
+ 
+ 	/*
+ 	 * Record the regions so the pager can find the offset from an address.
+diff --git a/osfmk/vm/vm_map.c b/osfmk/vm/vm_map.c
+index 3a29bf4c8965..cfae5d9fab9a 100644
+--- a/osfmk/vm/vm_map.c
++++ b/osfmk/vm/vm_map.c
+@@ -13094,7 +13094,7 @@ vm_map_fork(
+ 
+ 	unsigned int pmap_flags = 0;
+ 	pmap_flags |= pmap_is64bit ? PMAP_CREATE_64BIT : 0;
+-#if defined(HAS_APPLE_PAC)
++#if defined(HAS_APPLE_PAC) || HAKIOS_USER_PAC
+ 	pmap_flags |= old_map->pmap->disable_jop ? PMAP_CREATE_DISABLE_JOP : 0;
+ #endif
+ #if CONFIG_ROSETTA
+diff --git a/osfmk/vm/vm_protos.h b/osfmk/vm/vm_protos.h
+index df30cfbf8668..22aab8862b05 100644
+--- a/osfmk/vm/vm_protos.h
++++ b/osfmk/vm/vm_protos.h
+@@ -225,12 +225,14 @@ extern memory_object_t shared_region_pager_setup(
+ 	vm_object_offset_t      backing_offset,
+ 	struct vm_shared_region_slide_info *slide_info,
+ 	uint64_t                jop_key);
+-#if __has_feature(ptrauth_calls)
++#if __has_feature(ptrauth_calls) || HAKIOS_USER_PAC
+ extern memory_object_t shared_region_pager_match(
+ 	vm_object_t             backing_object,
+ 	vm_object_offset_t      backing_offset,
+ 	struct vm_shared_region_slide_info *slide_info,
+ 	uint64_t                jop_key);
++#endif /* __has_feature(ptrauth_calls) || HAKIOS_USER_PAC */
++#if __has_feature(ptrauth_calls)
+ extern void shared_region_key_alloc(
+ 	char *shared_region_id,
+ 	bool inherit,
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index db1d61332643..30c030dd7f26 100644
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -132,6 +132,17 @@
+ #if __has_feature(ptrauth_calls)
+ #include <ptrauth.h>
+ #endif /* __has_feature(ptrauth_calls) */
++#if VM_SR_AUTH_HAKIOS
++#include <arm64/hakios_pac.h>
++/*
++ * Auth sections exist only while boot-arg hakios_pac is on. There is ONE shared region for PAC-on
++ * and PAC-off tasks, and exec gives it cpu subtype 0 (kern_exec.c), so a mapping with
++ * authenticated pointers is not told by the region's subtype as on Apple's kernels but by what it
++ * is: slid, not VM_PROT_NOAUTH, and with slide info v3 -- the only format that has auth pointers
++ * (vm_shared_region_slide_page_v3(); v1, v2 and v4 are plain rebases).
++ */
++#define VM_SR_AUTH_ENABLED()    (hakios_pac_mode != HAKIOS_PAC_MODE_OFF)
++#endif /* VM_SR_AUTH_HAKIOS */
+ 
+ /* "dyld" uses this to figure out what the kernel supports */
+ int shared_region_version = 3;
+@@ -862,10 +873,12 @@ vm_shared_region_create(
+ 	shared_region->sr_images = NULL;
+ #if __has_feature(ptrauth_calls)
+ 	shared_region->sr_reslide = reslide;
++#endif /* __has_feature(ptrauth_calls) */
++#if VM_SR_AUTH_SECTIONS
+ 	shared_region->sr_num_auth_section = 0;
+ 	shared_region->sr_next_auth_section = 0;
+ 	shared_region->sr_auth_section = NULL;
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 
+ done:
+ 	if (shared_region) {
+@@ -952,13 +965,18 @@ vm_shared_region_destroy(
+ 		thread_call_free(shared_region->sr_timer_call);
+ 	}
+ 
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 	/*
+ 	 * Free the cached copies of slide_info for the AUTH regions.
+ 	 */
+ 	for (uint_t i = 0; i < shared_region->sr_num_auth_section; ++i) {
+ 		vm_shared_region_slide_info_t si = shared_region->sr_auth_section[i];
+ 		if (si != NULL) {
++#if VM_SR_AUTH_HAKIOS
++			if (si->si_hk_backing_object != VM_OBJECT_NULL) {
++				vm_object_deallocate(si->si_hk_backing_object);
++			}
++#endif /* VM_SR_AUTH_HAKIOS */
+ 			vm_object_deallocate(si->si_slide_object);
+ 			kfree_data(si->si_slide_info_entry,
+ 			    si->si_slide_info_size);
+@@ -972,7 +990,7 @@ vm_shared_region_destroy(
+ 		shared_region->sr_auth_section = NULL;
+ 		shared_region->sr_num_auth_section = 0;
+ 	}
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 
+ 	/* release the shared region structure... */
+ 	kfree_type(struct vm_shared_region, shared_region);
+@@ -1109,7 +1127,7 @@ shared_region_make_permanent(
+ 	return true;
+ }
+ 
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 
+ /*
+  * Determine if this task is actually using pointer signing.
+@@ -1117,12 +1135,16 @@ shared_region_make_permanent(
+ static boolean_t
+ task_sign_pointers(task_t task)
+ {
++#if VM_SR_AUTH_HAKIOS
++	return hakios_pac_task_signs(task);     /* never with hakios_pac=0 */
++#else /* VM_SR_AUTH_HAKIOS */
+ 	if (task->map &&
+ 	    task->map->pmap &&
+ 	    !task->map->pmap->disable_jop) {
+ 		return TRUE;
+ 	}
+ 	return FALSE;
++#endif /* VM_SR_AUTH_HAKIOS */
+ }
+ 
+ /*
+@@ -1150,6 +1172,22 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
+ 	kern_return_t                 kr = KERN_SUCCESS;
+ 	boolean_t                     use_ptr_auth = task_sign_pointers(task);
+ 
++#if VM_SR_AUTH_HAKIOS
++	/*
++	 * HakiOS PATH 2 step 3: only a PAC-ON task gets private mappings. A PAC-off task (every task
++	 * with hakios_pac=0) keeps the shared, unsigned mappings of the nested map and nothing at all
++	 * is done for it here.
++	 */
++	if (!use_ptr_auth) {
++		return KERN_SUCCESS;
++	}
++	uint_t hk_sections = 0;
++	const char *hk_failed = "";             /* which step gave the error, for the log */
++	uint64_t hk_failed_addr = 0;
++#endif /* VM_SR_AUTH_HAKIOS */
++	vm_prot_t                     sec_prot, sec_max_prot;
++	vm_inherit_t                  sec_inheritance;
++
+ 	/*
+ 	 * Don't do this more than once and avoid any race conditions in finishing it.
+ 	 */
+@@ -1176,6 +1214,11 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
+ 	 */
+ 	for (i = 0; i < sr->sr_num_auth_section; ++i) {
+ 		si = sr->sr_auth_section[i];
++#if VM_SR_AUTH_HAKIOS
++		if (si == NULL) {
++			continue;       /* not recorded (logged in vm_shared_region_slide_mapping()) */
++		}
++#endif /* VM_SR_AUTH_HAKIOS */
+ 		assert(si != NULL);
+ 		assert(si->si_ptrauth);
+ 
+@@ -1184,22 +1227,56 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
+ 		 * Look for an existing slid mapping's pager with matching
+ 		 * object, offset, slide info and shared_region_id to reuse.
+ 		 */
++#if VM_SR_AUTH_HAKIOS
++		/*
++		 * The signed pager of this section for this jop id (one for all PAC-on tasks: Phase A has
++		 * one jop id, and the section sits at the same address in every task of the region). It
++		 * reads from the same object and offset as the section's unsigned pager in the nested map.
++		 */
++		object = si->si_hk_backing_object;
++		sr_pager = shared_region_pager_match(object, si->si_hk_backing_offset, si, task->jop_pid);
++#else /* VM_SR_AUTH_HAKIOS */
+ 		object = si->si_slide_object;
+ 		sr_pager = shared_region_pager_match(object, si->si_start, si,
+ 		    use_ptr_auth ? task->jop_pid : 0);
++#endif /* VM_SR_AUTH_HAKIOS */
+ 		if (sr_pager == MEMORY_OBJECT_NULL) {
+ 			printf("%s(): shared_region_pager_match() failed\n", __func__);
++#if VM_SR_AUTH_HAKIOS
++			hk_failed = "shared_region_pager_match";
++			hk_failed_addr = si->si_slid_address;
++#endif /* VM_SR_AUTH_HAKIOS */
+ 			kr = KERN_FAILURE;
+ 			goto done;
+ 		}
+ 
++#if !VM_SR_AUTH_HAKIOS
+ 		/*
+ 		 * verify matching jop_pid for this task and this pager
+ 		 */
+ 		if (use_ptr_auth) {
+ 			shared_region_pager_match_task_key(sr_pager, task);
+ 		}
++#endif /* !VM_SR_AUTH_HAKIOS */
+ 
++#if VM_SR_AUTH_HAKIOS
++		/*
++		 * Apple looks the section up in the shared region's map here and insists that ONE map
++		 * entry covers it. That holds on Apple's kernels, where nobody ever uses the nested
++		 * map's copy of an auth section. Here the PAC-off tasks do: their first write to such
++		 * a section (__AUTH data is copy-on-write) makes vm_map_lookup_and_lock_object() CLIP
++		 * the nested map's entry around the faulting page, and from then on no single entry
++		 * covers the section -- "doesn't fully cover", KERN_FAILURE, for every PAC-on task
++		 * that came after (the first PAC-on task of the boot got in before any such write).
++		 * Nothing of that entry is needed but its protections and inheritance, and those were
++		 * taken when the section was slid: the nested map is not looked at.
++		 */
++		(void)sr_map;
++		(void)tmp_entry_store;
++		sec_prot = si->si_hk_prot;
++		sec_max_prot = si->si_hk_max_prot;
++		sec_inheritance = si->si_hk_inheritance;
++#else /* VM_SR_AUTH_HAKIOS */
+ 		sr_map = vm_shared_region_vm_map(sr);
+ 		tmp_entry = NULL;
+ 
+@@ -1218,6 +1295,10 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
+ 			kr = KERN_FAILURE;
+ 			goto done;
+ 		}
++		sec_prot = tmp_entry->protection;
++		sec_max_prot = tmp_entry->max_protection;
++		sec_inheritance = tmp_entry->inheritance;
++#endif /* VM_SR_AUTH_HAKIOS */
+ 
+ 		/*
+ 		 * map the pager over the portion of the mapping that needs sliding
+@@ -1225,7 +1306,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
+ 		vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED(.vmf_overwrite = true);
+ 		vmk_flags.vmkf_overwrite_immutable = true;
+ 		vmk_flags.vmf_permanent = shared_region_make_permanent(sr,
+-		    tmp_entry->max_protection);
++		    sec_max_prot);
+ 
+ 		map_addr = si->si_slid_address;
+ 		kr = vm_map_enter_mem_object(task->map,
+@@ -1236,13 +1317,17 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
+ 		    (ipc_port_t)(uintptr_t) sr_pager,
+ 		    0,
+ 		    TRUE,
+-		    tmp_entry->protection,
+-		    tmp_entry->max_protection,
+-		    tmp_entry->inheritance);
++		    sec_prot,
++		    sec_max_prot,
++		    sec_inheritance);
+ 		memory_object_deallocate(sr_pager);
+ 		sr_pager = MEMORY_OBJECT_NULL;
+ 		if (kr != KERN_SUCCESS) {
+ 			printf("%s(): vm_map_enter_mem_object() failed\n", __func__);
++#if VM_SR_AUTH_HAKIOS
++			hk_failed = "vm_map_enter_mem_object";
++			hk_failed_addr = si->si_slid_address;
++#endif /* VM_SR_AUTH_HAKIOS */
+ 			goto done;
+ 		}
+ 		assertf(map_addr == si->si_slid_address,
+@@ -1251,12 +1336,33 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
+ 		    (uint64_t)si->si_slid_address,
+ 		    tmp_entry);
+ 
+-		/* Drop the ref count grabbed by find_mapping_to_slide */
+-		vm_object_deallocate(VME_OBJECT(tmp_entry));
+-		tmp_entry = NULL;
++		if (tmp_entry) {
++			/* Drop the ref count grabbed by find_mapping_to_slide */
++			vm_object_deallocate(VME_OBJECT(tmp_entry));
++			tmp_entry = NULL;
++		}
++#if VM_SR_AUTH_HAKIOS
++		hk_sections++;
++#endif /* VM_SR_AUTH_HAKIOS */
+ 	}
+ 
+ done:
++#if VM_SR_AUTH_HAKIOS
++	{
++		static uint32_t hk_remaps_logged;
++		if (kr != KERN_SUCCESS || os_atomic_inc_orig(&hk_remaps_logged, relaxed) < 200) {
++			char name[32];
++			int pid;
++			hakios_pac_task_name(task, name, sizeof(name), &pid);
++			hakios_pac_log("hakios_pac: shared region %p: %u of %u auth section(s) remapped SIGNED (private) for PAC-on pid %d (%s), kr 0x%x\n",
++			    sr, hk_sections, sr->sr_next_auth_section, pid, name, kr);
++			if (kr != KERN_SUCCESS) {
++				hakios_pac_log("hakios_pac: shared region %p: auth remap for pid %d FAILED in %s, kr 0x%x, section at 0x%llx\n",
++				    sr, pid, hk_failed, kr, hk_failed_addr);
++			}
++		}
++	}
++#endif /* VM_SR_AUTH_HAKIOS */
+ 	if (tmp_entry) {
+ 		/* Drop the ref count grabbed by find_mapping_to_slide */
+ 		vm_object_deallocate(VME_OBJECT(tmp_entry));
+@@ -1280,7 +1386,7 @@ done:
+ 	vm_shared_region_unlock();
+ 	return kr;
+ }
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 
+ void
+ vm_shared_region_undo_mappings(
+@@ -1991,23 +2097,37 @@ vm_shared_region_map_file(
+ 	 * the previous code just established mappings for. This is why we
+ 	 * do it in a separate pass.
+ 	 */
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 	/*
+ 	 * need to allocate storage needed for any sr_auth_sections
+ 	 */
+ 	for (i = 0; i < mappings_to_slide_cnt; ++i) {
++#if VM_SR_AUTH_HAKIOS
++		/* an upper bound (the slide info's version is not read yet): unused slots stay NULL */
++		if (VM_SR_AUTH_ENABLED() &&
++		    shared_region->sr_cpu_type == CPU_TYPE_ARM64 &&
++		    !(mappings_to_slide[i]->sms_max_prot & VM_PROT_NOAUTH)) {
++			++shared_region->sr_num_auth_section;
++		}
++#else /* VM_SR_AUTH_HAKIOS */
+ 		if (shared_region->sr_cpu_type == CPU_TYPE_ARM64 &&
+ 		    shared_region->sr_cpu_subtype == CPU_SUBTYPE_ARM64E &&
+ 		    !(mappings_to_slide[i]->sms_max_prot & VM_PROT_NOAUTH)) {
+ 			++shared_region->sr_num_auth_section;
+ 		}
++#endif /* VM_SR_AUTH_HAKIOS */
+ 	}
+ 	if (shared_region->sr_num_auth_section > 0) {
+ 		shared_region->sr_auth_section =
+ 		    kalloc_type(vm_shared_region_slide_info_t, shared_region->sr_num_auth_section,
+ 		    Z_WAITOK | Z_ZERO);
+ 	}
+-#endif /* __has_feature(ptrauth_calls) */
++#if VM_SR_AUTH_HAKIOS
++	hakios_pac_log("hakios_pac: shared region %p (cpu subtype 0x%x): room for %u auth section(s) among %u slid mapping(s)\n",
++	    shared_region, (unsigned)shared_region->sr_cpu_subtype,
++	    shared_region->sr_num_auth_section, mappings_to_slide_cnt);
++#endif /* VM_SR_AUTH_HAKIOS */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 	for (i = 0; i < mappings_to_slide_cnt; ++i) {
+ 		kr = vm_shared_region_slide(shared_region->sr_slide,
+ 		    mappings_to_slide[i]->sms_file_offset,
+@@ -2060,15 +2180,16 @@ done:
+ 	thread_wakeup((event_t) &shared_region->sr_mapping_in_progress);
+ 	vm_shared_region_unlock();
+ 
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 	if (kr == KERN_SUCCESS) {
+ 		/*
+ 		 * Since authenticated mappings were just added to the shared region,
+ 		 * go back and remap them into private mappings for this task.
++		 * (HakiOS: for a PAC-on task only; nothing for the others.)
+ 		 */
+ 		kr = vm_shared_region_auth_remap(shared_region);
+ 	}
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 
+ 	/* Cache shared region info needed for telemetry in the task */
+ 	task_t task;
+@@ -2658,6 +2779,13 @@ vm_shared_region_slide_mapping(
+ 	}
+ 	si->si_shared_region = NULL;
+ 	si->si_ptrauth = FALSE;
++#elif VM_SR_AUTH_HAKIOS
++	/* the nested map's pager of this mapping: unsigned, as ever (and it owns this si) */
++	si->si_shared_region = NULL;
++	si->si_ptrauth = FALSE;
++	si->si_jop_key = 0;
++	si->si_hk_backing_object = VM_OBJECT_NULL;
++	si->si_hk_backing_offset = 0;
+ #else /* __has_feature(ptrauth_calls) */
+ 	(void)prot;     /* silence unused warning */
+ #endif /* __has_feature(ptrauth_calls) */
+@@ -2722,6 +2850,54 @@ vm_shared_region_slide_mapping(
+ 	    (uint64_t) tmp_entry->vme_start,
+ 	    tmp_entry);
+ 
++#if VM_SR_AUTH_HAKIOS
++	/*
++	 * HakiOS PATH 2 step 3: this mapping of an arm64e cache holds authenticated pointers, and the
++	 * pager just mapped into the nested map leaves them UNSIGNED: right for PAC-off tasks, which
++	 * all share it. Keep a second slide info (own copy of dyld's data, own references) in the
++	 * shared region, from which vm_shared_region_auth_remap() gives each PAC-ON task a private
++	 * mapping of a SIGNING pager over the same addresses. Not done at all with hakios_pac=0.
++	 */
++	if (kr == KERN_SUCCESS &&
++	    VM_SR_AUTH_ENABLED() &&
++	    sr->sr_cpu_type == CPU_TYPE_ARM64 &&
++	    !(prot & VM_PROT_NOAUTH) &&
++	    ((vm_shared_region_slide_info_entry_t)slide_info_entry)->version == 3) {
++		vm_shared_region_slide_info_t asi;
++		void *aentry;
++
++		if (sr->sr_next_auth_section == sr->sr_num_auth_section) {
++			printf("Too many auth/private sections for shared region!!\n");
++			hakios_pac_log("hakios_pac: shared region %p: more auth mappings than counted (%u): 0x%llx NOT signable\n",
++			    sr, sr->sr_num_auth_section, (uint64_t)si->si_slid_address);
++		} else {
++			aentry = kalloc_data((vm_size_t)slide_info_size, Z_WAITOK | Z_NOFAIL);
++			memcpy(aentry, slide_info_entry, (size_t)slide_info_size);
++			asi = kalloc_type(struct vm_shared_region_slide_info, Z_WAITOK | Z_NOFAIL);
++			*asi = *si;
++			asi->si_slide_info_entry = aentry;
++			vm_object_reference(object);                    /* for asi->si_slide_object */
++			asi->si_ptrauth = TRUE;
++			asi->si_jop_key = 0;                            /* (unused: the pager has the key) */
++			asi->si_shared_region = sr;                     /* its pagers hold the region */
++			asi->si_hk_backing_object = VME_OBJECT(tmp_entry);
++			vm_object_reference(asi->si_hk_backing_object);
++			asi->si_hk_backing_offset = VME_OFFSET(tmp_entry);
++			asi->si_hk_prot = tmp_entry->protection;
++			asi->si_hk_max_prot = tmp_entry->max_protection;
++			asi->si_hk_inheritance = tmp_entry->inheritance;
++			sr->sr_auth_section[sr->sr_next_auth_section++] = asi;
++			hakios_pac_log("hakios_pac: shared region %p auth section %u: 0x%llx..0x%llx (file 0x%llx, slide 0x%x, info v%u) prot %x/%x\n",
++			    sr, sr->sr_next_auth_section - 1,
++			    (uint64_t)asi->si_slid_address,
++			    (uint64_t)(asi->si_slid_address + (asi->si_end - asi->si_start)),
++			    (uint64_t)asi->si_start, asi->si_slide,
++			    ((vm_shared_region_slide_info_entry_t)aentry)->version,
++			    tmp_entry->protection, tmp_entry->max_protection);
++		}
++	}
++#endif /* VM_SR_AUTH_HAKIOS */
++
+ 	/* success! */
+ 	kr = KERN_SUCCESS;
+ 
+@@ -3155,17 +3331,53 @@ vm_shared_region_slide_page_v2(vm_shared_region_slide_info_t si, vm_offset_t vad
+ }
+ 
+ 
++#if VM_SR_AUTH_HAKIOS
++/*
++ * HakiOS PATH 2 step 3: what the signing shared-cache pagers did, for the log. These pages are
++ * only ever made for PAC-on tasks (jop_key != 0 && si_ptrauth).
++ */
++static uint32_t hakios_sr_signed_pages;
++static uint32_t hakios_sr_signed[4];            /* per key IA/IB/DA/DB */
++static uint32_t hakios_sr_ptr_logged;
++#define HAKIOS_SR_PTR_LOG_MAX   12
++
++static void
++hakios_sr_signed_page(mach_vm_offset_t uservaddr, const uint32_t *by_key, uint32_t plain)
++{
++	uint32_t pages;
++
++	for (int k = 0; k < 4; k++) {
++		if (by_key[k] != 0) {
++			os_atomic_add(&hakios_sr_signed[k], by_key[k], relaxed);
++		}
++	}
++	pages = os_atomic_inc(&hakios_sr_signed_pages, relaxed);
++	/* the 1st, 2nd, 4th, 8th... page; and every page with a B-key pointer (see below) */
++	if ((pages & (pages - 1)) == 0 || by_key[1] != 0 || by_key[3] != 0) {
++		hakios_pac_log("hakios_pac: shared cache: %u page(s) signed so far (this one 0x%llx: IA %u IB %u DA %u DB %u plain %u); total IA %u IB %u DA %u DB %u%s\n",
++		    pages, (uint64_t)uservaddr, by_key[0], by_key[1], by_key[2], by_key[3], plain,
++		    hakios_sr_signed[0], hakios_sr_signed[1], hakios_sr_signed[2], hakios_sr_signed[3],
++		    (by_key[1] != 0 || by_key[3] != 0) ? " -- B-KEY POINTERS IN THE CACHE: NOT VALID for any task" : "");
++	}
++}
++#endif /* VM_SR_AUTH_HAKIOS */
++
+ static kern_return_t
+ vm_shared_region_slide_page_v3(
+ 	vm_shared_region_slide_info_t si,
+ 	vm_offset_t vaddr,
+ 	__unused mach_vm_offset_t uservaddr,
+ 	uint32_t pageIndex,
+-#if !__has_feature(ptrauth_calls)
++#if !VM_SR_AUTH_SECTIONS
+ 	__unused
+-#endif /* !__has_feature(ptrauth_calls) */
++#endif /* !VM_SR_AUTH_SECTIONS */
+ 	uint64_t jop_key)
+ {
++#if VM_SR_AUTH_HAKIOS
++	const bool hk_sign = (jop_key != 0 && si->si_ptrauth && hakios_pac_mode != HAKIOS_PAC_MODE_OFF);
++	uint32_t hk_by_key[4] = { 0, 0, 0, 0 };
++	uint32_t hk_plain = 0;
++#endif /* VM_SR_AUTH_HAKIOS */
+ 	vm_shared_region_slide_info_entry_v3_t s_info = &si->si_slide_info_entry->v3;
+ 	const uint32_t slide_amount = si->si_slide;
+ 
+@@ -3243,8 +3455,45 @@ vm_shared_region_slide_page_v3(
+ 				 */
+ 				value = (uintptr_t)pmap_sign_user_ptr((void *)value, key, discriminator, jop_key);
+ 			}
++#elif VM_SR_AUTH_HAKIOS
++			if (__improbable(hk_sign)) {
++				/*
++				 * { target:32 | diversity:16 | addrDiv:1 | key:2 (bit 49 B, bit 50 D) | next:11 | 0 | 1 }
++				 * value is now the slid target. Sign it as EL0 would: key with the modifier
++				 * `diversity`, blended with the address of this slot in the task (the page's
++				 * address in the shared region, the same in every task, + the offset in the
++				 * page) when addrDiv is set.
++				 *
++				 * The key comes from the pager's jop id. That is right for IA/DA. A B key is
++				 * per task (rop_pid) and a pager shared by tasks cannot sign with it: Apple's
++				 * caches have none; if one turns up it is signed with the jop id's B key,
++				 * which no task has, and reported (hakios_sr_signed_page()).
++				 */
++				uint64_t packed;
++				memcpy(&packed, rebaseLocation, sizeof(packed)); /* (not yet overwritten) */
++				const int      key = (int)((packed >> 49) & 0x3);
++				const uint64_t diversity = (packed >> 32) & 0xFFFF;
++				const bool     addrDiv = (packed & (1ULL << 48)) != 0;
++				const uint64_t slotVA = (uint64_t)uservaddr + (uint64_t)(rebaseLocation - page_content);
++				const uint64_t disc = addrDiv ? hakios_pac_blend(slotVA, diversity) : diversity;
++				const uint64_t target = value;
++
++				value = hakios_pac_sign_user_ptr(target, key, disc, jop_key);
++				hk_by_key[key]++;
++				if (__improbable(hakios_sr_ptr_logged < HAKIOS_SR_PTR_LOG_MAX) &&
++				    os_atomic_inc_orig(&hakios_sr_ptr_logged, relaxed) < HAKIOS_SR_PTR_LOG_MAX) {
++					static const char *const names[4] = { "IA", "IB", "DA", "DB" };
++					uint64_t back = hakios_pac_auth_user_ptr(value, key, disc, jop_key);
++					hakios_pac_log("hakios_pac: shared cache fixup slot 0x%llx %s%s div 0x%04llx disc 0x%llx: 0x%llx -> 0x%llx (%s)\n",
++					    slotVA, names[key], addrDiv ? "+addr" : "", diversity, disc,
++					    target, value, back == target ? "auth ok" : "AUTH MISMATCH");
++				}
++			}
+ #endif /* __has_feature(ptrauth_calls) */
+ 		} else {
++#if VM_SR_AUTH_HAKIOS
++			hk_plain++;
++#endif /* VM_SR_AUTH_HAKIOS */
+ 			// The new value for a rebase is the low 51-bits of the threaded value plus the slide.
+ 			// Regular pointer which needs to fit in 51-bits of value.
+ 			// C++ RTTI uses the top bit, so we'll allow the whole top-byte
+@@ -3258,6 +3507,11 @@ vm_shared_region_slide_page_v3(
+ 		memcpy(rebaseLocation, &value, sizeof(value));
+ 	} while (delta != 0);
+ 
++#if VM_SR_AUTH_HAKIOS
++	if (__improbable(hk_sign)) {
++		hakios_sr_signed_page(uservaddr, hk_by_key, hk_plain);
++	}
++#endif /* VM_SR_AUTH_HAKIOS */
+ 	return KERN_SUCCESS;
+ }
+ 
+diff --git a/osfmk/vm/vm_shared_region.h b/osfmk/vm/vm_shared_region.h
+index 5fb1b6b3dfa2..55cb838eb24a 100644
+--- a/osfmk/vm/vm_shared_region.h
++++ b/osfmk/vm/vm_shared_region.h
+@@ -199,14 +199,41 @@ union vm_shared_region_slide_info_entry {
+  * - same si_slide_object, si_start, si_end, si_slide, si_ptrauth and si_jop_key
+  * - The size and contents of si_slide_info_entry are the same.
+  */
++/*
++ * HakiOS PATH 2 step 3 (HAKIOS_USER_PAC on a kernel that is not arm64e): the sections of an arm64e
++ * shared cache that hold authenticated pointers are slid UNSIGNED in the shared (nested) map, as
++ * before, for the PAC-off tasks; and a copy of their slide info is kept in sr_auth_section so that
++ * a PAC-ON task can map its own, SIGNED, pager over them (vm_shared_region_auth_remap()). This is
++ * Apple's arm64e machinery (VM_SR_AUTH_SECTIONS) without the per-shared_region_id keys / reslide.
++ */
++#if __has_feature(ptrauth_calls)
++#define VM_SR_AUTH_SECTIONS     1
++#define VM_SR_AUTH_HAKIOS       0
++#elif HAKIOS_USER_PAC
++#define VM_SR_AUTH_SECTIONS     1
++#define VM_SR_AUTH_HAKIOS       1
++#else
++#define VM_SR_AUTH_SECTIONS     0
++#define VM_SR_AUTH_HAKIOS       0
++#endif
++
+ typedef struct vm_shared_region_slide_info {
+ 	uint32_t                si_slide;           /* the distance that the file data is relocated */
+ 	bool                    si_slid;
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 	bool                    si_ptrauth;
+ 	uint64_t                si_jop_key;
+ 	struct vm_shared_region *si_shared_region; /* so we can ref/dealloc for authenticated slide info */
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
++#if VM_SR_AUTH_HAKIOS
++	/* si_ptrauth only: what the unsigned pager of the same section reads from (a reference is held) */
++	vm_object_t             si_hk_backing_object;
++	vm_object_offset_t      si_hk_backing_offset;
++	/* si_ptrauth only: how the section is mapped in the nested map (taken when it was slid) */
++	vm_prot_t               si_hk_prot;
++	vm_prot_t               si_hk_max_prot;
++	vm_inherit_t            si_hk_inheritance;
++#endif /* VM_SR_AUTH_HAKIOS */
+ 	mach_vm_address_t       si_slid_address __kernel_data_semantics;
+ 	mach_vm_offset_t        si_start __kernel_data_semantics; /* start offset in si_slide_object */
+ 	mach_vm_offset_t        si_end __kernel_data_semantics;
+@@ -247,10 +274,12 @@ struct vm_shared_region {
+ 
+ #if __has_feature(ptrauth_calls)
+ 	bool                    sr_reslide;            /* Special shared region for suspected attacked processes */
++#endif /* __has_feature(ptrauth_calls) */
++#if VM_SR_AUTH_SECTIONS
+ 	uint_t                  sr_num_auth_section;  /* num entries in sr_auth_section */
+ 	uint_t                  sr_next_auth_section; /* used while filling in sr_auth_section */
+ 	vm_shared_region_slide_info_t *sr_auth_section;
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 
+ 	uint32_t                sr_rsr_version;
+ 
+@@ -358,10 +387,10 @@ int vm_shared_region_slide(uint32_t,
+     vm_prot_t);
+ extern void vm_shared_region_pivot(void);
+ extern void vm_shared_region_reslide_stale(boolean_t driverkit);
+-#if __has_feature(ptrauth_calls)
++#if __has_feature(ptrauth_calls) || HAKIOS_USER_PAC
+ __attribute__((noinline))
+ extern kern_return_t vm_shared_region_auth_remap(vm_shared_region_t sr);
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* __has_feature(ptrauth_calls) || HAKIOS_USER_PAC */
+ extern void vm_shared_region_reference(vm_shared_region_t sr);
+ 
+ #endif /* KERNEL_PRIVATE */
+diff --git a/osfmk/vm/vm_shared_region_pager.c b/osfmk/vm/vm_shared_region_pager.c
+index 8cd709d1e217..40211ef8ae86 100644
+--- a/osfmk/vm/vm_shared_region_pager.c
++++ b/osfmk/vm/vm_shared_region_pager.c
+@@ -298,9 +298,9 @@ typedef struct shared_region_pager {
+ 	vm_object_t             srp_backing_object; /* VM object for shared cache */
+ 	vm_object_offset_t      srp_backing_offset;
+ 	vm_shared_region_slide_info_t srp_slide_info;
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 	uint64_t                srp_jop_key;        /* zero if used for arm64 */
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ } *shared_region_pager_t;
+ #define SHARED_REGION_PAGER_NULL        ((shared_region_pager_t) NULL)
+ 
+@@ -708,11 +708,11 @@ retry_src_fault:
+ 			    dst_vaddr + offset_in_page,
+ 			    (mach_vm_offset_t) (offset_in_sliding_range + slide_start_address),
+ 			    (uint32_t) (offset_in_sliding_range / PAGE_SIZE_FOR_SR_SLIDE),
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 			    pager->srp_slide_info->si_ptrauth ? pager->srp_jop_key : 0
+-#else /* __has_feature(ptrauth_calls) */
++#else /* VM_SR_AUTH_SECTIONS */
+ 			    0
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 			    );
+ 			if (shared_region_pager_data_request_debug) {
+ 				printf("shared_region_data_request"
+@@ -935,7 +935,7 @@ shared_region_pager_deallocate_internal(
+ 		lck_mtx_unlock(&shared_region_pager_lock);
+ 
+ 		vm_shared_region_slide_info_t si = pager->srp_slide_info;
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 		/*
+ 		 * The slide_info for auth sections lives in the shared region.
+ 		 * Just deallocate() on the shared region and clear the field.
+@@ -948,7 +948,7 @@ shared_region_pager_deallocate_internal(
+ 				si = NULL;
+ 			}
+ 		}
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 		if (si != NULL) {
+ 			vm_object_deallocate(si->si_slide_object);
+ 			/* free the slide_info_entry */
+@@ -1122,9 +1122,9 @@ shared_region_pager_create(
+ 	vm_object_t             backing_object,
+ 	vm_object_offset_t      backing_offset,
+ 	struct vm_shared_region_slide_info *slide_info,
+-#if !__has_feature(ptrauth_calls)
++#if !VM_SR_AUTH_SECTIONS
+ 	__unused
+-#endif /* !__has_feature(ptrauth_calls) */
++#endif /* !VM_SR_AUTH_SECTIONS */
+ 	uint64_t                jop_key)
+ {
+ 	shared_region_pager_t   pager;
+@@ -1155,7 +1155,7 @@ shared_region_pager_create(
+ 	pager->srp_backing_object = backing_object;
+ 	pager->srp_backing_offset = backing_offset;
+ 	pager->srp_slide_info = slide_info;
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ 	pager->srp_jop_key = jop_key;
+ 	/*
+ 	 * If we're getting slide_info from the shared_region,
+@@ -1165,7 +1165,7 @@ shared_region_pager_create(
+ 		assert(slide_info->si_ptrauth);
+ 		vm_shared_region_reference(slide_info->si_shared_region);
+ 	}
+-#endif /* __has_feature(ptrauth_calls) */
++#endif /* VM_SR_AUTH_SECTIONS */
+ 
+ 	vm_object_reference(backing_object);
+ 
+@@ -1242,12 +1242,16 @@ shared_region_pager_setup(
+ 	return (memory_object_t) pager;
+ }
+ 
+-#if __has_feature(ptrauth_calls)
++#if VM_SR_AUTH_SECTIONS
+ /*
+  * shared_region_pager_match()
+  *
+  * Provide the caller with a memory object backed by the provided
+  * "backing_object" VM object.
++ *
++ * HakiOS (VM_SR_AUTH_HAKIOS): "backing_object" is the very object the section's unsigned pager
++ * reads from (si_hk_backing_object), not the file object whose ->copy Apple takes here: the copy
++ * object of a file can be replaced over time, and both pagers must read the same source.
+  */
+ memory_object_t
+ shared_region_pager_match(
+@@ -1259,9 +1263,15 @@ shared_region_pager_match(
+ 	shared_region_pager_t         pager;
+ 	vm_shared_region_slide_info_t si;
+ 
++#if VM_SR_AUTH_HAKIOS
++	vm_object_t match_object = backing_object;
++#else /* VM_SR_AUTH_HAKIOS */
++	vm_object_t match_object = backing_object->copy;
++#endif /* VM_SR_AUTH_HAKIOS */
++
+ 	lck_mtx_lock(&shared_region_pager_lock);
+ 	queue_iterate(&shared_region_pager_queue, pager, shared_region_pager_t, srp_queue) {
+-		if (pager->srp_backing_object != backing_object->copy) {
++		if (pager->srp_backing_object != match_object) {
+ 			continue;
+ 		}
+ 		if (pager->srp_backing_offset != backing_offset) {
+@@ -1308,9 +1318,11 @@ shared_region_pager_match(
+ 	 * waste a little memory.
+ 	 */
+ 	lck_mtx_unlock(&shared_region_pager_lock);
+-	return shared_region_pager_setup(backing_object->copy, backing_offset, slide_info, jop_key);
++	return shared_region_pager_setup(match_object, backing_offset, slide_info, jop_key);
+ }
++#endif /* VM_SR_AUTH_SECTIONS */
+ 
++#if __has_feature(ptrauth_calls)
+ void
+ shared_region_pager_match_task_key(memory_object_t memobj, __unused task_t task)
+ {
 diff --git a/pexpert/arm/pe_bootargs.c b/pexpert/arm/pe_bootargs.c
 index c6b87b081d2f..a3b0b71e5619 100644
 --- a/pexpert/arm/pe_bootargs.c
