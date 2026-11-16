@@ -641,6 +641,99 @@ own_tree(const char *path, int uid)
 }
 
 /*
+ * Extract a tar archive (tools/afc-push-jb.py uploads it as a single file via AFC, since AFC
+ * does not support symlinks and drops after too many per-file operations).  Standard POSIX tar:
+ * 512-byte headers, name at 0 (100), mode at 100 (8), size at 124 (12), type at 156 (1),
+ * link target at 157 (100).  Types: '0'/'\0' = file, '2' = symlink, '5' = directory.
+ */
+static int
+extract_tar(const char *archive, const char *to)
+{
+	unsigned char hdr[512];
+	char path[512], target[112];
+	int fd, count = 0;
+	ssize_t n;
+	size_t size;
+
+	fd = open(archive, O_RDONLY, 0);
+	if (fd < 0)
+		return 0;
+	while ((n = read(fd, hdr, 512)) == 512) {
+		if (hdr[0] == 0)
+			break;
+		/* name */
+		memcpy(path + 0, to, strlen(to));
+		path[strlen(to)] = '/';
+		memcpy(path + strlen(to) + 1, hdr, 100);
+		path[strlen(to) + 1 + 100] = 0;
+		/* strip trailing ./ prefix from tar entries */
+		{
+			char *name = path + strlen(to) + 1;
+			if (name[0] == '.' && name[1] == '/') {
+				char *s = name + 2, *d = name;
+				while (*s)
+					*d++ = *s++;
+				*d = 0;
+			}
+			if (name[0] == 0) {
+				/* root entry: skip data if any */
+				size = 0;
+				for (int i = 0; i < 11 && hdr[124 + i] >= '0' && hdr[124 + i] <= '7'; i++)
+					size = size * 8 + (hdr[124 + i] - '0');
+				if (size > 0)
+					lseek(fd, (off_t)((size + 511) & ~511), 1);
+				continue;
+			}
+		}
+		/* size (octal) */
+		size = 0;
+		for (int i = 0; i < 11 && hdr[124 + i] >= '0' && hdr[124 + i] <= '7'; i++)
+			size = size * 8 + (hdr[124 + i] - '0');
+		/* mode (octal) */
+		int mode = 0;
+		for (int i = 0; i < 7 && hdr[100 + i] >= '0' && hdr[100 + i] <= '7'; i++)
+			mode = mode * 8 + (hdr[100 + i] - '0');
+		char type = hdr[156];
+
+		if (type == '5') {
+			mkdir(path, mode ? mode : 0755);
+			count++;
+		} else if (type == '2') {
+			memcpy(target, hdr + 157, 100);
+			target[100] = 0;
+			symlink(target, path);
+			count++;
+		} else if (type == '0' || type == 0) {
+			int out = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode ? mode : 0644);
+			if (out >= 0) {
+				size_t left = size;
+				while (left > 0) {
+					unsigned char buf[4096];
+					ssize_t want = left > sizeof(buf) ? (ssize_t)sizeof(buf) : (ssize_t)left;
+					ssize_t got = read(fd, buf, want);
+					if (got <= 0)
+						break;
+					write(out, buf, got);
+					left -= got;
+				}
+				close(out);
+				/* skip to next 512-byte boundary */
+				size_t tail = (512 - (size & 511)) & 511;
+				if (tail > 0)
+					lseek(fd, (off_t)tail, 1);
+				count++;
+			}
+		} else {
+			/* unknown type: skip data blocks */
+			if (size > 0)
+				lseek(fd, (off_t)((size + 511) & ~511), 1);
+		}
+	}
+	close(fd);
+	return count;
+}
+
+/*
  * The rootless prefix of a package manager, /var/jb: the Procursus bootstrap with Sileo in it
  * (tools/mk-jb.sh) rides in the system image as /jb (or in the boot volume, /private/preboot/jb,
  * with the root on the flash), an APFS image that cannot be written to, while dpkg and apt must be
@@ -1091,6 +1184,36 @@ staged_apps_after_mount(void)
 	chdir("/");
 }
 
+/*
+ * The AoC's firmware kept on the data volume (11-15): the kernel's AoC driver reads it from there when the boot image
+ * leaves fw/aoc.bin out (28 MB of a 64 MB partition; hakios.akita_aoc.c, AOC_FW_DISK_PATH). An image that does carry
+ * it puts its copy there whenever the one there is missing or of another size, so that the next image may go without.
+ */
+#define AOC_FW_DISK     "/private/var/hakios/fw/aoc.bin"
+
+static void
+keep_aoc_firmware(void)
+{
+	struct stat in, out;
+	const char *from = in_image("/fw/aoc.bin");
+
+	if (stat(from, &in) != 0) {
+		printf("  aoc.bin: not in this image (the kernel reads %s)\n", AOC_FW_DISK);
+		return;
+	}
+	if (stat(AOC_FW_DISK, &out) == 0 && out.st_size == in.st_size) {
+		return;
+	}
+	mkdir("/private/var/hakios", 0755);
+	mkdir("/private/var/hakios/fw", 0755);
+	if (copy_file(from, AOC_FW_DISK ".new", 0644, 0, 0) && rename(AOC_FW_DISK ".new", AOC_FW_DISK) == 0) {
+		printf("  aoc.bin: kept on the data volume (%lld bytes) for images without it\n", (long long)in.st_size);
+	} else {
+		printf("  aoc.bin: could not be kept on the data volume: %s\n", strerror(errno));
+		unlink(AOC_FW_DISK ".new");
+	}
+}
+
 static void
 mount_writable(void)
 {
@@ -1113,6 +1236,7 @@ mount_writable(void)
 		ok = 1;
 		check(ok, "mount the data volume on /private/var");
 		forget_gestalt_if_changed();
+		keep_aoc_firmware();
 	} else {
 		ok = mount("ramfs", "/private/var", 0, NULL) == 0;
 		if (!ok) {
@@ -1173,14 +1297,24 @@ mount_writable(void)
 	check(ok && made > 50, "create the directories of the data volume");
 
 	/*
-	 * and the package manager's prefix, when the image was built with one (tools/mk-jb.sh): /jb of
-	 * the system image in RAM, or, with the Darwin volume on the flash as the root, /private/preboot/jb
-	 * -- the boot volume, where a rootless jailbreak on an iPhone keeps its Procursus too
-	 * (/var/jb leads into /private/preboot there)
+	 * The package manager's prefix: /jb of the system image in RAM, /private/preboot/jb of the
+	 * boot volume, or a tar archive at /private/var/mobile/Media/jb.tar uploaded over AFC
+	 * (tools/afc-push-jb.py: a single file, since AFC drops after too many per-file operations).
+	 * The tar is extracted once to /private/var/mobile/Media/.jb; later boots find the directory.
 	 */
+	if (stat("/jb", &st) != 0 && stat("/private/preboot/jb", &st) != 0 &&
+	    stat("/private/var/mobile/Media/jb.tar", &st) == 0 &&
+	    stat("/private/var/mobile/Media/.jb/.extracted", &st) != 0) {
+		int n = extract_tar("/private/var/mobile/Media/jb.tar", "/private/var/mobile/Media/.jb");
+		int fd = open("/private/var/mobile/Media/.jb/.extracted", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd >= 0)
+			close(fd);
+		printf("  jb.tar: %d entries extracted to /private/var/mobile/Media/.jb\n", n);
+	}
 	jb = stat("/jb", &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR ? "/jb" :
-	    stat("/private/preboot/jb", &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR ? "/private/preboot/jb" : NULL;
-	if (ok && jb != NULL) {
+	    stat("/private/preboot/jb", &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR ? "/private/preboot/jb" :
+	    stat("/private/var/mobile/Media/.jb", &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR ? "/private/var/mobile/Media/.jb" : NULL;
+	if (jb != NULL) {
 		const char *to = "/private/var/jb";
 		int dirs = 0, entries = 0, grafted, users = 0;
 
@@ -1200,7 +1334,7 @@ mount_writable(void)
 				unlink(to);
 			}
 		}
-		if (strcmp(jb, "/private/preboot/jb") == 0 && stat("/private/preboot/jb-rw", &st) == 0) {
+		if (strcmp(jb, "/jb") != 0 && stat("/private/preboot/jb-rw", &st) == 0) {
 			if (mount("ramfs", "/private/preboot/jb-rw", 0, NULL) == 0 &&
 			    symlink("/private/preboot/jb-rw/procursus", "/private/var/jb") == 0) {
 				to = "/private/preboot/jb-rw/procursus";

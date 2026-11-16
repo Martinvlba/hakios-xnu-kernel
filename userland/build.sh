@@ -618,6 +618,10 @@ done
 if [ "${AOC_FW:-1}" != 0 ] && [ -f ../fw-aoc/aoc.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-aoc/aoc.bin root/fw/
+else
+	# (left out: the kernel reads the copy init keeps on the data volume, /private/var/hakios/fw/aoc.bin, put there by
+	# any earlier image that carried it -- and none from an earlier build stays behind in root/)
+	rm -f root/fw/aoc.bin
 fi
 # ... and the cameras' register tables (drivers/camera/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
@@ -748,14 +752,17 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
 	# /private/preboot/jb once the Darwin volume is the root -- the volume where a rootless jailbreak keeps its
 	# Procursus on an iPhone as well; init grafts it onto /var/jb (src/init.c, mount_writable)
-	if [ -d ../jb/root/var/jb ]; then
+	# the writable copy's mount point and Sileo's /bin links: always, so the prefix can ride
+	# on the data volume (/private/var/.jb) when it does not fit beside the cryptexes in flashboot
+	mkdir -p flashboot/jb-rw flashboot/jb-bin
+	for c in $SILEO_BIN; do
+		ln -s /var/jb/usr/bin/$c flashboot/jb-bin/$c
+	done
+	# JB=1: the prefix itself in flashboot (130 MB: more than a boot payload holds beside the cryptexes). Without it the
+	# prefix travels as jb.tar on the data volume (tools/afc-upload, init's extract_tar) and flashboot carries only the
+	# mount point and the links above.
+	if [ "${JB:-0}" != 0 ] && [ -d ../jb/root/var/jb ]; then
 		cp -a ../jb/root/var/jb flashboot/jb
-		mkdir -p flashboot/jb-rw        # where init mounts the prefix's writable copy (src/init.c)
-		# and what Sileo runs from /bin, for init to put over the Darwin volume's /bin (see the system image below)
-		mkdir -p flashboot/jb-bin
-		for c in $SILEO_BIN; do
-			ln -s /var/jb/usr/bin/$c flashboot/jb-bin/$c
-		done
 		echo "  the package manager's prefix: $(du -sh flashboot/jb | cut -f1) as /jb of the boot volume"
 	fi
 	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
