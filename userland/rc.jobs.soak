@@ -1,12 +1,39 @@
-# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
-# A long run of everything at once (RAM boot, ~9 minutes, under the ten-minute restart): Wi-Fi (boot-args pcie=5
-# pcie_delay=60 wifi=8), swipes and Settings as rc.jobs.scroll, the network checked, then the home screen idle and
-# swiped again now and then -- for hangs (11-10: an APM watchdog reset once at a swipe's start).
+# A soak of ~8 minutes: the scroll job's swipes, Settings' zigzag and flings, Maps' pinches (11-16 night, before the day image)
 /redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8
-/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 2
-/redwood/bin/rwtouch tap 0.376 0.758 wait 5 zigzag 0.5 0.75 0.35 500 6 wait 2 swipe 0.5 0.8 0.5 0.3 150 wait 2 button home wait 3
-/redwood/bin/net_test waitaddr en0 150 wait 10 resolve example.com fetch https://www.apple.com/library/test/success.html
-/redwood/bin/rwtouch wait 60 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 60 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 60
-/redwood/bin/rwtouch tap 0.376 0.758 wait 5 zigzag 0.5 0.75 0.35 500 6 wait 2 button home wait 60 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 60
-/redwood/bin/net_test fetch https://www.apple.com/library/test/success.html
-/redwood/bin/fps_info
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 swipe 0.85 0.5 0.15 0.5 300 wait 1 swipe 0.15 0.5 0.85 0.5 300 wait 1 tap 0.376 0.758 wait 4 zigzag 0.5 0.75 0.35 500 6 wait 1 swipe 0.5 0.8 0.5 0.3 150 wait 1 swipe 0.5 0.3 0.5 0.8 150 wait 1 button home wait 2
+/redwood/bin/lsreg -o com.apple.Maps
+/redwood/bin/rwtouch wait 6 pinch 0.5 0.45 0.12 0.60 900 wait 1 pinch 0.5 0.45 0.60 0.12 900 wait 1 swipe 0.3 0.5 0.7 0.3 600 wait 1 button home wait 2
+/redwood/bin/rwtouch wait 60

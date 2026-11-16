@@ -5,3 +5,4 @@
 # LaunchServices, once it is up -- registered already at every start after the first.
 /redwood/bin/rwtouch wait 25
 /redwood/bin/lsreg /private/preboot/redwood/share/system-apps/MetalTest.app
+/redwood/bin/lsreg /private/preboot/jb-rw/procursus/Applications/Sileo.app
