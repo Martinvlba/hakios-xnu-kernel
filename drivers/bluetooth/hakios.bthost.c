@@ -210,7 +210,9 @@ hakios_bthost_written(const uint8_t *bytes, unsigned length)
  * own log (BTLOG, src/inject.c's watcher) says which command it stopped at.
  *  - Apple's vendor commands (OGF 0x3f) are Broadcom's; the MediaTek controller says "Unknown HCI Command" (Command Status, status 1) to each
  *    and bluetoothd restarts ("VSC stall detected", reason 3602). Each is answered as done: Command Complete, status 0, and the data its parser
- *    reads after the status -- a byte for 0xfd48, 16 for 0xfce2 with sub-command 0x15 or 0x36, 64 (the first 0x51) for 0xfd1b, none for the rest
+ *    reads after the status -- a byte for 0xfd48, 16 for 0xfce2 with sub-command 0x15, 0x36 or 0x0d, 64 (the first 0x51) for 0xfd1b,
+ *    none for the rest. (0x0d, bluetoothd's profiling statistics every ~30 s, with none: _BCM_ProfilingStatsEventParser
+ *    asserted "ByteStream_NumReadBytesAvail(*pBs) >= 2" and bluetoothd aborted, each new one ~30 s later -- the BCM4383, 11-16)
  *    (data on 0xfce9 left the next command unsent).
  *  - Write_Default_Erroneous_Data_Reporting (0x0c5b), also "Unknown HCI Command", is answered as done.
  *  - Read_Local_Supported_Commands: the controller leaves the LE commands of octets 25-28 and LE Host Support of octet 24 clear although it
@@ -223,9 +225,11 @@ skel_quirks(uint8_t *packet, unsigned length)
 {
 	static const uint8_t le_commands[4] = { 0xf7, 0xff, 0xff, 0x7f };
 
+
 	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0f && packet[2] == 0x04 && packet[3] == 0x01 && packet[4] == 0x01 &&
 	    (packet[6] >> 2) == 0x3f) {
-		const bool antenna = packet[5] == 0xe2 && packet[6] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36);
+		const bool antenna = packet[5] == 0xe2 && packet[6] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36 ||
+		    skel_vsc_sub == 0x0d);
 		const bool cal = packet[5] == 0x1b && packet[6] == 0xfd;
 		const bool data = antenna || cal || (packet[5] == 0x48 && packet[6] == 0xfd);
 		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 0));
@@ -254,7 +258,8 @@ skel_quirks(uint8_t *packet, unsigned length)
 		return length;
 	}
 	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 && (packet[5] >> 2) == 0x3f && packet[6] == 0x01) {
-		const bool antenna = packet[4] == 0xe2 && packet[5] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36);
+		const bool antenna = packet[4] == 0xe2 && packet[5] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36 ||
+		    skel_vsc_sub == 0x0d);
 		const bool cal = packet[4] == 0x1b && packet[5] == 0xfd;
 		const bool data = antenna || cal || (packet[4] == 0x48 && packet[5] == 0xfd);
 		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 0));
@@ -709,33 +714,7 @@ skel_thread(__unused void *arg, __unused wait_result_t w)
 		p->function_off();
 		goto out;
 	}
-	if (p->wifi_address != NULL) {
-		uint8_t wifi[6] = { 0 };
-		uint8_t all_or = 0, all_and = 0xff;
-
-		error = p->wifi_address(wifi);
-		for (unsigned i = 0; i < 6; i++) {
-			all_or |= wifi[i];
-			all_and &= wifi[i];
-		}
-		if (error != 0 || all_or == 0 || all_and == 0xff || (wifi[0] & 1)) {
-			say("wifi_address gave no address of a station (%d, %02x:%02x:%02x:%02x:%02x:%02x): none is published", error,
-			    wifi[0], wifi[1], wifi[2], wifi[3], wifi[4], wifi[5]);
-		} else {
-			HakiosBluetoothAddress(wifi);
-		}
-	}
-	/* iOS looks for the controller in the registry ("bluetooth"): without it BluetoothManager's attach fails with 9 and Settings' switch stays grey */
-	{
-		bool node = false;
-
-		for (unsigned tries = 0; tries < 40 && !(node = HakiosBluetoothNode()); tries++) {
-			delay_for_interval(250, NSEC_PER_MSEC);
-		}
-		if (!node) {
-			say("the registry's \"bluetooth\" service could not be made in 10 s: Settings will not attach");
-		}
-	}
+	/* (the registry's "bluetooth" service and its address: made early, hakios_bthost_start) */
 	if (!skel_nodes() || !skel_ctl_register()) {
 		p->function_off();
 		goto out;
@@ -749,6 +728,49 @@ out:
 
 /* a phone's Bluetooth driver, with its controller's operations: the thread above started. The operations are copied. */
 void hakios_bthost_start(const struct hakios_bt_platform *platform);
+/*
+ * The registry's "bluetooth" service WITH its local-mac-address, for a phone's driver to call as soon as IOKit is up
+ * (hakios_bthost_start does it too; once is enough). bluetoothd reads the address the moment it starts
+ * (FindLocalMacAddress) and exits "No bluetooth on this device." without it; launchd starts it for SpringBoard's
+ * BluetoothManager within seconds of SpringBoard, and an attach that went to a dying bluetoothd never came back --
+ * Control Center's button stayed "unavailable" (BluetoothManager's state 0) for good while Settings, attaching later,
+ * worked. The address is the platform's (on the Pixel the loader's device tree: there at once).
+ */
+void
+hakios_bthost_publish(const struct hakios_bt_platform *platform)
+{
+	static bool published;
+
+	if (published || platform == NULL) {
+		return;
+	}
+	if (platform->wifi_address != NULL) {
+		uint8_t wifi[6] = { 0 };
+		uint8_t all_or = 0, all_and = 0xff;
+		int error = platform->wifi_address(wifi);
+
+		for (unsigned i = 0; i < 6; i++) {
+			all_or |= wifi[i];
+			all_and &= wifi[i];
+		}
+		if (error != 0 || all_or == 0 || all_and == 0xff || (wifi[0] & 1)) {
+			say("wifi_address gave no address of a station (%d, %02x:%02x:%02x:%02x:%02x:%02x): none is published", error,
+			    wifi[0], wifi[1], wifi[2], wifi[3], wifi[4], wifi[5]);
+		} else {
+			HakiosBluetoothAddress(wifi);
+		}
+	}
+	for (unsigned tries = 0; tries < 40; tries++) {
+		if (HakiosBluetoothNode()) {
+			published = true;
+			say("the registry's \"bluetooth\" service published, with its address");
+			return;
+		}
+		delay_for_interval(250, NSEC_PER_MSEC);
+	}
+	say("the registry's \"bluetooth\" service could not be made in 10 s");
+}
+
 void
 hakios_bthost_start(const struct hakios_bt_platform *platform)
 {
@@ -760,6 +782,7 @@ hakios_bthost_start(const struct hakios_bt_platform *platform)
 	}
 	started = true;
 	mtkbt_platform = *platform;
+	hakios_bthost_publish(platform);
 	if (kernel_thread_start_priority(skel_thread, NULL, 81 /* BASEPRI_KERNEL */, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

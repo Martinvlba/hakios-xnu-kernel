@@ -152,7 +152,7 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
 /redwood/lib/libhakios.lockdown.dylib lockdownd
-/redwood/lib/libhakios.bt.dylib BlueTool
+/redwood/lib/libhakios.bt.dylib BlueTool bluetoothd
 /redwood/lib/libhakios.tweaks.dylib Preferences"}
 mkdir -p obj
 
