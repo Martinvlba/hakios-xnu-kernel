@@ -792,6 +792,67 @@ h_headers_with_data(id self, SEL cmd, id data)
 
 /* ---- installation --------------------------------------------------------------------------------- */
 
+/* ---- v3: read what Apple's GrandSlam actually returns (akd makes that request itself, outside the anisette hooks) ---- */
+
+/* +[NSPropertyListSerialization propertyListWithData:options:format:error:]: akd parses the GsService2 response as a
+ * plist. A GrandSlam reply carries a "Status" dict {ec: error code, em: message, hsc: http-ish}, either at the top or
+ * under "Response". Logged only when that Status is present, so akd's many other plists stay quiet. */
+static id (*o_plist)(Class, SEL, id, unsigned long, void *, id *);
+
+static void
+log_gs_status(id dict)
+{
+	id status, resp;
+
+	if (dict == NULL || !MSG1(BOOL, dict, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+		return;
+	}
+	status = dict_object(dict, "Status");
+	if (status == NULL) {
+		resp = dict_object(dict, "Response");
+		if (resp != NULL && MSG1(BOOL, resp, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+			status = dict_object(resp, "Status");
+		}
+	}
+	if (status == NULL || !MSG1(BOOL, status, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+		return;
+	}
+	{
+		const char *ec = to_cstr(dict_object(status, "ec"));
+		const char *em = to_cstr(dict_object(status, "em"));
+		const char *hsc = to_cstr(dict_object(status, "hsc"));
+		const char *au = to_cstr(dict_object(status, "au"));
+
+		say("GrandSlam Status: ec=%s hsc=%s%s%s em=%s\n", ec ? ec : "?", hsc ? hsc : "-",
+		    au ? " au=" : "", au ? au : "", em ? em : "(none)");
+	}
+}
+
+static id
+h_plist(Class self, SEL cmd, id data, unsigned long opts, void *fmt, id *err)
+{
+	id r = o_plist(self, cmd, data, opts, fmt, err);
+
+	log_gs_status(r);
+	return r;
+}
+
+/* +[NSError errorWithDomain:code:userInfo:]: the auth failure ("cannot be completed at this time") is an NSError;
+ * logged only for the Apple-ID / AuthKit / GrandSlam domains, so it is the sign-in error, not every NSError akd makes. */
+static id (*o_nserror)(Class, SEL, id, long, id);
+
+static id
+h_nserror(Class self, SEL cmd, id domain, long code, id info)
+{
+	const char *d = to_cstr(domain);
+
+	if (d != NULL && (strstr(d, "AppleIDAuthentication") || strstr(d, "AuthKit") || strstr(d, "AKAuthentication") ||
+	    strstr(d, "GSAuth") || strstr(d, "AKAppleID") || strstr(d, "GrandSlam"))) {
+		say("NSError %s code %ld\n", d, code);
+	}
+	return o_nserror(self, cmd, domain, code, info);
+}
+
 static int hooked, wanted;
 
 static bool
@@ -844,6 +905,9 @@ install(void)
 	hook("NSMutableURLRequest", false, "ak_addClientInfoHeader", (IMP)h_add_ci, (IMP *)&o_add_ci);
 	hook("NSMutableURLRequest", true, "ak_anisetteHeadersWithData:", (IMP)h_headers_with_data,
 	    (IMP *)&o_headers_with_data);
+	/* v3: see Apple's GrandSlam answer and the sign-in error */
+	hook("NSPropertyListSerialization", true, "propertyListWithData:options:format:error:", (IMP)h_plist, (IMP *)&o_plist);
+	hook("NSError", true, "errorWithDomain:code:userInfo:", (IMP)h_nserror, (IMP *)&o_nserror);
 	say("%d of %d hooks installed\n", hooked, wanted);
 }
 
@@ -859,7 +923,7 @@ hakios_akd_init(void)
 	}
 	read_bootargs();
 	/* logged BEFORE the gate: the file's existence alone proves dyld inserted us into akd */
-	say("libhakios.akd v2 loaded (uid %d)\n", getuid());
+	say("libhakios.akd v3 loaded (uid %d)\n", getuid());
 	if (!gate_on(&why)) {
 		say("gate off (no hakios_appleid boot-arg, no /redwood/etc/anisette-url): native behaviour\n");
 		return;
