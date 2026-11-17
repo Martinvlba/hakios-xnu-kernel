@@ -349,7 +349,15 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		fi
 		METAL_GPU=
 		# (HAKIOS_METAL_OUT=ios-mali: the Pixel 8a's Mali build of it, `make ios-mali`)
-		for HM_OUT in ${HAKIOS_METAL_OUT:+$HM/out/$HAKIOS_METAL_OUT} $HM/out/ios $HM/out/darwin; do
+		# ... of the userland's architecture (11-17): hakios-metal puts an arm64e Mali build in out/ios-mali-arm64e
+		# (make ios-mali ARCH=arm64e). Linking out/ios-mali into an arm64e userland made an arm64 HakiosMetal that no
+		# process loads: no Metal anywhere, no GPU work, and mediaserverd aborting in Portrait's prewarm (no sound).
+		HM_SFX=; [ "$ARCH" != arm64 ] && HM_SFX=-$ARCH
+		if [ -n "$HAKIOS_METAL_OUT" ] && [ -n "$HM_SFX" ] && [ ! -f $HM/out/$HAKIOS_METAL_OUT$HM_SFX/libhakios-metal.a ]; then
+			echo "build.sh: WARNING: no $HM/out/$HAKIOS_METAL_OUT$HM_SFX (make -C hakios-metal ${HAKIOS_METAL_OUT} ARCH=$ARCH):" \
+			     "an $ARCH userland cannot load the $HAKIOS_METAL_OUT library this falls back to"
+		fi
+		for HM_OUT in ${HAKIOS_METAL_OUT:+${HM_SFX:+$HM/out/$HAKIOS_METAL_OUT$HM_SFX} $HM/out/$HAKIOS_METAL_OUT} $HM/out/ios $HM/out/darwin; do
 			if [ -f $HM_OUT/libhakios-metal.a ]; then
 				METAL_GPU="-DHAKIOS_METAL_GPU -I$HM/include $HM_OUT/libhakios-metal.a -lc++ -lz -framework IOKit -framework IOSurface"
 				# built with its compiler (make ios MESA=1): Mesa's archives of our iOS build too, as hakios-metal's
@@ -402,7 +410,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -bundle -framework Foundation -framework Metal -lobjc -I$METAL_SRC -o obj/HakiosMetal $METAL_SRC/HakiosMetal.m \
 			$METAL_SRC/hakios_metallib.c $METAL_GPU
 		# the Pixel 8a's Mali build: the first draws through hakios-metal's C interface (src/mali_draw_test.c; rc.jobs.maldraw)
-		if [ "$HAKIOS_METAL_OUT" = ios-mali ] && [ -n "$METAL_GPU" ]; then
+		if [ "${HAKIOS_METAL_OUT%-arm64e}" = ios-mali ] && [ -n "$METAL_GPU" ]; then
 			$DYN -o obj/mali_draw_test src/mali_draw_test.c $METAL_GPU -framework CoreFoundation
 		fi
 		fi

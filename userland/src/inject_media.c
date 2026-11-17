@@ -90,6 +90,29 @@ prewarm_portrait_filter(__unused id self, __unused SEL selector, __unused int ve
 {
 }
 
+/*
+ * Two more portrait prewarms (11-17, Darwin userland 16.6.1 / 20G81 -- the iPhone 13 mini's, d16ap, whose camera does
+ * portrait VIDEO: the iPhone X's never reached these). FigPreloadShaders, once the daemon is up, builds the depth effect's
+ * Metal pipelines ahead of use: Portrait.framework's disparity post-processing (+[PTDisparityPostProcessing
+ * prewarmForMediaserverd]) and the SDOF renderer, the principal class of SDOFRenderingV5.bundle, FigSDOFRendering, whose
+ * -init makes CCPortrait's kernels. Both need what this Metal does not give yet -- the compute pipelines' REFLECTION
+ * (CCPortrait asserts self.arguments in -[UniKernelInternal initWithName:...]), argument buffers, imageblocks -- and an
+ * assert there is an abort of the whole daemon: launchd restarts it every ~5 s, and with it go the sound and the
+ * vibration. Nobody takes a portrait video here; the prewarming is skipped, as the portrait filters' above is.
+ */
+static void
+prewarm_disparity(__unused id self, __unused SEL selector)
+{
+}
+
+/* the SDOF renderer's -init: none (the caller takes nil as no renderer); see above */
+static id
+sdof_init(id self, __unused SEL selector)
+{
+	((void (*)(id, SEL))objc_msgSend)(self, sel_registerName("release"));
+	return nil;
+}
+
 /* ---- the flashlight ------------------------------------------------------------------------------- */
 
 static int torch = -1;                  /* /dev/hakios-torch */
@@ -520,7 +543,94 @@ static struct replacement {
 	  (IMP)quality_prioritization, &original_quality_prioritization, true, false },
 	{ "BWGNRNode", "renderSampleBuffer:forInput:", AT(0x1a1ec83b8UL, 0x1a1f18338UL, 0x1a3d1078cUL), (IMP)gnr_render, NULL, true, false },
 	{ "BWNodeOutput", "emitSampleBuffer:", AT(0x1a1ea37e0UL, 0x1a1ef3760UL, 0x1a3ceafbcUL), (IMP)emit_sample_buffer, &original_emit_sample_buffer, true, false },
+	/* (20G81 only: the iPhone X's builds do not prewarm it -- 0 leaves it alone there) */
+	{ "PTDisparityPostProcessing", "prewarmForMediaserverd", AT(0UL, 0UL, 0x1c2d40a44UL), (IMP)prewarm_disparity, NULL, false, false },
 };
+
+/* -[FigSDOFRendering init] is in a bundle the cache's symbols say nothing of, so it is not told by an address: it is
+ * replaced when its class is there and its method is the bundle's own (SDOFRenderingV5.bundle), and on 20G81 only */
+
+/* the renderer class FigPreloadShaders gets from SDOFRenderingV5.bundle (its principal class is FigSDOFRendering; it
+ * may ask for another by name): told by where it is, not by its name, and only when its -init is the bundle's own */
+static bool
+in_sdof_bundle(const void *address)
+{
+	Dl_info info = { 0 };
+
+	return address != NULL && dladdr(address, &info) != 0 && info.dli_fname != NULL &&
+	    strstr(info.dli_fname, "/SDOFRenderingV5.bundle/") != NULL;
+}
+
+static void
+sdof_replace(Class cls)
+{
+#if defined(HAKIOS_IOS_20G81)
+	Method method;
+
+	if (cls == Nil || !in_sdof_bundle((const void *)cls)) {
+		return;
+	}
+	method = class_getInstanceMethod(cls, sel_registerName("init"));
+	if (method != NULL && method_getImplementation(method) == (IMP)sdof_init) {
+		return;                 /* (this one done already: FigPreloadShaders asks for several of the bundle's) */
+	}
+	if (method == NULL || !in_sdof_bundle((const void *)method_getImplementation(method))) {
+		say("hakios: mediaserverd: -[%s init] is not SDOFRenderingV5's own; left alone\n", class_getName(cls));
+		return;
+	}
+	method_setImplementation(method, (IMP)sdof_init);
+	say("hakios: mediaserverd: -[%s init] replaced (SDOFRenderingV5's renderer: its prewarm is skipped)\n",
+	    class_getName(cls));
+#else
+	(void)cls;
+#endif
+}
+
+/* FigPreloadShaders has the class from its bundle (+[NSBundle bundleWithPath:], then -principalClass or -classNamed:),
+ * which is when it first exists for the runtime -- and before anything allocates one. dyld's add-image call comes too
+ * early (the classes not there yet), objc_addLoadImageFunc's under the runtime's lock (objc_getClass() in it traps,
+ * 11-17). So the two NSBundle methods are wrapped, in mediaserverd only: each answers as it did, and the first answer
+ * that is FigSDOFRendering has its -init replaced before it is returned. */
+static IMP original_principal_class, original_class_named;
+
+static Class
+bundle_principal_class(id self, SEL selector)
+{
+	Class cls = ((Class (*)(id, SEL))original_principal_class)(self, selector);
+
+	if (cls != Nil) {
+		sdof_replace(cls);
+	}
+	return cls;
+}
+
+static Class
+bundle_class_named(id self, SEL selector, id name)
+{
+	Class cls = ((Class (*)(id, SEL, id))original_class_named)(self, selector, name);
+
+	if (cls != Nil) {
+		sdof_replace(cls);
+	}
+	return cls;
+}
+
+static void
+bundle_hooks(void)
+{
+#if defined(HAKIOS_IOS_20G81)
+	Class bundle = objc_getClass("NSBundle");
+	Method principal = bundle != Nil ? class_getInstanceMethod(bundle, sel_registerName("principalClass")) : NULL;
+	Method named = bundle != Nil ? class_getInstanceMethod(bundle, sel_registerName("classNamed:")) : NULL;
+
+	if (principal == NULL || named == NULL) {
+		say("hakios: mediaserverd: no -[NSBundle principalClass]/classNamed:: -[FigSDOFRendering init] is not replaced\n");
+		return;
+	}
+	original_principal_class = method_setImplementation(principal, (IMP)bundle_principal_class);
+	original_class_named = method_setImplementation(named, (IMP)bundle_class_named);
+#endif
+}
 
 static void
 image_added(__unused const struct mach_header *header, __unused intptr_t image_slide)
@@ -585,4 +695,5 @@ hakios_media_init(void)
 		register_hevc_encoder();
 	}
 	_dyld_register_func_for_add_image(image_added);         /* also called for every image already there */
+	bundle_hooks();
 }
