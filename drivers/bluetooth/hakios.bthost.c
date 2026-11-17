@@ -260,9 +260,20 @@ skel_quirks(uint8_t *packet, unsigned length)
 	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 && (packet[5] >> 2) == 0x3f && packet[6] == 0x01) {
 		const bool antenna = packet[4] == 0xe2 && packet[5] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36 ||
 		    skel_vsc_sub == 0x0d);
+		/*
+		 * 0xfce2 sub-command 0x42 is BD_VSC_OLYMPIC_SET_DIAG_DEBUG_EVENT_BEHAVIOR. On 16.6.1's bluetoothd (20G81,
+		 * d16ap) -- unlike 16.7.16's, where Bluetooth worked -- its Command-Complete handler insists on at least two
+		 * bytes of return data (disassembled: the parser at bluetoothd __text+0x12bf94 does ldrh len, sub read-offset,
+		 * cmp #1 / b.gt, else it reports VSCommandStall and restarts). The BCM4383 answers the command "unknown" with
+		 * no data, so bluetoothd stalls here and relaunches every ~16 s ("SET_DIAG_DEBUG_EVENT_BEHAVIOR timedout
+		 * waiting for controller"). Give it a non-empty payload, as the antenna sub-commands get; the handler only
+		 * forwards the bytes to its completion (it does not require particular values), so zeros satisfy it.
+		 * (sub-commands 0x2a and 0x3a are fire-and-forget on this build and need nothing.)
+		 */
+		const bool diag = packet[4] == 0xe2 && packet[5] == 0xfc && skel_vsc_sub == 0x42;
 		const bool cal = packet[4] == 0x1b && packet[5] == 0xfd;
-		const bool data = antenna || cal || (packet[4] == 0x48 && packet[5] == 0xfd);
-		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 0));
+		const bool data = antenna || diag || cal || (packet[4] == 0x48 && packet[5] == 0xfd);
+		const unsigned extra = cal ? 64 : ((antenna || diag) ? 16 : (data ? 1 : 0));
 		static uint32_t said;
 
 		if (said++ < 16) {
