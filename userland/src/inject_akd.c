@@ -564,7 +564,10 @@ anisette_retained(const char *why)
 				MSG0(void, obj, "release");
 				obj = NULL;
 			} else {
-				say("anisette served (%s): mid %d B, otp %d B [#%lu]\n", why, mid, otp, fetch_count);
+				const char *o = to_cstr(dict_object(json, "X-Apple-I-MD"));
+				unsigned ck = 0;
+				if (o != NULL) { for (const char *q = o; *q; q++) { ck = ck * 31u + (unsigned char)*q; } }
+				say("anisette served (%s): mid %d B, otp %d B (otp_ck=%04x) [#%lu]\n", why, mid, otp, ck & 0xffff, fetch_count);
 			}
 		}
 	}
@@ -822,9 +825,21 @@ log_gs_status(id dict)
 		const char *em = to_cstr(dict_object(status, "em"));
 		const char *hsc = to_cstr(dict_object(status, "hsc"));
 		const char *au = to_cstr(dict_object(status, "au"));
+		id rd = resp != NULL ? resp : dict;      /* the Response dict (or the root) to scan for stage markers */
+		/* which SRP/stage fields are present (names only, no values): tells init vs complete vs 2FA vs downstream */
+		static const char *keys[] = { "sp", "c", "s", "B", "i", "iteration", "salt", "spd", "np", "M2", "sk", "sc",
+		    "au", "ec", "GsIdmsToken", "adsid", "prk", "t" };
+		char present[256]; int n = 0;
+		const char *op = to_cstr(dict_object(rd, "o"));
 
-		say("GrandSlam Status: ec=%s hsc=%s%s%s em=%s\n", ec ? ec : "?", hsc ? hsc : "-",
-		    au ? " au=" : "", au ? au : "", em ? em : "(none)");
+		for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]) && n < (int)sizeof(present) - 16; k++) {
+			if (dict_object(rd, keys[k]) != NULL) {
+				n += snprintf(present + n, sizeof(present) - (size_t)n, "%s%s", n ? "," : "", keys[k]);
+			}
+		}
+		present[n] = '\0';
+		say("GrandSlam Status: ec=%s hsc=%s%s%s em=%s | op=%s fields=[%s]\n", ec ? ec : "?", hsc ? hsc : "-",
+		    au ? " au=" : "", au ? au : "", em ? em : "(none)", op ? op : "?", present);
 	}
 }
 
@@ -840,6 +855,72 @@ h_plist(Class self, SEL cmd, id data, unsigned long opts, void *fmt, id *err)
 /* +[NSError errorWithDomain:code:userInfo:]: the auth failure ("cannot be completed at this time") is an NSError;
  * logged only for the Apple-ID / AuthKit / GrandSlam domains, so it is the sign-in error, not every NSError akd makes. */
 static id (*o_nserror)(Class, SEL, id, long, id);
+
+/* +[NSPropertyListSerialization dataWithPropertyList:format:options:error:]: akd serializes its GsService2 request body
+ * as a plist. When that plist is a GrandSlam request (has a "Request" dict with an "o"), log the operation so each
+ * response Status can be tied to init / complete / a follow-up. Everything else akd serializes stays quiet. */
+static id (*o_ser)(Class, SEL, id, unsigned long, unsigned long, id *);
+
+static id
+h_ser(Class self, SEL cmd, id plist, unsigned long fmt, unsigned long opts, id *err)
+{
+	if (plist != NULL && MSG1(BOOL, plist, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+		id req = dict_object(plist, "Request");
+		const char *op = NULL;
+
+		if (req != NULL && MSG1(BOOL, req, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+			op = to_cstr(dict_object(req, "o"));
+		}
+		if (op == NULL) {
+			op = to_cstr(dict_object(plist, "o"));     /* some requests put it at the top */
+		}
+		if (op != NULL) {
+			/* what akd actually transmits in this request's cpd: the client-time and OTP it is using right now.
+			 * If the time is current at o=init, a stale/cached one-time-password is ruled out as the -80044 cause. */
+			id cpd = req != NULL ? dict_object(req, "cpd") : NULL;
+			const char *ct = NULL, *o = NULL;
+			unsigned ck = 0;
+
+			if (cpd != NULL && MSG1(BOOL, cpd, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+				ct = to_cstr(dict_object(cpd, "X-Apple-I-Client-Time"));
+				o = to_cstr(dict_object(cpd, "X-Apple-I-MD"));
+				if (o != NULL) { for (const char *q = o; *q; q++) { ck = ck * 31u + (unsigned char)*q; } }
+			}
+			say("GrandSlam request: o=%s cpd_client_time=%s cpd_otp_ck=%04x\n", op, ct ? ct : "(none)", ck & 0xffff);
+			/* v7: akd caches anisette and sends a ~30 s-stale OTP/time at init, and the request's cpd is immutable.
+			 * To rule staleness out for good: fetch fresh now, deep-copy plist > Request > cpd into mutable dicts,
+			 * overwrite the time-sensitive triple (OTP, machine-data, client-time) with the fresh matched set, and
+			 * serialize THAT copy. Identity fields (MID-LU, RINFO) are left as akd set them. */
+			if (cpd != NULL && req != NULL && strcmp(op, "init") == 0) {
+				id fresh = fetch_json("init-refresh");
+
+				if (fresh != NULL) {
+					id ncpd = MSG1(id, objc_getClass("NSMutableDictionary"), "dictionaryWithDictionary:", id, cpd);
+					id nreq = MSG1(id, objc_getClass("NSMutableDictionary"), "dictionaryWithDictionary:", id, req);
+					id nplist = MSG1(id, objc_getClass("NSMutableDictionary"), "dictionaryWithDictionary:", id, plist);
+					static const char *ks[] = { "X-Apple-I-MD", "X-Apple-I-MD-M", "X-Apple-I-Client-Time" };
+					int done = 0;
+
+					if (ncpd != NULL && nreq != NULL && nplist != NULL) {
+						for (unsigned k = 0; k < sizeof(ks) / sizeof(ks[0]); k++) {
+							id v = dict_object(fresh, ks[k]);
+							if (v != NULL) { MSG2(void, ncpd, "setObject:forKey:", id, v, id, nsstr(ks[k])); done++; }
+						}
+						MSG2(void, nreq, "setObject:forKey:", id, ncpd, id, nsstr("cpd"));
+						MSG2(void, nplist, "setObject:forKey:", id, nreq, id, nsstr("Request"));
+						const char *nt = to_cstr(dict_object(fresh, "X-Apple-I-Client-Time"));
+						say("  init cpd refreshed via copy: %d fields, new client_time=%s\n", done, nt ? nt : "?");
+						return o_ser(self, cmd, nplist, fmt, opts, err);
+					}
+					say("  init cpd refresh: mutable copy failed; left as-is\n");
+				} else {
+					say("  init cpd refresh: fresh fetch failed; left as-is\n");
+				}
+			}
+		}
+	}
+	return o_ser(self, cmd, plist, fmt, opts, err);
+}
 
 static id
 h_nserror(Class self, SEL cmd, id domain, long code, id info)
@@ -907,6 +988,7 @@ install(void)
 	    (IMP *)&o_headers_with_data);
 	/* v3: see Apple's GrandSlam answer and the sign-in error */
 	hook("NSPropertyListSerialization", true, "propertyListWithData:options:format:error:", (IMP)h_plist, (IMP *)&o_plist);
+	hook("NSPropertyListSerialization", true, "dataWithPropertyList:format:options:error:", (IMP)h_ser, (IMP *)&o_ser);
 	hook("NSError", true, "errorWithDomain:code:userInfo:", (IMP)h_nserror, (IMP *)&o_nserror);
 	say("%d of %d hooks installed\n", hooked, wanted);
 }
@@ -923,7 +1005,7 @@ hakios_akd_init(void)
 	}
 	read_bootargs();
 	/* logged BEFORE the gate: the file's existence alone proves dyld inserted us into akd */
-	say("libhakios.akd v3 loaded (uid %d)\n", getuid());
+	say("libhakios.akd v7 loaded (uid %d)\n", getuid());
 	if (!gate_on(&why)) {
 		say("gate off (no hakios_appleid boot-arg, no /redwood/etc/anisette-url): native behaviour\n");
 		return;
