@@ -1917,6 +1917,59 @@ offset_passed(const struct air_val *v)
    return v && v->kind == AIR_VAL_PTR && v->ptr.offset && !nir_src_is_const(nir_src_for_ssa(v->ptr.offset));
 }
 
+/* AN AGGREGATE OF RESOLVED POINTERS (11-17): Metal's texture2d is `struct { ptr addrspace(1) }`, and a kernel that hands
+ * its texture to a helper BY VALUE -- `insertvalue %texture2d undef, ptr %0, 0`, then `call fastcc @impl(%texture2d %9)`,
+ * whose first instruction is an extractvalue of it -- passed it through the aggregate path below, a NIR parameter per
+ * leaf. The texture's leaf became an SSA def, and tex_handle refused it ("argument 0 is not a texture"): 29 of
+ * CCPortrait's 80 kernels, among them slm_shiftmap_calcminmax, whose refusal is mediaserverd's abort in
+ * -[MakeBlurMap initWithMetalQueue:] (assert _slmMinMax) and so no sound. An aggregate whose every leaf is such a pointer
+ * (with no offset, or a constant one) or nothing written is bound from the caller's resolution, as a pointer argument
+ * is -- specialising the callee to its call site the same way. */
+static bool
+agg_of_ptrs(const struct air_val *v, bool *any)
+{
+   if (!v)
+      return true;                       /* a field nothing wrote */
+   if (v->kind == AIR_VAL_PTR) {
+      *any = true;
+      return !offset_passed(v);
+   }
+   if (v->kind != AIR_VAL_AGG)
+      return false;
+   for (unsigned i = 0; i < v->num_elems; i++)
+      if (!agg_of_ptrs(v->elems[i], any))
+         return false;
+   return true;
+}
+
+/* the aggregate again, each pointer's constant byte offset rebuilt in the CURRENT builder (the callee's) */
+static struct air_val *
+rebind_agg(struct air_ctx *c, struct air_val *v)
+{
+   if (!v)
+      return NULL;
+   if (v->kind == AIR_VAL_PTR) {
+      if (!v->ptr.offset)
+         return v;
+      struct air_ptr p = v->ptr;
+      p.offset = nir_imm_intN_t(&c->b, nir_src_as_uint(nir_src_for_ssa(v->ptr.offset)), v->ptr.offset->bit_size);
+      return air_val_ptr(c, p);
+   }
+   if (v->kind != AIR_VAL_AGG)
+      return v;
+   struct air_val *n = air_val_agg(c, v->num_elems);
+   for (unsigned i = 0; i < v->num_elems; i++)
+      n->elems[i] = rebind_agg(c, v->elems[i]);
+   return n;
+}
+
+static bool
+bound_by_resolution(const struct air_val *v)
+{
+   bool any = false;
+   return v && v->kind == AIR_VAL_AGG && agg_of_ptrs(v, &any) && any;
+}
+
 /* AN ARGUMENT THAT IS A WHOLE STRUCT OR ARRAY (11-12: the widgets' uber_fragment passes one by value; the callee's
  * first instruction is an extractvalue of it): each scalar or vector in it is a NIR parameter of its own, in the
  * order of the type -- the callee puts them together again as the aggregate. */
@@ -2069,7 +2122,7 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
     */
    bool specialised = false;
    for (unsigned i = 0; i < f->num_args; i++) {
-      bool ptr = argv && argv[i] && argv[i]->kind == AIR_VAL_PTR;
+      bool ptr = argv && argv[i] && (argv[i]->kind == AIR_VAL_PTR || bound_by_resolution(argv[i]));
       /* (from upstream's tools/mesa/air, rebind_here) a CONSTANT byte offset is rebuilt in the callee's own builder
        * when the argument is bound below; one computed at run time is passed as a parameter (offset_passed) */
       is_param[i] = !ptr;
@@ -2219,7 +2272,9 @@ translate_callee(struct air_ctx *c, const struct air_function *f,
          struct air_val *v = argv[i];
          if (offset_passed(v))
             continue;                   /* bound after the ordinary parameters, below */
-         if (v->kind == AIR_VAL_PTR && v->ptr.offset) {
+         if (v->kind == AIR_VAL_AGG)
+            v = rebind_agg(c, v);   /* (bound_by_resolution: its constant offsets as defs of this impl) */
+         else if (v->kind == AIR_VAL_PTR && v->ptr.offset) {
             /* the constant offset as a def of this function's impl (the caller's is not usable here) */
             struct air_ptr p = v->ptr;
             p.offset = nir_imm_int(&c->b, (int)nir_src_as_uint(nir_src_for_ssa(v->ptr.offset)));
