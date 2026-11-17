@@ -1,0 +1,6 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Interactive Apple ID sign-in: bring SpringBoard up, open Settings, then leave the UI alone so the owner can wait for
+# Wi-Fi and tap "Sign in to your iPhone" himself. The akd anisette inject (src/inject_akd.c) and its gate come from the
+# build (/redwood/etc/anisette-url), not from here. No auto-restart: booted with test_reboot_after=0 usb_lost_reboot=0.
+/redwood/bin/rwtouch wait 25 swipe 0.5 0.985 0.5 0.3 200 wait 5
+/redwood/bin/lsreg -o com.apple.Preferences
