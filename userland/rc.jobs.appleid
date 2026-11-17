@@ -1,0 +1,9 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# Apple ID: open Settings and tap the "Sign in to your iPhone" banner at the top of the root list. NO credentials are
+# entered -- just reaching the sign-in pane makes akd provision Anisette, which is the account-free test of the v2 akd
+# inject (src/inject_akd.c): does our Anisette reach akd, and does akd fetch it from the host server. Needs the gate
+# file /redwood/etc/anisette-url (HAKIOS_ANISETTE_URL= at build time).
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 8
+/redwood/bin/lsreg -o com.apple.Preferences
+/redwood/bin/rwtouch wait 20 tap 0.5 0.135 wait 45
+/bin/ps -A -o pid,comm

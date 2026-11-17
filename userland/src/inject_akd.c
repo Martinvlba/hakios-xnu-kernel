@@ -1,84 +1,128 @@
 /*
- * libhakios.akd.dylib: code of ours inside Apple's akd (AuthKit daemon), so that iOS's native Apple ID
- * sign-in works on this phone (build.sh's INJECT).
+ * libhakios.akd.dylib, v2 (proposed replacement for hackios-kernel/userland/src/inject_akd.c; drop-in, same
+ * build.sh line). Written 2026-11-17, offline, from the 20G81 (iOS 16.6.1, d16ap, arm64e) akd + AuthKit.
  *
- * The phone's own akd speaks Apple's current GrandSlam protocol fine and reaches gsa.apple.com; the one
- * thing it cannot do is make Anisette. On an iPhone the Anisette headers (X-Apple-I-MD-M, X-Apple-I-MD
- * and so on, which GrandSlam uses to prove the request comes from a real Apple device) are produced by
- * the ADI libraries, which are backed by FairPlay and a real device identity. There is none here, so
- * AuthKit's provisioning fails and sign-in stops:
+ * WHY v2. v1 hooked only -[AKAnisetteProvisioningController anisetteDataWithError:] and
+ * -fetchAnisetteDataAndProvisionIfNecessary:error: (AuthKit.framework, the CLIENT side). On 11-16 two native
+ * sign-ins on the phone produced zero requests to the host anisette server and the same -42410 failure.
+ * Reading akd itself (apple-id/tools/objc-methods.py + xref.py on the 20G81 akd) shows where the failing code
+ * actually lives:
  *
- *   akd(AuthKit): authkit/anisette-for-request -> authkit/fetch-anisette -> BEGIN FetchAnisette
- *   akd: Kicking off Anisette provisioning....
- *   akd: Provisioning failed. No Anisette for you today! Error: AKAnisetteError Code=-8004
- *        { NSUnderlyingError = AKUnderlyingADIErrors Code=-42410 }   (-42410: native ADI has no identity)
+ *   akd: AKAnisetteProvisioningService (the XPC service akd exports)  -> _helperServiceForDevice:
+ *        -> AKNativeAnisetteService (class in the akd EXECUTABLE, not in AuthKit):
+ *             -fetchAnisetteDataAndProvisionIfNecessary:withCompletion:   (async, block(AKAnisetteData*, NSError*))
+ *             -_unsafe_anisetteDataForDSID:withError:                     ("Looking for Anisette data...")
+ *             -_unsafe_provisionAnisetteWithCompletion:                   ("Kicking off Anisette provisioning....",
+ *                                                                          xref at akd+0x21d64; ADIProvisioningEnd
+ *                                                                          -> -42410)
  *
- * This library supplies the Anisette instead, from a small HTTP service of ours (the sanctioned way
- * AltStore/SideStore use: Apple's own ADI libraries + a provisioned identity run elsewhere, serving the
- * X-Apple-I-* / X-Mme-* headers as JSON). We hook AuthKit's synchronous Anisette fetch,
- * -[AKAnisetteProvisioningController anisetteDataWithError:], and return an AKAnisetteData built from the
- * headers our service hands back -- so AuthKit signs the GrandSlam request with valid Anisette and never
- * reaches the native ADI that fails with -42410. (fetchAnisetteDataAndProvisionIfNecessary:error:, the
- * "fetch-anisette" step above, is hooked the same way.)
+ *   AuthKit's AKAnisetteProvisioningController -fetchAnisetteDataAndProvisionIfNecessary:error: only forwards
+ *   over XPC (synchronousRemoteObjectProxyWithErrorHandler:) to that service ("Remote Anisette service returned
+ *   an error" is the controller relaying the native failure). Any request that reaches the native service by
+ *   another route (AKSRPService/AKAppleIDSession in akd, or another process's controller over XPC) never passes
+ *   the v1 hooks. v2 therefore hooks the BOTTOM of the chain, AKNativeAnisetteService, so every route is
+ *   covered, and keeps the v1 controller hooks as a second net.
  *
- * On ANY doubt -- the gate off, the service unreachable, the class or method not found, the JSON malformed
- * -- the hook calls through to the original implementation, so akd behaves exactly as it does today (the
- * clean -42410 failure). A malformed AKAnisetteData would be worse than that failure.
+ *   v1 also could not tell "not loaded" from "loaded, wrong hook": its only output went to /dev/console and was
+ *   lost. v2 writes a log FILE, /var/mobile/Media/hakios-akd.log (AFC-visible: `afcclient get hakios-akd.log`),
+ *   with a line at load time BEFORE the gate check, so one boot answers hypothesis A (AMFI/dyld refused the
+ *   insert -> no file at all) vs B (file present, hooks listed, requests visible).
  *
- * Gate (so normal boots are untouched): the boot-arg hakios_appleid=1 (read from sysctl kern.bootargs, the
- * same mechanism inject_sb.c uses), or, as a fallback, the existence of /redwood/etc/anisette-url.
+ *   v2 fetches with a plain BSD-socket HTTP/1.0 GET instead of NSURLSession: no App Transport Security
+ *   question for a cleartext http:// to a LAN IP, no run-loop/session state inside akd, a hard 3 s timeout.
  *
- * Model: src/inject_sb.c and src/inject_lockdown.c (plain-C dylib, __attribute__((constructor)), say() to
- * /dev/console, ObjC classes reached through the runtime; APIs it needs declared minimally against the SDK).
+ * IDENTITY COHERENCE (path B, "present our freshly provisioned identity consistently", NOT another device's).
+ *   Apple's anisette identity was provisioned on the host with that host identity's X-Mme-Device-Id and
+ *   X-Apple-I-MD-LU (anisette-server's device.json). akd by default sends the phone's own UDID and
+ *   SHA256(localUserUUID) next to it. v2 overrides those two request headers (and the same keys in the
+ *   dictionary +ak_anisetteHeadersWithData: returns, which also feeds the GrandSlam cpd) with the values the
+ *   anisette service returns, so mid/otp/LU/device-id all belong to the one identity. Switch off with
+ *   boot-arg hakios_anisette_ids=0 (or "ids=0" in /redwood/etc/anisette-opts) to test the other way.
+ *   X-MMe-Client-Info is left as the phone's unless hakios_anisette_ci=1 / "ci=1" (experiment knob).
+ *
+ * Gate, URL: unchanged from v1 (boot-arg hakios_appleid=1 or /redwood/etc/anisette-url exists; URL from
+ * hakios_anisette_url=, the file, else http://127.0.0.1:6969/). On ANY failure every hook calls through to
+ * Apple's implementation, so akd behaves exactly as without us (the clean -42410 failure).
  */
+#include <arpa/inet.h>
 #include <dispatch/dispatch.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
-/* objc runtime autorelease-pool scope (not declared by objc/runtime.h in this SDK) */
 extern void *objc_autoreleasePoolPush(void);
 extern void objc_autoreleasePoolPop(void *pool);
 
-/* where what we say goes: /dev/console if akd's sandbox lets us open it, else its standard error */
-static int say_fd = -1;
+/* ---- logging: a file AFC can fetch, plus the console ---------------------------------------------- */
+
+static int log_fd = -2;
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void
 say(const char *format, ...)
 {
-	char line[1024];
+	char line[1200];
 	va_list ap;
-	int n;
+	int n, h;
+	struct timeval tv;
+	struct tm tm;
 
-	if (say_fd < 0) {
-		say_fd = open("/dev/console", O_WRONLY | O_NOCTTY);
-		if (say_fd < 0) {
-			say_fd = 2;
+	pthread_mutex_lock(&log_lock);
+	if (log_fd == -2) {
+		log_fd = open("/var/mobile/Media/hakios-akd.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+		if (log_fd < 0) {
+			log_fd = open("/private/var/tmp/hakios-akd.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
 		}
 	}
+	gettimeofday(&tv, NULL);
+	localtime_r(&tv.tv_sec, &tm);
+	h = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03d akd[%d] ", tm.tm_hour, tm.tm_min, tm.tm_sec,
+	    (int)(tv.tv_usec / 1000), getpid());
 	va_start(ap, format);
-	n = vsnprintf(line, sizeof(line), format, ap);
+	n = vsnprintf(line + h, sizeof(line) - (size_t)h, format, ap);
 	va_end(ap);
-	if (n < 0) {
-		return;
+	if (n >= 0) {
+		n += h;
+		if (n > (int)sizeof(line) - 1) {
+			n = sizeof(line) - 1;
+		}
+		if (log_fd >= 0) {
+			(void)write(log_fd, line, (size_t)n);
+		}
+		{
+			int c = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
+
+			if (c >= 0) {
+				(void)write(c, "hakios: ", 8);
+				(void)write(c, line + h, (size_t)(n - h));
+				close(c);
+			}
+		}
 	}
-	if (n > (int)sizeof(line) - 1) {
-		n = sizeof(line) - 1;
-	}
-	(void)write(say_fd, line, (size_t)n);
+	pthread_mutex_unlock(&log_lock);
 }
 
-/* ---- small ObjC conveniences (plain C through objc_msgSend) -------------------------------------- */
+/* ---- small ObjC conveniences ---------------------------------------------------------------------- */
 
 #define MSG0(ret, obj, sel)                 ((ret (*)(id, SEL))objc_msgSend)((id)(obj), sel_registerName(sel))
 #define MSG1(ret, obj, sel, t0, a0)         ((ret (*)(id, SEL, t0))objc_msgSend)((id)(obj), sel_registerName(sel), (a0))
+#define MSG2(ret, obj, sel, t0, a0, t1, a1) \
+	((ret (*)(id, SEL, t0, t1))objc_msgSend)((id)(obj), sel_registerName(sel), (a0), (a1))
 
 static id
 nsstr(const char *s)
@@ -97,8 +141,6 @@ responds(id obj, SEL sel)
 	return obj != NULL && ((BOOL (*)(id, SEL, SEL))objc_msgSend)(obj, sel_registerName("respondsToSelector:"), sel);
 }
 
-/* a C string for an id that is an NSString (UTF8String) or an NSNumber (stringValue -> UTF8String); the
- * pointer is the autorelease pool's and is used at once by the caller */
 static const char *
 to_cstr(id obj)
 {
@@ -132,28 +174,322 @@ dict_object(id dict, const char *key)
 	if (dict == NULL || k == NULL) {
 		return NULL;
 	}
-	return ((id (*)(id, SEL, id))objc_msgSend)(dict, sel_registerName("objectForKey:"), k);
+	return MSG1(id, dict, "objectForKey:", id, k);
 }
 
-/*
- * Set an NSString field of the AKAnisetteData from JSON[key]: through the setter if the object has it
- * (so its copy/retain semantics are honoured), else straight into the object ivar if that is present,
- * else nothing. Never throws (no KVC): a field this build of AKAnisetteData does not have is simply
- * skipped. Returns the length of the C value set, or -1 if nothing was set.
- */
+/* ---- configuration: gate, URL, options ------------------------------------------------------------ */
+
+static char bootargs[2048];
+
+static void
+read_bootargs(void)
+{
+	size_t size = sizeof(bootargs) - 1;
+
+	if (sysctlbyname("kern.bootargs", bootargs, &size, NULL, 0) != 0) {
+		bootargs[0] = '\0';
+	}
+}
+
+/* KEY=VALUE as a word of SRC (boot-args or the opts file) -> out. true if found. */
+static bool
+word_value(const char *src, const char *key, char *out, size_t out_len)
+{
+	size_t klen = strlen(key);
+	const char *p;
+
+	for (p = src; (p = strstr(p, key)) != NULL; p += klen) {
+		if ((p == src || p[-1] == ' ' || p[-1] == '\n') && p[klen] == '=') {
+			const char *v = p + klen + 1;
+			size_t i = 0;
+
+			while (v[i] != '\0' && v[i] != ' ' && v[i] != '\n' && v[i] != '\r' && i < out_len - 1) {
+				out[i] = v[i];
+				i++;
+			}
+			out[i] = '\0';
+			return i > 0;
+		}
+	}
+	return false;
+}
+
+static bool
+read_file_line(const char *path, char *out, size_t out_len)
+{
+	FILE *f = fopen(path, "r");
+	size_t n;
+
+	if (f == NULL) {
+		return false;
+	}
+	if (fgets(out, (int)out_len, f) == NULL) {
+		fclose(f);
+		return false;
+	}
+	fclose(f);
+	n = strlen(out);
+	while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ' || out[n - 1] == '\t')) {
+		out[--n] = '\0';
+	}
+	return n > 0;
+}
+
+/* option NAME: boot-arg hakios_anisette_NAME=V, else "NAME=V" in /redwood/etc/anisette-opts, else dflt */
+static bool
+option(const char *name, bool dflt)
+{
+	char key[64], v[16], opts[512];
+
+	snprintf(key, sizeof(key), "hakios_anisette_%s", name);
+	if (word_value(bootargs, key, v, sizeof(v))) {
+		return v[0] != '0';
+	}
+	if (read_file_line("/redwood/etc/anisette-opts", opts, sizeof(opts)) && word_value(opts, name, v, sizeof(v))) {
+		return v[0] != '0';
+	}
+	return dflt;
+}
+
+static char service_url[512];
+static bool opt_ids, opt_ci;
+
+static void
+resolve_url(void)
+{
+	if (word_value(bootargs, "hakios_anisette_url", service_url, sizeof(service_url))) {
+		return;
+	}
+	if (read_file_line("/redwood/etc/anisette-url", service_url, sizeof(service_url))) {
+		return;
+	}
+	snprintf(service_url, sizeof(service_url), "http://127.0.0.1:6969/");
+}
+
+static bool
+gate_on(const char **why)
+{
+	char v[8];
+
+	if (word_value(bootargs, "hakios_appleid", v, sizeof(v)) && v[0] != '0') {
+		*why = "boot-arg hakios_appleid";
+		return true;
+	}
+	if (access("/redwood/etc/anisette-url", F_OK) == 0) {
+		*why = "/redwood/etc/anisette-url exists";
+		return true;
+	}
+	return false;
+}
+
+/* ---- HTTP/1.0 GET over a plain socket, 3 s budget ------------------------------------------------- */
+
+static int
+connect_timeout(const char *host, const char *port, int ms)
+{
+	struct addrinfo hints, *res = NULL, *ai;
+	int fd = -1;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_NUMERICSERV;
+	if (getaddrinfo(host, port, &hints, &res) != 0) {
+		return -1;
+	}
+	for (ai = res; ai != NULL; ai = ai->ai_next) {
+		struct pollfd pfd;
+		int flags, err = 0;
+		socklen_t len = sizeof(err);
+
+		fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		if (fd < 0) {
+			continue;
+		}
+		flags = fcntl(fd, F_GETFL, 0);
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+		if (connect(fd, ai->ai_addr, ai->ai_addrlen) != 0 && errno != EINPROGRESS) {
+			close(fd);
+			fd = -1;
+			continue;
+		}
+		pfd.fd = fd;
+		pfd.events = POLLOUT;
+		if (poll(&pfd, 1, ms) != 1 || getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+			close(fd);
+			fd = -1;
+			continue;
+		}
+		fcntl(fd, F_SETFL, flags);
+		{
+			struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+
+			setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+			setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+		}
+		{
+			int one = 1;
+
+			setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+		}
+		break;
+	}
+	freeaddrinfo(res);
+	return fd;
+}
+
+/* GET url -> body (malloc'd, NUL-terminated) or NULL. Only http://HOST[:PORT][/PATH]. */
+static char *
+http_get(const char *url, int *status_out)
+{
+	char host[256] = "", port[8] = "80", path[256] = "/", req[640];
+	const char *p, *h_end, *slash;
+	char *buf = NULL, *body;
+	size_t cap = 8192, got = 0;
+	int fd, status = 0;
+	ssize_t n;
+
+	if (strncmp(url, "http://", 7) != 0) {
+		return NULL;
+	}
+	p = url + 7;
+	slash = strchr(p, '/');
+	h_end = slash != NULL ? slash : p + strlen(p);
+	{
+		const char *colon = memchr(p, ':', (size_t)(h_end - p));
+		size_t hl = (size_t)((colon != NULL ? colon : h_end) - p);
+
+		if (hl == 0 || hl >= sizeof(host)) {
+			return NULL;
+		}
+		memcpy(host, p, hl);
+		host[hl] = '\0';
+		if (colon != NULL) {
+			size_t pl = (size_t)(h_end - colon - 1);
+
+			if (pl == 0 || pl >= sizeof(port)) {
+				return NULL;
+			}
+			memcpy(port, colon + 1, pl);
+			port[pl] = '\0';
+		}
+	}
+	if (slash != NULL) {
+		snprintf(path, sizeof(path), "%s", slash);
+	}
+	fd = connect_timeout(host, port, 3000);
+	if (fd < 0) {
+		return NULL;
+	}
+	n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: %s:%s\r\nAccept: application/json\r\n"
+	    "Connection: close\r\n\r\n", path, host, port);
+	if (write(fd, req, (size_t)n) != n) {
+		close(fd);
+		return NULL;
+	}
+	buf = malloc(cap + 1);
+	if (buf == NULL) {
+		close(fd);
+		return NULL;
+	}
+	while ((n = read(fd, buf + got, cap - got)) > 0) {
+		got += (size_t)n;
+		if (got == cap) {
+			char *nb;
+
+			if (cap >= 65536) {
+				break;
+			}
+			cap *= 2;
+			nb = realloc(buf, cap + 1);
+			if (nb == NULL) {
+				break;
+			}
+			buf = nb;
+		}
+	}
+	close(fd);
+	buf[got] = '\0';
+	if (sscanf(buf, "HTTP/%*s %d", &status) != 1) {
+		status = 0;
+	}
+	if (status_out != NULL) {
+		*status_out = status;
+	}
+	body = strstr(buf, "\r\n\r\n");
+	if (status != 200 || body == NULL) {
+		free(buf);
+		return NULL;
+	}
+	body += 4;
+	memmove(buf, body, strlen(body) + 1);
+	return buf;
+}
+
+/* ---- the anisette service ------------------------------------------------------------------------- */
+
+/* identity values that do not change per request (device id, LU, client info): kept after the first good fetch */
+static pthread_mutex_t ident_lock = PTHREAD_MUTEX_INITIALIZER;
+static id ident_device_id, ident_lu, ident_client_info;     /* retained NSStrings, or NULL */
+static unsigned long fetch_count, fetch_fail;
+
+static void
+remember_identity(id json)
+{
+	pthread_mutex_lock(&ident_lock);
+	if (ident_device_id == NULL) {
+		const char *a = to_cstr(dict_object(json, "X-Mme-Device-Id"));
+		const char *b = to_cstr(dict_object(json, "X-Apple-I-MD-LU"));
+		const char *c = to_cstr(dict_object(json, "X-MMe-Client-Info"));
+
+		if (a != NULL && b != NULL) {
+			ident_device_id = MSG0(id, nsstr(a), "retain");
+			ident_lu = MSG0(id, nsstr(b), "retain");
+			ident_client_info = c != NULL ? MSG0(id, nsstr(c), "retain") : NULL;
+			/* lengths only: the values identify the provisioned identity and stay out of logs */
+			say("identity from service: device-id %zu chars, LU %zu chars, client-info %s\n", strlen(a),
+			    strlen(b), c != NULL ? "present" : "absent");
+		}
+	}
+	pthread_mutex_unlock(&ident_lock);
+}
+
+/* the service's header dictionary (+0, autoreleased in the caller's pool) or NULL */
+static id
+fetch_json(const char *why)
+{
+	int status = 0;
+	char *body = http_get(service_url, &status);
+	id data, json;
+
+	fetch_count++;
+	if (body == NULL) {
+		fetch_fail++;
+		say("fetch (%s): %s failed (HTTP %d); calling through\n", why, service_url, status);
+		return NULL;
+	}
+	data = ((id (*)(Class, SEL, const void *, unsigned long))objc_msgSend)(objc_getClass("NSData"),
+	    sel_registerName("dataWithBytes:length:"), body, strlen(body));
+	free(body);
+	json = ((id (*)(Class, SEL, id, unsigned long, void *))objc_msgSend)(objc_getClass("NSJSONSerialization"),
+	    sel_registerName("JSONObjectWithData:options:error:"), data, 0UL, NULL);
+	if (json == NULL || !MSG1(BOOL, json, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+		fetch_fail++;
+		say("fetch (%s): answer was not a JSON object; calling through\n", why);
+		return NULL;
+	}
+	remember_identity(json);
+	return json;
+}
+
 static int
 set_string(id obj, const char *setter, const char *ivar_name, id json, const char *key)
 {
-	id value = dict_object(json, key);
-	const char *c = to_cstr(value);
+	const char *c = to_cstr(dict_object(json, key));
 	id s;
 	SEL sel;
 
-	if (c == NULL) {
-		return -1;
-	}
-	s = nsstr(c);
-	if (s == NULL) {
+	if (c == NULL || (s = nsstr(c)) == NULL) {
 		return -1;
 	}
 	sel = sel_registerName(setter);
@@ -165,25 +501,22 @@ set_string(id obj, const char *setter, const char *ivar_name, id json, const cha
 		Ivar iv = class_getInstanceVariable(object_getClass(obj), ivar_name);
 
 		if (iv != NULL) {
-			/* an object ivar: keep a copy, as the (copy) property would */
-			id copy = MSG0(id, s, "copy");
+			id old = object_getIvar(obj, iv);
 
-			object_setIvar(obj, iv, copy);
+			object_setIvar(obj, iv, MSG0(id, s, "copy"));
+			if (old != NULL) {
+				MSG0(void, old, "release");
+			}
 			return (int)strlen(c);
 		}
 	}
 	return -1;
 }
 
-/*
- * Set the scalar routingInfo (unsigned long long) from JSON[key] (a decimal string or number): through
- * setRoutingInfo: if present, else into the _routingInfo ivar. Skipped if the field is absent.
- */
 static void
 set_routing_info(id obj, id json, const char *key)
 {
-	id value = dict_object(json, key);
-	const char *c = to_cstr(value);
+	const char *c = to_cstr(dict_object(json, key));
 	unsigned long long n;
 	SEL sel;
 
@@ -205,279 +538,313 @@ set_routing_info(id obj, id json, const char *key)
 	}
 }
 
-/*
- * Build an AKAnisetteData from the header dictionary our service returned. The real ivars of this build's
- * AKAnisetteData (iOS 16.6.1, 20G81 arm64e; from the AuthKit library in the dyld shared cache) are
- * _machineID, _oneTimePassword, _routingInfo (unsigned long long), _deviceDescription, _deviceSerialNumber,
- * _machineData, _machineDataStyle, _machineDataSyncState -- there is no localUserID or deviceUniqueIdentifier
- * field on AKAnisetteData itself (those are request-level headers), so set_string for them simply finds no
- * setter/ivar and does nothing. Returns a +0 (autoreleased) object, as a non-alloc/new/copy method returns.
- */
+/* AKAnisetteData from the service, +1 retained (caller releases), or NULL. 20G81 ivars: _machineID,
+ * _oneTimePassword, _routingInfo (ULL), _deviceDescription, _deviceSerialNumber, _machineData... */
 static id
-build_anisette(id json)
+anisette_retained(const char *why)
 {
-	Class cls = objc_getClass("AKAnisetteData");
-	id obj;
-	int mid_len, otp_len;
-
-	if (cls == NULL) {
-		say("hakios: akd: AKAnisetteData class not found; calling through\n");
-		return NULL;
-	}
-	obj = MSG0(id, cls, "alloc");
-	obj = MSG0(id, obj, "init");
-	if (obj == NULL) {
-		return NULL;
-	}
-	mid_len = set_string(obj, "setMachineID:", "_machineID", json, "X-Apple-I-MD-M");
-	otp_len = set_string(obj, "setOneTimePassword:", "_oneTimePassword", json, "X-Apple-I-MD");
-	set_string(obj, "setDeviceDescription:", "_deviceDescription", json, "X-MMe-Client-Info");
-	set_string(obj, "setDeviceSerialNumber:", "_deviceSerialNumber", json, "X-Apple-I-SRL-NO");
-	/* not AKAnisetteData fields on this build -- tried defensively, skipped cleanly if absent */
-	set_string(obj, "setLocalUserID:", "_localUserID", json, "X-Apple-I-MD-LU");
-	set_string(obj, "setDeviceUniqueIdentifier:", "_deviceUniqueIdentifier", json, "X-Mme-Device-Id");
-	set_routing_info(obj, json, "X-Apple-I-MD-RINFO");
-	if (mid_len < 0 || otp_len < 0) {
-		/* without a machine ID and a one-time password the object cannot sign a request: refuse it */
-		say("hakios: akd: anisette JSON missing machineID (%d) or otp (%d); calling through\n", mid_len, otp_len);
-		MSG0(void, obj, "release");
-		return NULL;
-	}
-	say("hakios: akd: installed anisette -- machineID %d bytes, otp %d bytes\n", mid_len, otp_len);
-	return MSG0(id, obj, "autorelease");
-}
-
-/* ---- our anisette service ------------------------------------------------------------------------ */
-
-/* a boot-arg's value, "KEY=VALUE" at the start of kern.bootargs or after a space, into out (word up to
- * the next space). true if found. */
-static bool
-boot_arg_value(const char *key, char *out, size_t out_len)
-{
-	char args[2048] = "";
-	size_t size = sizeof(args) - 1;
-	size_t klen = strlen(key);
-	char *p;
-
-	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
-		return false;
-	}
-	for (p = args; (p = strstr(p, key)) != NULL; p += klen) {
-		if ((p == args || p[-1] == ' ') && p[klen] == '=') {
-			const char *v = p + klen + 1;
-			size_t i = 0;
-
-			while (v[i] != '\0' && v[i] != ' ' && i < out_len - 1) {
-				out[i] = v[i];
-				i++;
-			}
-			out[i] = '\0';
-			return i > 0;
-		}
-	}
-	return false;
-}
-
-/* where our anisette service is: boot-arg hakios_anisette_url=, else /redwood/etc/anisette-url (trimmed),
- * else the default. */
-static void
-resolve_url(char *out, size_t out_len)
-{
-	FILE *f;
-
-	if (boot_arg_value("hakios_anisette_url", out, out_len) && out[0] != '\0') {
-		return;
-	}
-	f = fopen("/redwood/etc/anisette-url", "r");
-	if (f != NULL) {
-		char line[1024] = "";
-
-		if (fgets(line, sizeof(line), f) != NULL) {
-			size_t n = strlen(line);
-
-			while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ' ||
-			    line[n - 1] == '\t')) {
-				line[--n] = '\0';
-			}
-			if (n > 0) {
-				snprintf(out, out_len, "%s", line);
-				fclose(f);
-				return;
-			}
-		}
-		fclose(f);
-	}
-	snprintf(out, out_len, "http://127.0.0.1:6969/");
-}
-
-/*
- * Fetch the anisette headers from our service and build an AKAnisetteData, synchronously, with a short
- * timeout. The one-time password is time-based, so this runs on every call (never cached). Returns a +0
- * AKAnisetteData, or NULL on any failure (the caller then calls through to the native ADI).
- */
-static id
-fetch_anisette(void)
-{
-	char url[1024] = "";
 	void *pool = objc_autoreleasePoolPush();
-	id result = NULL;
-	__block id body = NULL;      /* NSData, retained inside the completion block (runs on another thread) */
-	dispatch_semaphore_t done;
-	id nsurl, request, session, task, json;
-	Class NSURL = objc_getClass("NSURL");
-	Class NSURLRequest = objc_getClass("NSMutableURLRequest");
-	Class NSURLSession = objc_getClass("NSURLSession");
-	Class NSJSONSerialization = objc_getClass("NSJSONSerialization");
+	Class cls = objc_getClass("AKAnisetteData");
+	id json, obj = NULL;
+	int mid, otp;
 
-	if (NSURL == NULL || NSURLRequest == NULL || NSURLSession == NULL || NSJSONSerialization == NULL) {
-		objc_autoreleasePoolPop(pool);
-		return NULL;
-	}
-	resolve_url(url, sizeof(url));
-	nsurl = MSG1(id, NSURL, "URLWithString:", id, nsstr(url));
-	if (nsurl == NULL) {
-		objc_autoreleasePoolPop(pool);
-		return NULL;
-	}
-	request = MSG1(id, NSURLRequest, "requestWithURL:", id, nsurl);
-	if (request == NULL) {
-		objc_autoreleasePoolPop(pool);
-		return NULL;
-	}
-	MSG1(void, request, "setTimeoutInterval:", double, 3.0);
-	session = MSG0(id, NSURLSession, "sharedSession");
-	if (session == NULL) {
-		objc_autoreleasePoolPop(pool);
-		return NULL;
-	}
-	done = dispatch_semaphore_create(0);
-	{
-		void (^handler)(id, id, id) = ^(id data, __unused id response, __unused id error) {
-			if (data != NULL) {
-				body = MSG0(id, data, "retain");
+	json = cls != NULL ? fetch_json(why) : NULL;
+	if (json != NULL) {
+		obj = MSG0(id, MSG0(id, cls, "alloc"), "init");
+		if (obj != NULL) {
+			mid = set_string(obj, "setMachineID:", "_machineID", json, "X-Apple-I-MD-M");
+			otp = set_string(obj, "setOneTimePassword:", "_oneTimePassword", json, "X-Apple-I-MD");
+			set_string(obj, "setDeviceSerialNumber:", "_deviceSerialNumber", json, "X-Apple-I-SRL-NO");
+			if (opt_ci) {
+				set_string(obj, "setDeviceDescription:", "_deviceDescription", json, "X-MMe-Client-Info");
 			}
-			dispatch_semaphore_signal(done);
-		};
-		task = ((id (*)(id, SEL, id, void *))objc_msgSend)(session,
-		    sel_registerName("dataTaskWithRequest:completionHandler:"), request, (void *)handler);
-	}
-	if (task == NULL) {
-		dispatch_release(done);
-		objc_autoreleasePoolPop(pool);
-		return NULL;
-	}
-	MSG0(void, task, "resume");
-	if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC)) != 0) {
-		say("hakios: akd: anisette service %s timed out; calling through\n", url);
-		dispatch_release(done);
-		objc_autoreleasePoolPop(pool);
-		return NULL;      /* the retained body (if any) leaks on timeout only; that path is rare */
-	}
-	dispatch_release(done);
-	if (body == NULL) {
-		say("hakios: akd: anisette service %s returned nothing; calling through\n", url);
-		objc_autoreleasePoolPop(pool);
-		return NULL;
-	}
-	json = ((id (*)(Class, SEL, id, unsigned long, void *))objc_msgSend)(NSJSONSerialization,
-	    sel_registerName("JSONObjectWithData:options:error:"), body, 0UL, NULL);
-	MSG0(void, body, "release");
-	if (json == NULL || !((BOOL (*)(id, SEL, Class))objc_msgSend)(json, sel_registerName("isKindOfClass:"),
-	    objc_getClass("NSDictionary"))) {
-		say("hakios: akd: anisette service %s: answer was not a JSON object; calling through\n", url);
-		objc_autoreleasePoolPop(pool);
-		return NULL;
-	}
-	result = build_anisette(json);
-	/* keep the result alive across the pool pop, then hand it back autoreleased */
-	if (result != NULL) {
-		result = MSG0(id, result, "retain");
+			set_routing_info(obj, json, "X-Apple-I-MD-RINFO");
+			if (mid < 0 || otp < 0) {
+				say("fetch (%s): JSON lacks machineID (%d) or otp (%d); calling through\n", why, mid, otp);
+				MSG0(void, obj, "release");
+				obj = NULL;
+			} else {
+				say("anisette served (%s): mid %d B, otp %d B [#%lu]\n", why, mid, otp, fetch_count);
+			}
+		}
 	}
 	objc_autoreleasePoolPop(pool);
-	if (result != NULL) {
-		result = MSG0(id, result, "autorelease");
-	}
-	return result;
+	return obj;
 }
 
-/* ---- the hooks ----------------------------------------------------------------------------------- */
+/* ---- hooks: AKNativeAnisetteService (akd executable) -- the bottom of every anisette route ---------- */
 
-/* -[AKAnisetteProvisioningController anisetteDataWithError:] -> AKAnisetteData *  (the request-signing fetch) */
-static id (*orig_anisette_with_error)(id, SEL, void *);
+typedef void (^data_cb)(id data, id error);
+typedef void (^bool_cb)(BOOL ok, id error);
 
-static id
-hook_anisette_with_error(id self, SEL _cmd, void *error_out)
+static void (*o_native_fetch)(id, SEL, BOOL, data_cb);
+static void
+h_native_fetch(id self, SEL cmd, BOOL provision, data_cb completion)
 {
-	id data = fetch_anisette();
+	id data = anisette_retained("native fetchAnisetteDataAndProvisionIfNecessary:withCompletion:");
 
-	if (data != NULL) {
-		if (error_out != NULL) {
-			*(void **)error_out = NULL;
-		}
-		return data;
+	if (data == NULL) {
+		o_native_fetch(self, cmd, provision, completion);
+		return;
 	}
-	return orig_anisette_with_error(self, _cmd, error_out);
+	if (completion != NULL) {
+		completion(data, NULL);
+	}
+	MSG0(void, data, "release");
 }
 
-/* -[AKAnisetteProvisioningController fetchAnisetteDataAndProvisionIfNecessary:error:] -> AKAnisetteData * */
-static id (*orig_fetch_and_provision)(id, SEL, BOOL, void *);
-
-static id
-hook_fetch_and_provision(id self, SEL _cmd, BOOL provision, void *error_out)
+static void (*o_native_legacy)(id, SEL, id, data_cb);
+static void
+h_native_legacy(id self, SEL cmd, id dsid, data_cb completion)
 {
-	id data = fetch_anisette();
+	id data = anisette_retained("native legacyAnisetteDataForDSID:withCompletion:");
 
-	if (data != NULL) {
-		if (error_out != NULL) {
-			*(void **)error_out = NULL;
-		}
-		return data;
+	if (data == NULL) {
+		o_native_legacy(self, cmd, dsid, completion);
+		return;
 	}
-	return orig_fetch_and_provision(self, _cmd, provision, error_out);
+	if (completion != NULL) {
+		completion(data, NULL);
+	}
+	MSG0(void, data, "release");
 }
 
-/* replace -[CLASS SELECTOR] with REPLACEMENT, saving the original into *orig. Returns true if hooked. */
+static id (*o_native_unsafe)(id, SEL, id, id *);
+static id
+h_native_unsafe(id self, SEL cmd, id dsid, id *error)
+{
+	id data = anisette_retained("native _unsafe_anisetteDataForDSID:withError:");
+
+	if (data == NULL) {
+		return o_native_unsafe(self, cmd, dsid, error);
+	}
+	if (error != NULL) {
+		*error = NULL;
+	}
+	return MSG0(id, data, "autorelease");
+}
+
+static id (*o_native_unsafe_ri)(id, SEL, id, id *);
+static id
+h_native_unsafe_ri(id self, SEL cmd, id dsid, id *error)
+{
+	id data = anisette_retained("native _unsafe_anisetteDataWithRoutingInfoForDSID:withError:");
+
+	if (data == NULL) {
+		return o_native_unsafe_ri(self, cmd, dsid, error);
+	}
+	if (error != NULL) {
+		*error = NULL;
+	}
+	return MSG0(id, data, "autorelease");
+}
+
+/* provisioning is the host's job (anisette-server, already provisioned): report success iff it answers */
+static void (*o_native_provision)(id, SEL, bool_cb);
+static void
+h_native_provision(id self, SEL cmd, bool_cb completion)
+{
+	id data = anisette_retained("native provisionAnisetteWithCompletion:");
+
+	if (data == NULL) {
+		o_native_provision(self, cmd, completion);
+		return;
+	}
+	MSG0(void, data, "release");
+	say("provisioning request answered from the service (no on-device ADI provisioning)\n");
+	if (completion != NULL) {
+		completion(YES, NULL);
+	}
+}
+
+/* ---- hooks: AuthKit client side (v1's, kept as a second net) -------------------------------------- */
+
+static id (*o_ctl_with_error)(id, SEL, id *);
+static id
+h_ctl_with_error(id self, SEL cmd, id *error)
+{
+	id data = anisette_retained("controller anisetteDataWithError:");
+
+	if (data == NULL) {
+		return o_ctl_with_error(self, cmd, error);
+	}
+	if (error != NULL) {
+		*error = NULL;
+	}
+	return MSG0(id, data, "autorelease");
+}
+
+static id (*o_ctl_fetch_error)(id, SEL, BOOL, id *);
+static id
+h_ctl_fetch_error(id self, SEL cmd, BOOL provision, id *error)
+{
+	id data = anisette_retained("controller fetchAnisetteDataAndProvisionIfNecessary:error:");
+
+	if (data == NULL) {
+		return o_ctl_fetch_error(self, cmd, provision, error);
+	}
+	if (error != NULL) {
+		*error = NULL;
+	}
+	return MSG0(id, data, "autorelease");
+}
+
+static void (*o_ctl_fetch_cb)(id, SEL, BOOL, data_cb);
+static void
+h_ctl_fetch_cb(id self, SEL cmd, BOOL provision, data_cb completion)
+{
+	id data = anisette_retained("controller fetchAnisetteDataAndProvisionIfNecessary:withCompletion:");
+
+	if (data == NULL) {
+		o_ctl_fetch_cb(self, cmd, provision, completion);
+		return;
+	}
+	if (completion != NULL) {
+		completion(data, NULL);
+	}
+	MSG0(void, data, "release");
+}
+
+/* ---- hooks: identity coherence on requests (NSMutableURLRequest(AuthKit)) ------------------------- */
+
 static bool
-hook_method(const char *class_name, const char *selector, IMP replacement, IMP *orig)
+identity(id *device_id, id *lu, id *client_info)
+{
+	if (ident_device_id == NULL) {
+		void *pool = objc_autoreleasePoolPush();
+
+		(void)fetch_json("identity");
+		objc_autoreleasePoolPop(pool);
+	}
+	pthread_mutex_lock(&ident_lock);
+	*device_id = ident_device_id;
+	*lu = ident_lu;
+	*client_info = ident_client_info;
+	pthread_mutex_unlock(&ident_lock);
+	return *device_id != NULL;
+}
+
+static void
+set_header(id request, id value, const char *field)
+{
+	if (value != NULL) {
+		MSG2(void, request, "setValue:forHTTPHeaderField:", id, value, id, nsstr(field));
+	}
+}
+
+static void (*o_add_udid)(id, SEL);
+static void
+h_add_udid(id self, SEL cmd)
+{
+	id dev, lu, ci;
+
+	o_add_udid(self, cmd);
+	if (opt_ids && identity(&dev, &lu, &ci)) {
+		set_header(self, dev, "X-Mme-Device-Id");
+	}
+}
+
+static void (*o_add_lu)(id, SEL);
+static void
+h_add_lu(id self, SEL cmd)
+{
+	id dev, lu, ci;
+
+	o_add_lu(self, cmd);
+	if (opt_ids && identity(&dev, &lu, &ci)) {
+		set_header(self, lu, "X-Apple-I-MD-LU");
+	}
+}
+
+static void (*o_add_ci)(id, SEL);
+static void
+h_add_ci(id self, SEL cmd)
+{
+	id dev, lu, ci;
+
+	o_add_ci(self, cmd);
+	if (opt_ci && identity(&dev, &lu, &ci)) {
+		set_header(self, ci, "X-MMe-Client-Info");
+	}
+}
+
+/* +[NSMutableURLRequest ak_anisetteHeadersWithData:] -> NSDictionary; also the source of the GrandSlam cpd */
+static id (*o_headers_with_data)(id, SEL, id);
+static id
+h_headers_with_data(id self, SEL cmd, id data)
+{
+	id dict = o_headers_with_data(self, cmd, data);
+	id dev, lu, ci, m;
+
+	if (dict == NULL || !(opt_ids || opt_ci) || !identity(&dev, &lu, &ci)) {
+		return dict;
+	}
+	m = MSG0(id, dict, "mutableCopy");
+	if (opt_ids) {
+		MSG2(void, m, "setObject:forKey:", id, lu, id, nsstr("X-Apple-I-MD-LU"));
+		MSG2(void, m, "setObject:forKey:", id, dev, id, nsstr("X-Mme-Device-Id"));
+	}
+	if (opt_ci && ci != NULL) {
+		MSG2(void, m, "setObject:forKey:", id, ci, id, nsstr("X-MMe-Client-Info"));
+	}
+	return MSG0(id, m, "autorelease");
+}
+
+/* ---- installation --------------------------------------------------------------------------------- */
+
+static int hooked, wanted;
+
+static bool
+hook(const char *class_name, bool meta, const char *selector, IMP replacement, IMP *orig)
 {
 	Class cls = objc_getClass(class_name);
-	Method method = cls != NULL ? class_getInstanceMethod(cls, sel_registerName(selector)) : NULL;
+	Method m;
 
-	if (method == NULL) {
-		say("hakios: akd: -[%s %s] not found; not hooked (native behaviour kept)\n", class_name, selector);
+	wanted++;
+	if (cls != NULL && meta) {
+		cls = object_getClass((id)cls);
+	}
+	/* for a class method cls is already the metaclass, whose instance methods are the class methods */
+	m = cls != NULL ? class_getInstanceMethod(cls, sel_registerName(selector)) : NULL;
+	if (m == NULL) {
+		say("  %c[%s %s] not found; not hooked\n", meta ? '+' : '-', class_name, selector);
 		return false;
 	}
-	*orig = method_setImplementation(method, replacement);
-	say("hakios: akd: hooked -[%s %s]\n", class_name, selector);
+	*orig = method_setImplementation(m, replacement);
+	hooked++;
+	say("  hooked %c[%s %s]\n", meta ? '+' : '-', class_name, selector);
 	return true;
 }
 
-/*
- * Is the Apple ID gate on? Boot-arg hakios_appleid=1 (read from sysctl kern.bootargs, as the rest of the
- * userland reads its arguments), or the fallback file /redwood/etc/anisette-url exists. STATE: the primary
- * gate is the boot-arg; the file is the fallback, and it doubles as the service URL.
- */
-static bool
-gate_on(const char **why)
+static void
+install(void)
 {
-	char args[2048] = "";
-	size_t size = sizeof(args) - 1;
-
-	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0) {
-		char *p;
-
-		for (p = args; (p = strstr(p, "hakios_appleid=")) != NULL; p += 15) {
-			if ((p == args || p[-1] == ' ') && p[15] != '0') {
-				*why = "boot-arg hakios_appleid=1";
-				return true;
-			}
-		}
-	}
-	if (access("/redwood/etc/anisette-url", F_OK) == 0) {
-		*why = "/redwood/etc/anisette-url exists";
-		return true;
-	}
-	return false;
+	hooked = wanted = 0;
+	/* bottom of the chain: akd's own native service */
+	hook("AKNativeAnisetteService", false, "fetchAnisetteDataAndProvisionIfNecessary:withCompletion:",
+	    (IMP)h_native_fetch, (IMP *)&o_native_fetch);
+	hook("AKNativeAnisetteService", false, "legacyAnisetteDataForDSID:withCompletion:",
+	    (IMP)h_native_legacy, (IMP *)&o_native_legacy);
+	hook("AKNativeAnisetteService", false, "_unsafe_anisetteDataForDSID:withError:",
+	    (IMP)h_native_unsafe, (IMP *)&o_native_unsafe);
+	hook("AKNativeAnisetteService", false, "_unsafe_anisetteDataWithRoutingInfoForDSID:withError:",
+	    (IMP)h_native_unsafe_ri, (IMP *)&o_native_unsafe_ri);
+	hook("AKNativeAnisetteService", false, "provisionAnisetteWithCompletion:",
+	    (IMP)h_native_provision, (IMP *)&o_native_provision);
+	/* client side (AuthKit) */
+	hook("AKAnisetteProvisioningController", false, "anisetteDataWithError:",
+	    (IMP)h_ctl_with_error, (IMP *)&o_ctl_with_error);
+	hook("AKAnisetteProvisioningController", false, "fetchAnisetteDataAndProvisionIfNecessary:error:",
+	    (IMP)h_ctl_fetch_error, (IMP *)&o_ctl_fetch_error);
+	hook("AKAnisetteProvisioningController", false, "fetchAnisetteDataAndProvisionIfNecessary:withCompletion:",
+	    (IMP)h_ctl_fetch_cb, (IMP *)&o_ctl_fetch_cb);
+	/* identity coherence on outgoing requests */
+	hook("NSMutableURLRequest", false, "ak_addDeviceUDIDHeader", (IMP)h_add_udid, (IMP *)&o_add_udid);
+	hook("NSMutableURLRequest", false, "ak_addLocalUserUUIDHashHeader", (IMP)h_add_lu, (IMP *)&o_add_lu);
+	hook("NSMutableURLRequest", false, "ak_addClientInfoHeader", (IMP)h_add_ci, (IMP *)&o_add_ci);
+	hook("NSMutableURLRequest", true, "ak_anisetteHeadersWithData:", (IMP)h_headers_with_data,
+	    (IMP *)&o_headers_with_data);
+	say("%d of %d hooks installed\n", hooked, wanted);
 }
 
 __attribute__((constructor))
@@ -486,18 +853,20 @@ hakios_akd_init(void)
 {
 	const char *name = getprogname();
 	const char *why = "";
-	char url[1024] = "";
 
 	if (name == NULL || strcmp(name, "akd") != 0) {
-		return;           /* injected only into akd (build.sh INJECT); nothing else is touched */
+		return;
 	}
+	read_bootargs();
+	/* logged BEFORE the gate: the file's existence alone proves dyld inserted us into akd */
+	say("libhakios.akd v2 loaded (uid %d)\n", getuid());
 	if (!gate_on(&why)) {
-		return;           /* a normal boot: do nothing, akd behaves exactly as Apple's */
+		say("gate off (no hakios_appleid boot-arg, no /redwood/etc/anisette-url): native behaviour\n");
+		return;
 	}
-	resolve_url(url, sizeof(url));
-	say("hakios: akd: Apple ID anisette on (%s); service %s\n", why, url);
-	hook_method("AKAnisetteProvisioningController", "anisetteDataWithError:",
-	    (IMP)hook_anisette_with_error, (IMP *)&orig_anisette_with_error);
-	hook_method("AKAnisetteProvisioningController", "fetchAnisetteDataAndProvisionIfNecessary:error:",
-	    (IMP)hook_fetch_and_provision, (IMP *)&orig_fetch_and_provision);
+	resolve_url();
+	opt_ids = option("ids", true);
+	opt_ci = option("ci", false);
+	say("Apple ID anisette ON (%s); service %s; ids=%d ci=%d\n", why, service_url, opt_ids, opt_ci);
+	install();
 }
