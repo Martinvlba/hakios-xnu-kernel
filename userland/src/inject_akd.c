@@ -253,6 +253,7 @@ option(const char *name, bool dflt)
 
 static char service_url[512];
 static bool opt_ids, opt_ci;
+static bool observe_only;      /* v9: gate off, but install the passive logging hooks to watch native provisioning */
 
 static void
 resolve_url(void)
@@ -802,6 +803,71 @@ h_headers_with_data(id self, SEL cmd, id data)
  * under "Response". Logged only when that Status is present, so akd's many other plists stay quiet. */
 static id (*o_plist)(Class, SEL, id, unsigned long, void *, id *);
 
+/* v9: dump a plist dict's keys with value class and length, masking long/secret values -- used to print the shape
+ * of the midStart/midFinishProvisioning request and response bodies without logging the base64 attestation blobs. */
+static void
+dump_plist_keys(id dict, const char *label)
+{
+	id keys = MSG0(id, dict, "allKeys");
+	unsigned long n = keys != NULL ? ((unsigned long (*)(id, SEL))objc_msgSend)(keys, sel_registerName("count")) : 0;
+
+	say("%s: %lu keys\n", label, n);
+	for (unsigned long i = 0; i < n; i++) {
+		id k = ((id (*)(id, SEL, unsigned long))objc_msgSend)(keys, sel_registerName("objectAtIndex:"), i);
+		const char *ks = to_cstr(k);
+		id v = MSG1(id, dict, "objectForKey:", id, k);
+		const char *cn = v != NULL ? class_getName(object_getClass(v)) : "nil";
+		const char *vs = to_cstr(v);
+
+		if (ks == NULL) {
+			continue;
+		}
+		if (vs != NULL && strlen(vs) <= 24) {
+			say("  %s[%s] = %s\n", label, ks, vs);          /* short scalar: a code, flag, RINFO, em string */
+		} else if (vs != NULL) {
+			say("  %s[%s] = <%s, %d B>\n", label, ks, cn, (int)strlen(vs));
+		} else if (v != NULL && MSG1(BOOL, v, "isKindOfClass:", Class, objc_getClass("NSData"))) {
+			say("  %s[%s] = <NSData, %lu B>\n", label, ks,
+			    ((unsigned long (*)(id, SEL))objc_msgSend)(v, sel_registerName("length")));
+		} else {
+			say("  %s[%s] = (%s)\n", label, ks, cn);        /* nested dict / array */
+		}
+	}
+}
+
+/* v9: the mid provisioning bodies are plists {Response:{spim|ptm|tk|X-Apple-I-MD-RINFO|Status:{ec,em,...}}}. When a
+ * parsed plist is one (a provisioning marker, or a Status that is NOT the GrandSlam SRP one), dump the Response shape
+ * and its Status -- this is the midFinishProvisioning 401 body akd otherwise prints as <private>, i.e. WHY it is
+ * refused. GrandSlam SRP responses (sp/spd/c/M2) are left to log_gs_status. */
+static void
+log_provisioning(id dict)
+{
+	id resp, status;
+	bool has_prov, is_gs;
+
+	if (dict == NULL || !MSG1(BOOL, dict, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+		return;
+	}
+	resp = dict_object(dict, "Response");
+	if (resp == NULL || !MSG1(BOOL, resp, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+		return;
+	}
+	has_prov = dict_object(resp, "spim") != NULL || dict_object(resp, "ptm") != NULL ||
+	    dict_object(resp, "tk") != NULL || dict_object(resp, "cpim") != NULL ||
+	    dict_object(resp, "X-Apple-I-MD-RINFO") != NULL;
+	is_gs = dict_object(resp, "sp") != NULL || dict_object(resp, "spd") != NULL ||
+	    dict_object(resp, "c") != NULL || dict_object(resp, "M2") != NULL;
+	status = dict_object(resp, "Status");
+	if (!has_prov && !(status != NULL && !is_gs)) {
+		return;
+	}
+	say("--- mid provisioning response (has_prov=%d) ---\n", has_prov);
+	dump_plist_keys(resp, "prov-resp");
+	if (status != NULL && MSG1(BOOL, status, "isKindOfClass:", Class, objc_getClass("NSDictionary"))) {
+		dump_plist_keys(status, "prov-status");
+	}
+}
+
 static void
 log_gs_status(id dict)
 {
@@ -849,12 +915,50 @@ h_plist(Class self, SEL cmd, id data, unsigned long opts, void *fmt, id *err)
 	id r = o_plist(self, cmd, data, opts, fmt, err);
 
 	log_gs_status(r);
+	log_provisioning(r);
 	return r;
 }
 
 /* +[NSError errorWithDomain:code:userInfo:]: the auth failure ("cannot be completed at this time") is an NSError;
  * logged only for the Apple-ID / AuthKit / GrandSlam domains, so it is the sign-in error, not every NSError akd makes. */
 static id (*o_nserror)(Class, SEL, id, long, id);
+
+/* v8: log akd's full o=init cpd (every key), masking only real secrets, so RINFO/client-info/flags can be diffed
+ * field-by-field against a known-good AltStore/SideStore init request -- the hsc=500 may be one malformed/extra field. */
+static bool
+cpd_secret(const char *k)
+{
+	return k != NULL && (strcmp(k, "X-Apple-I-MD") == 0 || strcmp(k, "X-Apple-I-MD-M") == 0 ||
+	    strcmp(k, "X-Apple-I-MD-LU") == 0 || strstr(k, "tkn") != NULL || strstr(k, "oken") != NULL ||
+	    strstr(k, " assword") != NULL);
+}
+
+static void
+dump_cpd(id cpd)
+{
+	id keys = MSG0(id, cpd, "allKeys");
+	unsigned long n = keys != NULL ? ((unsigned long (*)(id, SEL))objc_msgSend)(keys, sel_registerName("count")) : 0;
+
+	say("init cpd: %lu keys\n", n);
+	for (unsigned long i = 0; i < n; i++) {
+		id k = ((id (*)(id, SEL, unsigned long))objc_msgSend)(keys, sel_registerName("objectAtIndex:"), i);
+		const char *ks = to_cstr(k);
+		id v = MSG1(id, cpd, "objectForKey:", id, k);
+		const char *vs = to_cstr(v);
+		const char *cn = v != NULL ? class_getName(object_getClass(v)) : "nil";
+
+		if (ks == NULL) {
+			continue;
+		}
+		if (cpd_secret(ks)) {
+			say("  cpd[%s] = <%s, %d B>\n", ks, cn, vs ? (int)strlen(vs) : 0);
+		} else if (vs != NULL) {
+			say("  cpd[%s] = %s\n", ks, vs);
+		} else {
+			say("  cpd[%s] = (%s)\n", ks, cn);
+		}
+	}
+}
 
 /* +[NSPropertyListSerialization dataWithPropertyList:format:options:error:]: akd serializes its GsService2 request body
  * as a plist. When that plist is a GrandSlam request (has a "Request" dict with an "o"), log the operation so each
@@ -874,6 +978,12 @@ h_ser(Class self, SEL cmd, id plist, unsigned long fmt, unsigned long opts, id *
 		if (op == NULL) {
 			op = to_cstr(dict_object(plist, "o"));     /* some requests put it at the top */
 		}
+		/* v9: the midStart/midFinishProvisioning request bodies have no "o"; log their shape (finish carries cpim) */
+		if (op == NULL && req != NULL &&
+		    (dict_object(req, "cpim") != NULL || dict_object(req, "spim") != NULL)) {
+			say("--- mid provisioning request ---\n");
+			dump_plist_keys(req, "prov-req");
+		}
 		if (op != NULL) {
 			/* what akd actually transmits in this request's cpd: the client-time and OTP it is using right now.
 			 * If the time is current at o=init, a stale/cached one-time-password is ruled out as the -80044 cause. */
@@ -891,7 +1001,8 @@ h_ser(Class self, SEL cmd, id plist, unsigned long fmt, unsigned long opts, id *
 			 * To rule staleness out for good: fetch fresh now, deep-copy plist > Request > cpd into mutable dicts,
 			 * overwrite the time-sensitive triple (OTP, machine-data, client-time) with the fresh matched set, and
 			 * serialize THAT copy. Identity fields (MID-LU, RINFO) are left as akd set them. */
-			if (cpd != NULL && req != NULL && strcmp(op, "init") == 0) {
+			if (cpd != NULL && req != NULL && !observe_only && strcmp(op, "init") == 0) {
+				dump_cpd(cpd);
 				id fresh = fetch_json("init-refresh");
 
 				if (fresh != NULL) {
@@ -993,6 +1104,17 @@ install(void)
 	say("%d of %d hooks installed\n", hooked, wanted);
 }
 
+/* v9: passive hooks only -- see what akd's own native adid provisioning does, injecting nothing. */
+static void
+install_observe(void)
+{
+	hooked = wanted = 0;
+	hook("NSPropertyListSerialization", true, "propertyListWithData:options:format:error:", (IMP)h_plist, (IMP *)&o_plist);
+	hook("NSPropertyListSerialization", true, "dataWithPropertyList:format:options:error:", (IMP)h_ser, (IMP *)&o_ser);
+	hook("NSError", true, "errorWithDomain:code:userInfo:", (IMP)h_nserror, (IMP *)&o_nserror);
+	say("observe-only: %d of %d passive hooks (native adid provisioning left untouched)\n", hooked, wanted);
+}
+
 __attribute__((constructor))
 static void
 hakios_akd_init(void)
@@ -1005,8 +1127,17 @@ hakios_akd_init(void)
 	}
 	read_bootargs();
 	/* logged BEFORE the gate: the file's existence alone proves dyld inserted us into akd */
-	say("libhakios.akd v7 loaded (uid %d)\n", getuid());
+	say("libhakios.akd v9 loaded (uid %d)\n", getuid());
 	if (!gate_on(&why)) {
+		char v[8];
+
+		if ((word_value(bootargs, "hakios_akd_observe", v, sizeof(v)) && v[0] != '0') ||
+		    access("/redwood/etc/akd-observe", F_OK) == 0) {
+			observe_only = true;
+			say("observe-only mode: logging akd's native adid provisioning (no anisette injected)\n");
+			install_observe();
+			return;
+		}
 		say("gate off (no hakios_appleid boot-arg, no /redwood/etc/anisette-url): native behaviour\n");
 		return;
 	}
