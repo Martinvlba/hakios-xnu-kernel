@@ -228,8 +228,10 @@ skel_quirks(uint8_t *packet, unsigned length)
 
 	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0f && packet[2] == 0x04 && packet[3] == 0x01 && packet[4] == 0x01 &&
 	    (packet[6] >> 2) == 0x3f) {
-		const bool antenna = packet[5] == 0xe2 && packet[6] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36 ||
-		    skel_vsc_sub == 0x0d);
+		/* (11-17: every 0xfce2 sub-command, not only the antenna ones: 16.6.1's bluetoothd checks a minimum of return data
+		 * on more of them -- 0x42, then 0x2c stalled it in turn; 16 zero bytes satisfy each, and the ones with no
+		 * completion of their own, 0x2a and 0x3a, ignore them) */
+		const bool antenna = packet[5] == 0xe2 && packet[6] == 0xfc;
 		const bool cal = packet[5] == 0x1b && packet[6] == 0xfd;
 		const bool data = antenna || cal || (packet[5] == 0x48 && packet[6] == 0xfd);
 		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 0));
@@ -255,17 +257,53 @@ skel_quirks(uint8_t *packet, unsigned length)
 	if (length > 7 && packet[0] == 0x04 && packet[1] == 0x0e && (packet[5] >> 2) == 0x3f && packet[6] == 0x01) {
 		/* (one that came with bytes after its status, 0xfce9 on the BCM4383: the status alone) */
 		packet[6] = 0x00;
+		/*
+		 * 0xfce9 sub-command 0x37 (11-17, 16.6.1): the BCM4383 says "1, 0x37" and bluetoothd's
+		 * _BCM_U8_U8_U8EventParser (bcm_vsc.c) asserts "ByteStream_NumReadBytesAvail(*pBs) >= 1" on the bytes after
+		 * the 0x37 and aborts, ~0.6 s into each start: three zero bytes after it.
+		 */
+		if (length == 8 && packet[4] == 0xe9 && packet[5] == 0xfc && packet[7] == 0x37) {
+			packet[2] = 0x08;
+			packet[8] = packet[9] = packet[10] = 0x00;
+			return 11;
+		}
 		return length;
 	}
+	/*
+	 * A vendor command the controller knows and answers done with no data at all (0xfe3b, 11-17): 16.6.1's bluetoothd
+	 * parses statistics out of several (_BCM_LowPowerCoreStatsEventParser asserted "ByteStream_NumReadBytesAvail(*pBs)
+	 * >= 4" and aborted, each start ~0.6 s in): 64 zero bytes after the status, enough for each such parser; the ones
+	 * that read nothing ignore them. (0xfce2 0x42 and 0xfce9 0x37 the same way: one assertion after another.)
+	 */
+	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 && (packet[5] >> 2) == 0x3f && packet[6] == 0x00 &&
+	    !(packet[4] == 0xe9 && packet[5] == 0xfc)) {
+		packet[2] = 4 + 200;
+		memset(packet + 7, 0, 200);
+		return 7 + 200;
+	}
+	/*
+	 * 0xfe3b (low-power core statistics, 11-17) keeps the controller's own "unknown" (status 1): with status 0 16.6.1's
+	 * _BCM_LowPowerCoreStatsEventParser reads a record of ~60 counters in unrolled loops (bcm_vsc.c 765-825+; 200 zero
+	 * bytes ran out at 823) and asserts; with a non-zero status it reads nothing (bluetoothd __text+0x12c6a4: cbz w0) but the caller restarts.
+	 */
+	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[4] == 0x3b && packet[5] == 0xfe) {
+		/* (not so: a failed status is "EnhancedProfilingStats VSC failed with status 701" and bluetoothd restarts,
+		 * reason 701 -- done, then, with the most an event carries, 251 zero bytes: 200 ran out at line 823 of 825) */
+		packet[2] = 4 + 251;
+		packet[6] = 0x00;
+		memset(packet + 7, 0, 251);
+		return 7 + 251;
+	}
 	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 && (packet[5] >> 2) == 0x3f && packet[6] == 0x01) {
-		const bool antenna = packet[4] == 0xe2 && packet[5] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36 ||
-		    skel_vsc_sub == 0x0d);
+		const bool antenna = packet[4] == 0xe2 && packet[5] == 0xfc;   /* (every sub-command: see above) */
 		const bool cal = packet[4] == 0x1b && packet[5] == 0xfd;
 		const bool data = antenna || cal || (packet[4] == 0x48 && packet[5] == 0xfd);
-		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 0));
+		/* (the rest, 11-17: 200 zero bytes, not none -- 0xfe3b comes here, status 1, and 16.6.1's
+		 * _BCM_LowPowerCoreStatsEventParser asserts >= 4 bytes; see the branch above) */
+		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 200));   /* (200: 0xfe3b's parser reads ~36 32-bit counters, bcm_vsc.c lines 765-805; 64 ran out at 784) */
 		static uint32_t said;
 
-		if (said++ < 16) {
+		if (said++ < 64) {
 			say("vendor command %#x: the controller says it does not know it; answered as done (%u bytes of data)",
 			    packet[4] | (packet[5] << 8), extra);
 		}
@@ -633,6 +671,22 @@ skel_bridge(void)
 				memset(skel_frame + sizeof(diag), 0, 16);
 				skel_dump("in (ours)", skel_frame, sizeof(diag) + 16, &skel_said_in);
 				hakios_btsk_deliver(skel_frame, sizeof(diag) + 16);
+				continue;
+			}
+			/*
+			 * 0xfdf0 (BD_VSC_OLYMPIC_READ_ENHANCED_PROFILING_STATS, 11-17) is not given to the controller either: the
+			 * BCM4383 answers it with a vendor event (0xff 0x1b) and then streams what looks like a memory dump (0xff 0x57,
+			 * ~1 MB), never a Command Complete -- bluetoothd waits 15 s ("timedout waiting for controller"), says the
+			 * firmware crashed and restarts (reason 3602), and the controller answers nothing more, not even a Reset.
+			 * Answered here as done with the most an event carries, 251 zero bytes (no counters).
+			 */
+			if (n >= 4 && skel_packet[0] == 1 && skel_packet[1] == 0xf0 && skel_packet[2] == 0xfd) {
+				static const uint8_t stats[7] = { 0x04, 0x0e, 0xff, 0x01, 0xf0, 0xfd, 0x00 };
+
+				memcpy(skel_frame, stats, sizeof(stats));
+				memset(skel_frame + sizeof(stats), 0, 251);
+				skel_dump("in (ours)", skel_frame, sizeof(stats) + 251, &skel_said_in);
+				hakios_btsk_deliver(skel_frame, sizeof(stats) + 251);
 				continue;
 			}
 			if (p->wake != NULL) {
