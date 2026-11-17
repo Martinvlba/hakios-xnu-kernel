@@ -260,20 +260,9 @@ skel_quirks(uint8_t *packet, unsigned length)
 	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 && (packet[5] >> 2) == 0x3f && packet[6] == 0x01) {
 		const bool antenna = packet[4] == 0xe2 && packet[5] == 0xfc && (skel_vsc_sub == 0x15 || skel_vsc_sub == 0x36 ||
 		    skel_vsc_sub == 0x0d);
-		/*
-		 * 0xfce2 sub-command 0x42 is BD_VSC_OLYMPIC_SET_DIAG_DEBUG_EVENT_BEHAVIOR. On 16.6.1's bluetoothd (20G81,
-		 * d16ap) -- unlike 16.7.16's, where Bluetooth worked -- its Command-Complete handler insists on at least two
-		 * bytes of return data (disassembled: the parser at bluetoothd __text+0x12bf94 does ldrh len, sub read-offset,
-		 * cmp #1 / b.gt, else it reports VSCommandStall and restarts). The BCM4383 answers the command "unknown" with
-		 * no data, so bluetoothd stalls here and relaunches every ~16 s ("SET_DIAG_DEBUG_EVENT_BEHAVIOR timedout
-		 * waiting for controller"). Give it a non-empty payload, as the antenna sub-commands get; the handler only
-		 * forwards the bytes to its completion (it does not require particular values), so zeros satisfy it.
-		 * (sub-commands 0x2a and 0x3a are fire-and-forget on this build and need nothing.)
-		 */
-		const bool diag = packet[4] == 0xe2 && packet[5] == 0xfc && skel_vsc_sub == 0x42;
 		const bool cal = packet[4] == 0x1b && packet[5] == 0xfd;
-		const bool data = antenna || diag || cal || (packet[4] == 0x48 && packet[5] == 0xfd);
-		const unsigned extra = cal ? 64 : ((antenna || diag) ? 16 : (data ? 1 : 0));
+		const bool data = antenna || cal || (packet[4] == 0x48 && packet[5] == 0xfd);
+		const unsigned extra = cal ? 64 : (antenna ? 16 : (data ? 1 : 0));
 		static uint32_t said;
 
 		if (said++ < 16) {
@@ -626,6 +615,24 @@ skel_bridge(void)
 				memcpy(skel_frame, answer, sizeof(answer));
 				skel_dump("in (ours)", skel_frame, sizeof(answer), &skel_said_in);
 				hakios_btsk_deliver(skel_frame, sizeof(answer));
+				continue;
+			}
+			/*
+			 * 0xfce2 sub-command 0x42 (BD_VSC_OLYMPIC_SET_DIAG_DEBUG_EVENT_BEHAVIOR) is not given to the controller.
+			 * 16.6.1's bluetoothd (unlike 16.7.16's, where BT worked) requires its Command Complete to carry at least
+			 * two bytes of return data -- its parser (bluetoothd __text+0x12bf94: ldrh len, sub read-offset, cmp #1,
+			 * b.gt) reports VSCommandStall and restarts every ~16 s otherwise ("SET_DIAG_DEBUG_EVENT_BEHAVIOR timedout
+			 * waiting for controller"). The BCM4383 answers Apple's vendor commands "unknown" with no data, so answer
+			 * it here as done with 16 bytes of zero data (the handler forwards the bytes to its completion without
+			 * requiring particular values). Answered on the TX path like 0x204a, so no fold into skel_quirks' bitmask.
+			 */
+			if (n >= 5 && skel_packet[0] == 1 && skel_packet[1] == 0xe2 && skel_packet[2] == 0xfc && skel_packet[4] == 0x42) {
+				static const uint8_t diag[7] = { 0x04, 0x0e, 0x14, 0x01, 0xe2, 0xfc, 0x00 };
+
+				memcpy(skel_frame, diag, sizeof(diag));
+				memset(skel_frame + sizeof(diag), 0, 16);
+				skel_dump("in (ours)", skel_frame, sizeof(diag) + 16, &skel_said_in);
+				hakios_btsk_deliver(skel_frame, sizeof(diag) + 16);
 				continue;
 			}
 			if (p->wake != NULL) {
