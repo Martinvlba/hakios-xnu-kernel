@@ -3933,6 +3933,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_identity(&w, identity_haptics, sizeof(identity_haptics) / sizeof(identity_haptics[0]), identity_haptics_data);
 	dt_end(&w);
 	/*
+	 * and its audio: "acoustic-id" names the directory of the phone's own sound tunings -- VirtualAudio compiles
+	 * /Library/Audio/Tunings/AID<acoustic-id>/VAD/speaker_general.dspg for the speaker; without this node it reads 0,
+	 * finds no AID0 and plays silence ("DSPGraph is null", 11-17; the iPhone 13 mini's is 8001). (The iPhone X has
+	 * no such node: its table is a placeholder, one empty property.)
+	 */
+	dt_begin(&w, "audio");
+	dt_identity(&w, identity_audio, sizeof(identity_audio) / sizeof(identity_audio[0]), identity_audio_data);
+	dt_end(&w);
+	/*
 	 * and of its camera what is here: with torch=N the flash (MobileGestalt's camera-flash; without
 	 * it Control Center has no flashlight); with cam=5 the node itself, for a camera there is (with it
 	 * MobileGestalt's video-camera). The rest of the iPhone's camera is not here, nor said to be.

@@ -94,7 +94,11 @@ BIG_PROGRAM = 10 << 20           # daemons bigger than this (locationd, lskdd, .
 # sound, outside the directories above: the virtual audio device, a plug-in that all of mediaserverd's
 # audio goes through, with its tunings (signal processing chains) for this model and for any, and the
 # system's own sounds. Not the neural networks among the tunings, nor the sounds of the watch.
-AUDIO = ('Library/Audio/Plug-Ins/', 'Library/Audio/Tunings/D22/', 'Library/Audio/Tunings/Generic/',
+# (the device's own tunings: the iPhone X's under D22/; the iPhone 13 mini's (16.6.1) under AID8001/ -- its
+# /product/audio "acoustic-id", 0x1f41: VirtualAudio compiles Tunings/AID<id>/VAD/speaker_general.dspg for the
+# speaker and plays silence without it ("DSPGraph is null", 11-17) -- and D16/ (haptics))
+AUDIO = ('Library/Audio/Plug-Ins/', 'Library/Audio/Tunings/D22/', 'Library/Audio/Tunings/AID8001/',
+         'Library/Audio/Tunings/D16/', 'Library/Audio/Tunings/Generic/',
          'System/Library/Audio/UISounds/')
 SKIP_AUDIO = ('System/Library/Audio/UISounds/nano/',)
 KEEP_LANG = ('en', 'Base', 'English', 'en_US', 'en_GB')

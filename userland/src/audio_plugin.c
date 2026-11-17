@@ -66,6 +66,7 @@
 #include <unistd.h>
 
 #include "hakios.audio.h"
+#include "ios_build.h"           /* which iOS build: HAKIOS_IOS_20G81 for 16.6.1 d16ap (build.sh) */
 
 /* ---- the AudioServerPlugIn interface (macOS: CoreAudio/AudioServerPlugIn.h, AudioHardwareBase.h) ---- */
 
@@ -214,8 +215,19 @@ struct device {
 };
 
 static struct device devices[] = {
+	/*
+	 * The speaker's input is its amplifiers' telemetry. 16.6.1 d16ap's speaker chain (Tunings/AID8001/VAD/
+	 * speaker_general.dspg: AUSpeakerProtectionV3) takes four channels on it -- voltage and current for each of the two
+	 * speakers -- and with two threw on every cycle ("mDataByteSize is too small ... for input 1. mDataByteSize 8192
+	 * expectedByteSize 16384") and played silence (11-17). All zero here: the protection runs open loop ("Ignoring
+	 * telemetry"). The iPhone X's chain took two.
+	 */
 	{ .object = OBJECT_SPEAKER, .uid = CFSTR("Speaker"), .output = OBJECT_SPEAKER_OUTPUT, .input = OBJECT_SPEAKER_INPUT,
+#if defined(HAKIOS_IOS_20G81)
+	  .output_channels = HAKIOS_AUDIO_CHANNELS, .input_channels = 4 },
+#else
 	  .output_channels = HAKIOS_AUDIO_CHANNELS, .input_channels = 2 },
+#endif
 	{ .object = OBJECT_HAWKING, .uid = CFSTR("Hawking"), .input = OBJECT_HAWKING_INPUT, .input_channels = 1 },
 	{ .object = OBJECT_ACTUATOR, .uid = CFSTR("Actuator"), .output = OBJECT_ACTUATOR_OUTPUT, .output_channels = 1 },
 	{ .object = OBJECT_CODEC, .uid = CFSTR("Codec"), .input = OBJECT_CODEC_INPUT, .input_channels = 1 },
