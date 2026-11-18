@@ -192,13 +192,17 @@ static pthread_mutex_t said_lock = PTHREAD_MUTEX_INITIALIZER;
 static void
 say_value(const char *what, CFStringRef key, CFTypeRef value)
 {
-	char name[160] = "?", text[300] = "";
+	char name[160] = "?", text[1500] = "";
 
 	CFStringGetCString(key, name, sizeof(name), kCFStringEncodingUTF8);
 	if (value != NULL) {
 		CFStringRef d = CFCopyDescription(value);
+		CFIndex used = 0;
 
-		CFStringGetCString(d, text, sizeof(text), kCFStringEncodingUTF8);
+		/* (as much as fits: CFStringGetCString gives nothing at all of a description longer than the buffer) */
+		CFStringGetBytes(d, CFRangeMake(0, CFStringGetLength(d)), kCFStringEncodingUTF8, '?', false, (UInt8 *)text,
+		    sizeof(text) - 1, &used);
+		text[used] = 0;
 		CFRelease(d);
 		for (char *c = text; *c; c++) {
 			*c = *c == '\n' ? ' ' : *c;
@@ -460,6 +464,7 @@ struct stream {
 	CFArrayRef      formats;
 	CFDictionaryRef supported;
 	CFDictionaryRef colour_info;    /* from VideoOutputsColorInfo */
+	int             colour_space;   /* from ColorSpace: 0 sRGB, otherwise Display P3 */
 	CFDictionaryRef metadata;       /* the last frame's (frame_metadata()), for a buffer that has none of its own */
 	pthread_mutex_t metadata_lock;  /* (not `lock': AddAttachmentsToSampleBuffer may come while a frame is given out) */
 	unsigned        stills_wanted;  /* photographs asked for by StillImageCaptureNow, not yet given */
@@ -550,6 +555,13 @@ stream_copy_property(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef allocato
 		}
 		pthread_mutex_unlock(&s->lock);
 		value = d;
+		{
+			static int said_gets;
+
+			if (said_gets++ < 10) {
+				say_value("stream: read", key, d);
+			}
+		}
 	} else if (key_is(key, "VideoOutputsColorInfo")) {
 		/*
 		 * ReadWrite, and the capture graph READS it before it starts the session:
@@ -560,9 +572,45 @@ stream_copy_property(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef allocato
 		 * the output's colour space is 0), and sRGB is the only one this stream offers, so what
 		 * the graph set is given back as it is.
 		 */
+		/*
+		 * (11-18, Darwin 16.6.1: there the check is made for sRGB too -- its colour space properties are
+		 * 1, not 0 -- and what is read here must EQUAL, for each output in use, the attachments
+		 * +[BWVideoFormat pixelBufferAttachmentsForColorSpaceProperties:] names for the session's colour
+		 * space, or _bringStreamUpToDate fails with -12780, the shared buffer pools are not made and the
+		 * session stops before its graph starts, for ever again. So the stream says what an ISP would
+		 * say of its outputs: the primaries of the colour space it was set to (ColorSpace 0: sRGB's),
+		 * the 601 matrix its 4:2:0 pictures are made with and the 709 transfer function.)
+		 */
 		pthread_mutex_lock(&s->lock);
-		value = s->colour_info != NULL ? CFRetain(s->colour_info) : new_dict();
+		if (s->colour_info != NULL) {
+			value = CFRetain(s->colour_info);
+		} else {
+			static const char *const all[] = { "PrimaryScaler", "SecondaryScaler", "IntermediateTap", "StillImage",
+				                           "StillImageIntermediateTap", "StillImageQuadra" };
+			CFMutableDictionaryRef d = (CFMutableDictionaryRef)new_dict();
+
+			for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+				CFMutableDictionaryRef one = (CFMutableDictionaryRef)new_dict();
+				CFStringRef name = CFStringCreateWithCString(NULL, all[i], kCFStringEncodingUTF8);
+
+				CFDictionarySetValue(one, kCVImageBufferColorPrimariesKey,
+				    s->colour_space != 0 ? kCVImageBufferColorPrimaries_P3_D65 : kCVImageBufferColorPrimaries_ITU_R_709_2);
+				CFDictionarySetValue(one, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4);
+				CFDictionarySetValue(one, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2);
+				CFDictionarySetValue(d, name, one);
+				CFRelease(name);
+				CFRelease(one);
+			}
+			value = d;
+		}
 		pthread_mutex_unlock(&s->lock);
+		{
+			static int said_colour;
+
+			if (said_colour++ < 3) {
+				say_value("stream: read", key, value);
+			}
+		}
 	} else if (key_is(key, "SupportedPropertiesDictionary")) {
 		value = CFRetain(s->supported);
 	} else if (key_is(key, "FocalLength")) {
@@ -701,8 +749,11 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 	}
 	if (key_is(key, "VideoOutputConfigurations") || key_is(key, "VideoOutputsEnabled") || key_is(key, "VideoOutputHandlers")) {
 		bool configs = key_is(key, "VideoOutputConfigurations"), enabled = key_is(key, "VideoOutputsEnabled");
+		static int said_sets;
 
-		say_once("stream: set", key, value);
+		if (said_sets++ < 16) {         /* (each time, not once: the graph sets them again and again as it builds) */
+			say_value("stream: set", key, value);
+		}
 		if (value == NULL || CFGetTypeID(value) != CFDictionaryGetTypeID()) {
 			return 0;
 		}
@@ -748,6 +799,18 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		free(keys);
 		free(values);
 		pthread_mutex_unlock(&s->lock);
+		return 0;
+	}
+	if (key_is(key, "ColorSpace")) {
+		int64_t v = 0;
+
+		if (value != NULL && CFGetTypeID(value) == CFNumberGetTypeID()) {
+			CFNumberGetValue(value, kCFNumberSInt64Type, &v);
+		}
+		pthread_mutex_lock(&s->lock);
+		s->colour_space = (int)v;
+		pthread_mutex_unlock(&s->lock);
+		say_once("stream: set", key, value);
 		return 0;
 	}
 	if (key_is(key, "StillImageCaptureNow")) {

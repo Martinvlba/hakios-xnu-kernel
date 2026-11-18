@@ -84,6 +84,10 @@ extern const void *_dyld_get_shared_cache_range(size_t *length);
 #endif
 
 static uintptr_t slide;
+#if HAKIOS_CAMERA_DEBUG
+static void patch_signal_error(void);
+static void hook_session(void);
+#endif
 
 /* +[BWCoreImageFilterRenderer prewarmPortraitFilterVersion:semanticStyleFilters:] */
 static void
@@ -156,6 +160,10 @@ shared_vendor(id self, SEL selector)
 			    (void *)hakios_camera_device_create);
 			say("hakios: mediaserverd: the camera's device vendor %s\n", camera_vendor ? "made (camera_device.c)" :
 			    "CANNOT BE MADE");
+#if HAKIOS_CAMERA_DEBUG
+			patch_signal_error();
+			hook_session();
+#endif
 		}
 		pthread_mutex_unlock(&lock);
 		return camera_vendor;
@@ -606,7 +614,8 @@ take_back_streams_logged(id self, SEL selector, id streams, id device)
 
 		said++;
 		for (int i = 1; i < n && at < (int)sizeof(line) - 24; i++) {
-			at += snprintf(line + at, sizeof(line) - (size_t)at, " %#lx", (unsigned long)((uintptr_t)frames[i] - slide));
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %#lx",
+			    (unsigned long)(((uintptr_t)frames[i] & 0x0000007fffffffffUL) - slide));
 		}
 		say("hakios: mediaserverd: streams taken back, called from (unslid):%s\n", line);
 	}
@@ -633,6 +642,696 @@ backings_init_logged(id self, SEL selector, id dictionaries, id common, id hevc,
 	}
 	return ((id (*)(id, SEL, id, id, id, id))original_backings_init)(self, selector, dictionaries, common, hevc, h264);
 }
+
+/*
+ * ---- DIAGNOSTICS OF THE CAPTURE SESSION (20G81), built only with HAKIOS_CAMERA_DEBUG (build.sh CAMERA_DEBUG=1) ----
+ *
+ * How a session that never showed a picture was found out (11-18): CMCapture says nothing this image can read -- its
+ * log has no reader, its error reporters are reached from inside the shared cache where interposing does not go, and
+ * most of its methods are direct (no selector to replace). So: CoreMedia's FigSignalErrorAt and assertion reporters
+ * patched at their first instructions; BWGraph's methods wrapped (nodes added, commit, start, dealloc); and CMCapture's
+ * C functions entered through trampolines (hook_function), each saying what it returns. That chain led from
+ * "startGraph returns -12780" through allocateSharedBufferPools and _bringStreamUpToDate to
+ * _verifyColorSpacePropertiesForAllOutputs: the stream's VideoOutputsColorInfo (camera_device.c).
+ * All of it costs time and writes over shared-cache text (private copies): never in a build that is not looking.
+ */
+#if HAKIOS_CAMERA_DEBUG
+/*
+ * A probe (20G81): what the dimension getters of FigCaptureSourceVideoFormat answer for the formats in use -- the graph
+ * builder sizes its outputs by them, and a zero there is a session that never starts. Each selector's answers are said
+ * the first few times they differ.
+ */
+static void
+probe_format_dimensions(void)
+{
+	static const char *const selectors[] = { "previewDimensions", "sensorDimensions", "sensorCropDimensions", "postGDCCropDimensions",
+		                                 "nativeDimensions", "preGDCSensorCropDimensions", "geometricDistortionCorrectedNativeDimensions",
+		                                 "cropDimensionsForFES", "fesInputCropDimensions", "sourceCropAspectRatio" };
+	static bool done;
+	Class cls = objc_getClass("FigCaptureSourceVideoFormat");
+
+	if (done || cls == NULL || !camera) {
+		return;
+	}
+	done = true;
+	for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
+		SEL selector = sel_registerName(selectors[i]);
+		Method method = class_getInstanceMethod(cls, selector);
+		const char *name = selectors[i];
+		IMP original;
+
+		if (method == NULL) {
+			say("hakios: mediaserverd: probe: no -[FigCaptureSourceVideoFormat %s]\n", name);
+			continue;
+		}
+		original = method_getImplementation(method);
+		method_setImplementation(method, imp_implementationWithBlock((id)^uint64_t (id self) {
+			static uint64_t seen[10][6];
+			static int count[10];
+			uint64_t r = ((uint64_t (*)(id, SEL))original)(self, selector);
+			bool known = false;
+
+			for (int k = 0; k < count[i]; k++) {
+				known |= seen[i][k] == r;
+			}
+			if (!known && count[i] < 6) {
+				seen[i][count[i]++] = r;
+				say("hakios: mediaserverd: probe: %s = %d x %d\n", name, (int)(uint32_t)r, (int)(uint32_t)(r >> 32));
+			}
+			return r;
+		}));
+	}
+	say("hakios: mediaserverd: probe: the format's dimension getters are watched\n");
+}
+
+/*
+ * A diagnostic: CoreMedia's FigSignalErrorAt, through which CMCapture signals its failures (they go to a log this image
+ * does not show). Each call site's first error is said, with where it came from (the cache's address: tools/dsc-symbols.py
+ * names it). Only with the kernel's camera, and only the first 60 sites.
+ */
+extern int32_t FigSignalErrorAt(int32_t, void *, void *, void *, void *, void *, void *, void *);
+
+static int32_t
+signal_error_logged(int32_t error, void *a, void *b, void *c, void *d, void *e, void *f, void *g)
+{
+	static uintptr_t sites[60];
+	static int count;
+	/* (arm64e: the return address carries its signature in the top bits) */
+	uintptr_t from = ((uintptr_t)__builtin_return_address(0) & 0x0000007fffffffffUL) - slide;
+
+	if (camera && error != 0 && count < 60) {
+		bool known = false;
+
+		for (int i = 0; i < count; i++) {
+			known |= sites[i] == from;
+		}
+		if (!known) {
+			Dl_info where = { 0 };
+			void *raw = (void *)((uintptr_t)__builtin_return_address(0) & 0x0000007fffffffffUL);
+
+			sites[count++] = from;
+			if (dladdr(raw, &where) != 0 && where.dli_fname != NULL) {
+				say("hakios: mediaserverd: FigSignalErrorAt(%d) from %s + %#lx (%s), cache address %#lx\n", error, where.dli_fname,
+				    (unsigned long)((uintptr_t)raw - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?",
+				    (unsigned long)from);
+			} else {
+				say("hakios: mediaserverd: FigSignalErrorAt(%d) from %#lx\n", error, (unsigned long)from);
+			}
+		}
+	}
+	return FigSignalErrorAt(error, a, b, c, d, e, f, g);
+}
+
+__attribute__((used)) static struct {
+	const void *ours, *theirs;
+} signal_error_interpose __attribute__((section("__DATA,__interpose"))) = {
+	(const void *)signal_error_logged, (const void *)FigSignalErrorAt
+};
+
+/*
+ * A diagnostic: what CMCapture writes to the system log (which this image has no reader for). The format string of
+ * each os_log call made from CMCapture is said once, with its level; the arguments are not decoded, except that a
+ * first argument that is a 32-bit number is said too (an error code, most of the time). At most 400 different lines.
+ */
+#include <os/log.h>
+
+static void
+capture_log_said(void *dso, os_log_type_t type, const char *format, const uint8_t *buf, uint32_t size)
+{
+	static uint64_t seen[900];
+	static int count;
+	static const void *wanted[4], *unwanted[48];
+	static int n_wanted, n_unwanted;
+	char line[420];
+	int at;
+	uint64_t hash = 1469598103934665603ULL;
+	bool ours = false;
+
+	if (!camera || format == NULL || count >= 900) {
+		return;
+	}
+	for (int i = 0; i < n_wanted; i++) {
+		ours |= wanted[i] == dso;
+	}
+	if (!ours) {
+		Dl_info where = { 0 };
+
+		for (int i = 0; i < n_unwanted; i++) {
+			if (unwanted[i] == dso) {
+				return;
+			}
+		}
+		if (dladdr(dso, &where) == 0 || where.dli_fname == NULL ||
+		    (strstr(where.dli_fname, "CMCapture") == NULL && strstr(where.dli_fname, "CoreMedia.framework") == NULL) ||
+		    n_wanted >= 4) {
+			if (n_unwanted < 48) {
+				unwanted[n_unwanted++] = dso;
+			}
+			return;
+		}
+		wanted[n_wanted++] = dso;
+	}
+	at = snprintf(line, sizeof(line), "(%d) %.120s", (int)type, format);
+	/* the buffer: summary, count, then {descriptor, size, bytes} for each argument: strings and 32-bit numbers said */
+	if (buf != NULL && size >= 2) {
+		uint32_t off = 2;
+
+		for (int i = 0; i < buf[1] && off + 2 <= size && at < (int)sizeof(line) - 40; i++) {
+			uint8_t kind = buf[off] >> 4, length = buf[off + 1];
+
+			if (off + 2 + length > size) {
+				break;
+			}
+			if (kind == 2 && length == 8) {
+				const char *text = NULL;
+
+				memcpy(&text, buf + off + 2, 8);
+				at += snprintf(line + at, sizeof(line) - (size_t)at, " | %.240s", text ? text : "(null)");
+			} else if (kind == 0 && length == 4) {
+				int32_t v;
+
+				memcpy(&v, buf + off + 2, 4);
+				at += snprintf(line + at, sizeof(line) - (size_t)at, " | %d", v);
+			}
+			off += 2u + length;
+		}
+	}
+	for (const char *c = line; *c != 0; c++) {
+		if (*c < '0' || *c > '9') {     /* (numbers left out: the same line with another pointer or time is the same line) */
+			hash = (hash ^ (uint8_t)*c) * 1099511628211ULL;
+		}
+	}
+	for (int i = 0; i < count; i++) {
+		if (seen[i] == hash) {
+			return;
+		}
+	}
+	seen[count++] = hash;
+	say("hakios: mediaserverd: capture log %s\n", line);
+}
+
+extern void _os_log_impl(void *, os_log_t, os_log_type_t, const char *, uint8_t *, uint32_t);
+extern void _os_log_error_impl(void *, os_log_t, os_log_type_t, const char *, uint8_t *, uint32_t);
+extern void _os_log_fault_impl(void *, os_log_t, os_log_type_t, const char *, uint8_t *, uint32_t);
+extern void _os_log_debug_impl(void *, os_log_t, os_log_type_t, const char *, uint8_t *, uint32_t);
+
+#define LOG_WATCHED(name)                                                                                              \
+	static void watched##name(void *dso, os_log_t log, os_log_type_t type, const char *format, uint8_t *buf,       \
+	    uint32_t size)                                                                                             \
+	{                                                                                                              \
+		capture_log_said(dso, type, format, buf, size);                                                        \
+		name(dso, log, type, format, buf, size);                                                               \
+	}                                                                                                              \
+	__attribute__((used)) static struct {                                                                          \
+		const void *ours, *theirs;                                                                             \
+	} interpose##name __attribute__((section("__DATA,__interpose"))) = { (const void *)watched##name,              \
+		                                                             (const void *)name };
+
+/* (with nobody reading the log every level is "not enabled" and the calls above are never made: all enabled, for this) */
+static bool
+log_type_always_enabled(os_log_t log, os_log_type_t type)
+{
+	return camera ? true : os_log_type_enabled(log, type);
+}
+
+__attribute__((used)) static struct {
+	const void *ours, *theirs;
+} interpose_log_enabled __attribute__((section("__DATA,__interpose"))) = { (const void *)log_type_always_enabled,
+	                                                                   (const void *)os_log_type_enabled };
+
+LOG_WATCHED(_os_log_impl)
+LOG_WATCHED(_os_log_error_impl)
+LOG_WATCHED(_os_log_fault_impl)
+LOG_WATCHED(_os_log_debug_impl)
+
+/*
+ * A diagnostic: FigSignalErrorAt as CMCapture calls it. Interposing does not reach a call from one image of the shared
+ * cache into another (they are bound when the cache is built), so the function's own first instructions are replaced
+ * by a jump to signal_error_patched (a private copy of the page). It says each call site's first error and returns the
+ * error as the function does; what the function would have logged is lost, which nobody reads here anyway.
+ */
+#include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
+
+static int32_t
+signal_error_patched(int32_t error)
+{
+	static uintptr_t sites[120];
+	static int count;
+	uintptr_t from = ((uintptr_t)__builtin_return_address(0) & 0x0000007fffffffffUL) - slide;
+
+	if (error != 0 && count < 120) {
+		bool known = false;
+
+		for (int i = 0; i < count; i++) {
+			known |= sites[i] == from;
+		}
+		if (!known) {
+			sites[count++] = from;
+			say("hakios: mediaserverd: FigSignalErrorAt(%d) at cache address %#lx\n", error, (unsigned long)from);
+		}
+	}
+	return error;
+}
+
+/* (CoreMedia's assertion reporters, the same way: who complains, and the numbers it complains with) */
+static void
+assert_patched(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static uintptr_t sites[160];
+	static int count;
+	uintptr_t from = ((uintptr_t)__builtin_return_address(0) & 0x0000007fffffffffUL) - slide;
+
+	(void)a0;
+	(void)a1;
+	if (count < 160) {
+		for (int i = 0; i < count; i++) {
+			if (sites[i] == from) {
+				return;
+			}
+		}
+		sites[count++] = from;
+		say("hakios: mediaserverd: FigDebugAssert at cache address %#lx (%ld %ld %ld %ld)\n", (unsigned long)from, (long)(int32_t)a2,
+		    (long)(int32_t)a3, (long)(int32_t)a4, (long)(int32_t)a5);
+	}
+}
+
+static bool
+patch_function(uintptr_t at, void *to)
+{
+	uintptr_t target = (uintptr_t)__builtin_ptrauth_strip(to, 0);
+	uint32_t code[4];
+	vm_address_t page;
+
+	at += slide;
+	code[0] = 0x58000050;           /* ldr x16, #8 */
+	code[1] = 0xd61f0200;           /* br x16 */
+	memcpy(&code[2], &target, 8);
+	page = at & ~(vm_address_t)(vm_page_size - 1);
+	if (vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) {
+		return false;
+	}
+	memcpy((void *)at, code, sizeof(code));
+	vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+	sys_icache_invalidate((void *)at, sizeof(code));
+	return true;
+}
+
+static void
+patch_signal_error(void)
+{
+	static bool done;
+
+	if (done || !camera || AT(0UL, 0UL, 1UL) == 0 || slide == 0) {
+		return;
+	}
+	done = true;
+	say("hakios: mediaserverd: patched: FigSignalErrorAt %d, figDebugAssertCommon %d, FigDebugAssert2 %d\n",
+	    patch_function(AT(0UL, 0UL, 0x1921fc7c4UL), (void *)signal_error_patched),
+	    patch_function(AT(0UL, 0UL, 0x19224d238UL), (void *)assert_patched),
+	    patch_function(AT(0UL, 0UL, 0x19224d434UL), (void *)assert_patched));
+}
+
+/*
+ * A diagnostic: the capture graph being built. Each node added, each connection refused, the commit, the start and the
+ * error status the graph is given (with who gave it), so that a session that never runs says where it stopped.
+ */
+static void
+said_from(const char *what)
+{
+	void *frames[14];
+	int n = backtrace(frames, 14), at;
+	char line[400];
+
+	at = snprintf(line, sizeof(line), "hakios: mediaserverd: graph: %s, called from (cache addresses):", what);
+	for (int i = 2; i < n && at < (int)sizeof(line) - 24; i++) {
+		at += snprintf(line + at, sizeof(line) - (size_t)at, " %#lx",
+		    (unsigned long)(((uintptr_t)frames[i] & 0x0000007fffffffffUL) - slide));
+	}
+	say("%s\n", line);
+}
+
+static void
+probe_graph(void)
+{
+	static bool done;
+	Class cls = objc_getClass("BWGraph");
+	Method m;
+
+	if (done || cls == NULL || !camera) {
+		return;
+	}
+	done = true;
+	if ((m = class_getInstanceMethod(cls, sel_registerName("addNode:error:"))) != NULL) {
+		IMP original = method_getImplementation(m);
+		SEL selector = method_getName(m);
+
+		method_setImplementation(m, imp_implementationWithBlock((id)^signed char (id self, id node, id *error) {
+			static int said;
+			id mine = NULL;
+			signed char ok = ((signed char (*)(id, SEL, id, id *))original)(self, selector, node, error ? error : &mine);
+
+			if (said < 300 || !ok) {
+				said++;
+				say("hakios: mediaserverd: graph: node %s%s\n", node ? class_getName(object_getClass(node)) : "(nil)",
+				    ok ? "" : ": NOT ADDED");
+				if (!ok) {
+					say("hakios: mediaserverd: graph:   error %s\n", describe(error ? *error : mine));
+					said_from("a node not added");
+				}
+			}
+			return ok;
+		}));
+	}
+	if ((m = class_getInstanceMethod(cls, sel_registerName("connectOutput:toInput:pipelineStage:"))) != NULL) {
+		IMP original = method_getImplementation(m);
+		SEL selector = method_getName(m);
+
+		method_setImplementation(m, imp_implementationWithBlock((id)^signed char (id self, id output, id input, id stage) {
+			signed char ok = ((signed char (*)(id, SEL, id, id, id))original)(self, selector, output, input, stage);
+
+			if (!ok) {
+				say("hakios: mediaserverd: graph: NOT CONNECTED: %s to %s\n", describe(output), describe(input));
+				said_from("a connection refused");
+			}
+			return ok;
+		}));
+	}
+	if ((m = class_getInstanceMethod(cls, sel_registerName("commitConfigurationWithID:error:"))) != NULL) {
+		IMP original = method_getImplementation(m);
+		SEL selector = method_getName(m);
+
+		method_setImplementation(m, imp_implementationWithBlock((id)^signed char (id self, long long number, id *error) {
+			static int said;
+			id mine = NULL;
+			signed char ok = ((signed char (*)(id, SEL, long long, id *))original)(self, selector, number, error ? error : &mine);
+
+			if (said++ < 12) {
+				say("hakios: mediaserverd: graph: commit %lld: %s %s\n", number, ok ? "done" : "FAILED",
+				    ok ? "" : describe(error ? *error : mine));
+			}
+			return ok;
+		}));
+	}
+	if ((m = class_getInstanceMethod(cls, sel_registerName("start:"))) != NULL) {
+		IMP original = method_getImplementation(m);
+		SEL selector = method_getName(m);
+
+		method_setImplementation(m, imp_implementationWithBlock((id)^signed char (id self, id *error) {
+			static int said;
+			id mine = NULL;
+			signed char ok = ((signed char (*)(id, SEL, id *))original)(self, selector, error ? error : &mine);
+
+			if (said++ < 12) {
+				say("hakios: mediaserverd: graph: start: %s %s\n", ok ? "done" : "FAILED", ok ? "" : describe(error ? *error : mine));
+			}
+			return ok;
+		}));
+	}
+	if ((m = class_getInstanceMethod(cls, sel_registerName("setErrorStatus:"))) != NULL) {
+		IMP original = method_getImplementation(m);
+		SEL selector = method_getName(m);
+
+		method_setImplementation(m, imp_implementationWithBlock((id)^void (id self, int status) {
+			static int said;
+
+			if (status != 0 && said++ < 6) {
+				char what[60];
+
+				snprintf(what, sizeof(what), "error status %d", status);
+				said_from(what);
+			}
+			((void (*)(id, SEL, int))original)(self, selector, status);
+		}));
+	}
+	if ((m = class_getInstanceMethod(cls, sel_registerName("dealloc"))) != NULL) {
+		IMP original = method_getImplementation(m);
+		SEL selector = method_getName(m);
+
+		method_setImplementation(m, imp_implementationWithBlock((id)^void (__unsafe_unretained id self) {
+			static int said;
+
+			if (said++ < 3) {
+				said_from("the graph is deallocated");
+			}
+			((void (*)(id, SEL))original)(self, selector);
+		}));
+	}
+	say("hakios: mediaserverd: graph: BWGraph is watched\n");
+}
+
+/*
+ * A diagnostic: the camera source node as the graph makes its configuration live -- which of its outputs are wanted,
+ * the names it knows the stream's outputs by, and what it works out for them.
+ */
+static void
+probe_source_node(void)
+{
+	static bool done;
+	Class cls = objc_getClass("BWMultiStreamCameraSourceNode");
+	Method m;
+
+	if (done || cls == NULL || !camera) {
+		return;
+	}
+	done = true;
+	if ((m = class_getInstanceMethod(cls, sel_registerName("prepareForCurrentConfigurationToBecomeLive"))) != NULL) {
+		IMP original = method_getImplementation(m);
+		SEL selector = method_getName(m);
+
+		method_setImplementation(m, imp_implementationWithBlock((id)^void (id self) {
+			static int said;
+
+			if (said++ < 2) {
+				static const char *const flags[] = { "previewOutputEnabled", "videoCaptureOutputEnabled", "stillImageOutputEnabled",
+					                             "depthOutputEnabled", "usesFirmwareStillImageOutput",
+					                             "geometricDistortionCorrectionOnStreamingOutputsEnabled", "primaryScalerDecoupled",
+					                             "videoStabilizationEnabled" };
+				id configuration = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("configuration"));
+				unsigned count = 0;
+				Ivar *ivars = class_copyIvarList(object_getClass(self), &count);
+
+				say("hakios: mediaserverd: source node: configuration %s\n",
+				    configuration ? class_getName(object_getClass(configuration)) : "(nil)");
+				for (size_t i = 0; configuration != NULL && i < sizeof(flags) / sizeof(flags[0]); i++) {
+					SEL flag = sel_registerName(flags[i]);
+
+					if (class_getInstanceMethod(object_getClass(configuration), flag) != NULL) {
+						say("hakios: mediaserverd: source node:   %s %d\n", flags[i],
+						    (int)((signed char (*)(id, SEL))objc_msgSend)(configuration, flag));
+					}
+				}
+				for (unsigned i = 0; i < count; i++) {
+					const char *name = ivar_getName(ivars[i]), *type = ivar_getTypeEncoding(ivars[i]);
+
+					if (name != NULL && type != NULL && type[0] == '@' &&
+					    (strstr(name, "OutputID") != NULL || strstr(name, "utputs") != NULL || strstr(name, "ormat") != NULL)) {
+						say("hakios: mediaserverd: source node:   %s = %.500s\n", name, describe(object_getIvar(self, ivars[i])));
+					} else if (name != NULL && type != NULL && (type[0] == 'i' || type[0] == 'B' || type[0] == 'c') &&
+					    (strstr(name, "ormatIndex") != NULL || strstr(name, "nabled") != NULL)) {
+						int v = 0;
+
+						memcpy(&v, (char *)(void *)self + ivar_getOffset(ivars[i]), type[0] == 'i' ? 4 : 1);
+						say("hakios: mediaserverd: source node:   %s = %d\n", name, v);
+					}
+				}
+				free(ivars);
+			}
+			((void (*)(id, SEL))original)(self, selector);
+		}));
+		say("hakios: mediaserverd: source node: watched\n");
+	}
+}
+
+/*
+ * A diagnostic: CMCapture's own session functions (C, reached by no selector), each entered through a jump written
+ * over its first four instructions, which are kept in a trampoline that goes on into the function: what the session
+ * tells its client, the states it goes through and who has the graph torn down.
+ */
+#include <sys/mman.h>
+
+typedef uintptr_t (*session_function)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+
+static session_function
+hook_function(uintptr_t at, void *to)
+{
+	uint32_t first[4], *trampoline;
+	uintptr_t back;
+
+	at += slide;
+	memcpy(first, (void *)at, sizeof(first));
+	for (int i = 0; i < 4; i++) {           /* (nothing there may depend on where it runs) */
+		uint32_t w = first[i];
+
+		if ((w & 0x1f000000) == 0x10000000 || (w & 0x7c000000) == 0x14000000 || (w & 0xff000010) == 0x54000000 ||
+		    (w & 0x7e000000) == 0x34000000 || (w & 0x7e000000) == 0x36000000 || (w & 0x3b000000) == 0x18000000) {
+			return NULL;
+		}
+	}
+	trampoline = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	if (trampoline == MAP_FAILED) {
+		return NULL;
+	}
+	memcpy(trampoline, first, sizeof(first));
+	trampoline[4] = 0x58000050;             /* ldr x16, #8 */
+	trampoline[5] = 0xd61f0200;             /* br x16 */
+	back = at + 16;
+	memcpy(&trampoline[6], &back, 8);
+	if (mprotect(trampoline, 0x4000, PROT_READ | PROT_EXEC) != 0) {
+		return NULL;
+	}
+	sys_icache_invalidate(trampoline, 32);
+	if (!patch_function(at - slide, to)) {
+		return NULL;
+	}
+	return (session_function)__builtin_ptrauth_sign_unauthenticated((void *)trampoline, 0, 0);
+}
+
+static session_function session_post, session_transition, session_teardown, session_start_graph, session_stop_graph;
+
+static uintptr_t
+session_post_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static int said;
+
+	if (said++ < 40) {
+		say("hakios: mediaserverd: session: notification %.80s %.700s\n", a1 ? describe((id)a1) : "(nil)",
+		    a2 ? describe((id)a2) : "");
+	}
+	return session_post(a0, a1, a2, a3, a4, a5);
+}
+
+static uintptr_t
+session_transition_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static int said;
+
+	if (said++ < 30) {
+		char what[80];
+
+		snprintf(what, sizeof(what), "session: status to %ld (%ld %ld)", (long)(int32_t)a1, (long)(int32_t)a2, (long)(int32_t)a3);
+		said_from(what);
+	}
+	return session_transition(a0, a1, a2, a3, a4, a5);
+}
+
+static uintptr_t
+session_teardown_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static int said;
+
+	if (said++ < 4) {
+		char what[80];
+
+		snprintf(what, sizeof(what), "session: the graph torn down (%ld %ld)", (long)(int32_t)a1, (long)(int32_t)a2);
+		said_from(what);
+	}
+	return session_teardown(a0, a1, a2, a3, a4, a5);
+}
+
+static uintptr_t
+session_start_graph_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static int said;
+	uintptr_t r = session_start_graph(a0, a1, a2, a3, a4, a5);
+
+	if (said++ < 8) {
+		say("hakios: mediaserverd: session: startGraph(%ld) returns %ld\n", (long)(int32_t)a1, (long)(int32_t)r);
+	}
+	return r;
+}
+
+static uintptr_t
+session_stop_graph_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static int said;
+
+	if (said++ < 4) {
+		char what[80];
+
+		snprintf(what, sizeof(what), "session: stopGraph (%ld %ld)", (long)(int32_t)a1, (long)(int32_t)a2);
+		said_from(what);
+	}
+	return session_stop_graph(a0, a1, a2, a3, a4, a5);
+}
+
+static session_function session_allowed, session_pools;
+
+static uintptr_t
+session_allowed_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static int said;
+	uintptr_t r = session_allowed(a0, a1, a2, a3, a4, a5);
+
+	if (said++ < 6) {
+		say("hakios: mediaserverd: session: checkClientSessionIsAllowedToRun returns %ld\n", (long)(int32_t)r);
+	}
+	return r;
+}
+
+static uintptr_t
+session_pools_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5)
+{
+	static int said;
+	uintptr_t r = session_pools(a0, a1, a2, a3, a4, a5);
+
+	if (said++ < 6) {
+		say("hakios: mediaserverd: session: allocateSharedBufferPools returns %ld\n", (long)(int32_t)r);
+	}
+	return r;
+}
+
+#define RETURN_WATCHED(name, text)                                                                                     \
+	static session_function name;                                                                                  \
+	static uintptr_t name##_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,           \
+	    uintptr_t a5)                                                                                              \
+	{                                                                                                              \
+		static int said;                                                                                       \
+		uintptr_t r = name(a0, a1, a2, a3, a4, a5);                                                            \
+		if (said++ < 8) {                                                                                      \
+			say("hakios: mediaserverd: session: " text " returns %ld\n", (long)(int32_t)r);                 \
+		}                                                                                                      \
+		return r;                                                                                              \
+	}
+
+RETURN_WATCHED(node_update_outputs, "_updateOutputConfigurations")
+RETURN_WATCHED(node_verify_colour, "_verifyColorSpacePropertiesForAllOutputs")
+RETURN_WATCHED(node_bring_up, "_bringStreamUpToDate")
+RETURN_WATCHED(node_update_metadata, "_updateMetadataConfigurations")
+RETURN_WATCHED(node_update_depth, "_updateDepthConfiguration")
+RETURN_WATCHED(node_update_detection, "_updateObjectDetectionMetadataRegistration")
+
+static void
+hook_session(void)
+{
+	static bool done;
+
+	if (done || !camera || AT(0UL, 0UL, 1UL) == 0 || slide == 0) {
+		return;
+	}
+	done = true;
+	session_post = hook_function(0x1a3d91ca4UL, (void *)session_post_logged);
+	session_transition = hook_function(0x1a3d38454UL, (void *)session_transition_logged);
+	session_teardown = hook_function(0x1a3d2c928UL, (void *)session_teardown_logged);
+	session_start_graph = hook_function(0x1a3d8a098UL, (void *)session_start_graph_logged);
+	session_stop_graph = hook_function(0x1a3d1b11cUL, (void *)session_stop_graph_logged);
+	session_allowed = hook_function(0x1a3d84c6cUL, (void *)session_allowed_logged);
+	session_pools = hook_function(0x1a3d86ad4UL, (void *)session_pools_logged);
+	node_update_outputs = hook_function(0x1a3db579cUL, (void *)node_update_outputs_logged);
+	node_verify_colour = hook_function(0x1a3da85acUL, (void *)node_verify_colour_logged);
+	node_bring_up = hook_function(0x1a3d743f0UL, (void *)node_bring_up_logged);
+	node_update_metadata = hook_function(0x1a3d8ce1cUL, (void *)node_update_metadata_logged);
+	node_update_depth = hook_function(0x1a3d9a9d4UL, (void *)node_update_depth_logged);
+	node_update_detection = hook_function(0x1a3d74314UL, (void *)node_update_detection_logged);
+	say("hakios: mediaserverd: session: hooked: outputs %d, colour %d, bring up %d, metadata %d, depth %d, detection %d\n",
+	    node_update_outputs != NULL, node_verify_colour != NULL, node_bring_up != NULL, node_update_metadata != NULL,
+	    node_update_depth != NULL, node_update_detection != NULL);
+	say("hakios: mediaserverd: session: hooked: allowed %d, pools %d\n", session_allowed != NULL, session_pools != NULL);
+	say("hakios: mediaserverd: session: hooked: post %d, transition %d, teardown %d, start %d, stop %d\n", session_post != NULL,
+	    session_transition != NULL, session_teardown != NULL, session_start_graph != NULL, session_stop_graph != NULL);
+}
+
+#endif /* HAKIOS_CAMERA_DEBUG */
 
 /*
  * The class methods replaced, each as soon as its class exists. `expected` is the unslid address
@@ -768,6 +1467,11 @@ bundle_hooks(void)
 static void
 image_added(__unused const struct mach_header *header, __unused intptr_t image_slide)
 {
+#if HAKIOS_CAMERA_DEBUG
+	probe_format_dimensions();
+	probe_graph();
+	probe_source_node();
+#endif
 	for (size_t i = 0; i < sizeof(replacements) / sizeof(replacements[0]); i++) {
 		struct replacement *r = &replacements[i];
 		Class cls;
@@ -781,6 +1485,10 @@ image_added(__unused const struct mach_header *header, __unused intptr_t image_s
 		method = r->instance ? class_getInstanceMethod(cls, sel_registerName(r->selector)) :
 		    class_getClassMethod(cls, sel_registerName(r->selector));
 		original = method ? method_getImplementation(method) : NULL;
+		if (original == NULL && r->expected != 0) {
+			r->done = false;        /* (the class is there, its method not yet: looked for again at the next image) */
+			continue;
+		}
 		if (original == NULL || (uintptr_t)original != r->expected + slide) {
 			say("hakios: %c[%s %s]: found %#lx, expected %#lx; left alone\n", r->instance ? '-' : '+', r->class_name,
 			    r->selector,

@@ -332,7 +332,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			-lmis -o obj/libhakios.installd.dylib src/inject_installd.c
 		# ... and inside BlueTool: bluetoothd's "boot" and "init" answered as done (src/inject_bt.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.bt.dylib -o obj/libhakios.bt.dylib src/inject_bt.c
-		$DYN -O2 -dynamiclib -install_name /redwood/lib/libhakios.media.dylib -framework CoreFoundation -framework CoreMedia \
+		# (CAMERA_DEBUG=1: the capture session's diagnostics in src/inject_media.c, HAKIOS_CAMERA_DEBUG)
+		$DYN -O2 ${CAMERA_DEBUG:+-DHAKIOS_CAMERA_DEBUG=1} -dynamiclib -install_name /redwood/lib/libhakios.media.dylib -framework CoreFoundation -framework CoreMedia \
 			-framework CoreVideo -framework IOSurface -lobjc \
 			-o obj/libhakios.media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
 		# the output device of the audio server: a plug-in for CoreAudio's HAL

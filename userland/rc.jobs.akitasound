@@ -1,0 +1,4 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The sound test the tester asked for once (11-18): the kernel's own path first (a raw tone written straight to
+# /dev/hakios-audio), then Darwin's: a tone through an audio queue, the lock sound, a keyboard click, the fanfare.
+/redwood/bin/sound_test springboard wait 4 raw 2 wait 3 tone 3 wait 3 system 1100 wait 3 system 1104 wait 3 file /System/Library/Audio/UISounds/New/Fanfare.caf
