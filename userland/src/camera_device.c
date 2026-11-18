@@ -330,6 +330,8 @@ supported(const struct prop *p, size_t n)
 #define PF_420F         0x34323066      /* '420f' */
 #define PF_420V         0x34323076      /* '420v' */
 #define PF_BGRA         0x42475241      /* 'BGRA' */
+#define PF_XF20         0x78663230      /* 'xf20': 4:2:0 in two planes of 16-bit samples, 10 bits used, full range */
+#define PF_X420         0x78343230      /* 'x420': the same, video range */
 
 static CFDictionaryRef
 output_info(int width, int height)
@@ -908,7 +910,48 @@ render_piece(void *context, size_t i)
 
 	first &= ~1u;
 	end = i + 1 == j->pieces ? j->height : end & ~1u;
-	if (j->format == PF_BGRA) {
+	if (j->format == PF_XF20 || j->format == PF_X420) {
+		/*
+		 * Ten bits (the iPhone 13 mini's photographs are asked for as xf20): the picture as for 8 bits, into
+		 * rows of our own, then each sample to the top of 16 bits (its own high bits again below it, so that
+		 * white is the whole scale).
+		 */
+		uint32_t n = end - first, w = j->width;
+		uint8_t *y8 = malloc((size_t)n * w), *uv8 = malloc((size_t)(n / 2 + 1) * w);
+		uint16_t *y = CVPixelBufferGetBaseAddressOfPlane(j->pb, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(j->pb, 1);
+		size_t ys = CVPixelBufferGetBytesPerRowOfPlane(j->pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(j->pb, 1);
+
+		if (y8 == NULL || uv8 == NULL || n == 0) {
+			free(y8);
+			free(uv8);
+			return;
+		}
+		if (j->still) {
+			isp_render_still_nv12(j->isp, j->f, j->raw, y8 - (size_t)first * w, w, uv8 - (size_t)(first / 2) * w, w, j->width,
+			    j->height, first, end, j->format == PF_X420);
+		} else {
+			isp_render_nv12(j->isp, j->f, j->raw, y8 - (size_t)first * w, w, uv8 - (size_t)(first / 2) * w, w, j->width, j->height,
+			    first, end, j->format == PF_X420);
+		}
+		for (uint32_t r = 0; r < n; r++) {
+			uint16_t *to = (uint16_t *)((uint8_t *)y + (size_t)(first + r) * ys);
+			const uint8_t *from = y8 + (size_t)r * w;
+
+			for (uint32_t x = 0; x < w; x++) {
+				to[x] = (uint16_t)((from[x] << 8 | from[x]) & 0xffc0);
+			}
+		}
+		for (uint32_t r = 0; r < n / 2; r++) {
+			uint16_t *to = (uint16_t *)((uint8_t *)uv + (size_t)(first / 2 + r) * uvs);
+			const uint8_t *from = uv8 + (size_t)r * w;
+
+			for (uint32_t x = 0; x < (w & ~1u); x++) {
+				to[x] = (uint16_t)((from[x] << 8 | from[x]) & 0xffc0);
+			}
+		}
+		free(y8);
+		free(uv8);
+	} else if (j->format == PF_BGRA) {
 		isp_render_bgra(j->isp, j->f, j->raw, CVPixelBufferGetBaseAddress(j->pb), CVPixelBufferGetBytesPerRow(j->pb), j->width,
 		    j->height, first, end);
 	} else if (j->still) {
@@ -1052,7 +1095,7 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 	pf = CVPixelBufferGetPixelFormatType(pb);
 	width = (uint32_t)CVPixelBufferGetWidth(pb);
 	height = (uint32_t)CVPixelBufferGetHeight(pb);
-	if (width == 0 || height == 0 || (pf != PF_420F && pf != PF_420V && pf != PF_BGRA)) {
+	if (width == 0 || height == 0 || (pf != PF_420F && pf != PF_420V && pf != PF_BGRA && pf != PF_XF20 && pf != PF_X420)) {
 		if (out->delivered == 0 && out->said_shape == false) {
 			out->said_shape = true;
 			say("%s: %ux%u %c%c%c%c buffers are not for this ISP", out->name, width, height, pf >> 24, pf >> 16 & 255,
