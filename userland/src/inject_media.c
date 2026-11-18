@@ -84,6 +84,7 @@ extern const void *_dyld_get_shared_cache_range(size_t *length);
 #endif
 
 static uintptr_t slide;
+static void patch_fusion_scheme(void);
 #if HAKIOS_CAMERA_DEBUG
 static void patch_signal_error(void);
 static void hook_session(void);
@@ -160,6 +161,7 @@ shared_vendor(id self, SEL selector)
 			    (void *)hakios_camera_device_create);
 			say("hakios: mediaserverd: the camera's device vendor %s\n", camera_vendor ? "made (camera_device.c)" :
 			    "CANNOT BE MADE");
+			patch_fusion_scheme();
 #if HAKIOS_CAMERA_DEBUG
 			patch_signal_error();
 			hook_session();
@@ -644,6 +646,64 @@ backings_init_logged(id self, SEL selector, id dictionaries, id common, id hevc,
 }
 
 /*
+ * A function of the shared cache replaced: a jump to ours written over its first four instructions (a private copy of
+ * the page: vm_protect with VM_PROT_COPY). For the C functions of CMCapture, which no selector reaches and interposing
+ * does not either (a call from one image of the cache into another is bound when the cache is built).
+ */
+#include <libkern/OSCacheControl.h>
+#include <mach/mach.h>
+
+static bool
+patch_function(uintptr_t at, void *to)
+{
+	uintptr_t target = (uintptr_t)__builtin_ptrauth_strip(to, 0);
+	uint32_t code[4];
+	vm_address_t page;
+
+	at += slide;
+	code[0] = 0x58000050;           /* ldr x16, #8 */
+	code[1] = 0xd61f0200;           /* br x16 */
+	memcpy(&code[2], &target, 8);
+	page = at & ~(vm_address_t)(vm_page_size - 1);
+	if (vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) {
+		return false;
+	}
+	memcpy((void *)at, code, sizeof(code));
+	vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+	sys_icache_invalidate((void *)at, sizeof(code));
+	return true;
+}
+
+/*
+ * The fusion scheme of photographs (20G81). The iPhone 13 mini's is 4 (D16/AVCaptureSession.plist,
+ * stillImageNoiseReductionAndFusionScheme): from 3 up the still image pipeline is the unified bracketing one, whose
+ * BWUBNode fails here as soon as a photograph is asked for (-[BWUBNode handleStillImagePrewarmWithSettings:forInput:]
+ * emits a node error, the sink gets it before any frame and the photograph ends with -16808; its processors want an
+ * Apple GPU's and neural engine's worth of pipelines). Answered as 0, no fusion at all: the pipeline that takes
+ * one frame from the stream and encodes it. (2 puts a BWHDRNode in, whose processor this iPhone does not have: a
+ * null pointer in -[BWHDRNode _setupSampleBufferProcessor] half a second into every session.)
+ */
+static int32_t
+fusion_scheme_answered(void *source)
+{
+	(void)source;
+	return 0;
+}
+
+static void
+patch_fusion_scheme(void)
+{
+	static bool done;
+
+	if (done || !camera || AT(0UL, 0UL, 1UL) == 0 || slide == 0) {
+		return;
+	}
+	done = true;
+	say("hakios: mediaserverd: photographs' fusion scheme answered as 0 (none), not the iPhone 13 mini's 4: %s\n",
+	    patch_function(AT(0UL, 0UL, 0x1a3feb6f8UL), (void *)fusion_scheme_answered) ? "patched" : "COULD NOT BE PATCHED");
+}
+
+/*
  * ---- DIAGNOSTICS OF THE CAPTURE SESSION (20G81), built only with HAKIOS_CAMERA_DEBUG (build.sh CAMERA_DEBUG=1) ----
  *
  * How a session that never showed a picture was found out (11-18): CMCapture says nothing this image can read -- its
@@ -870,8 +930,6 @@ LOG_WATCHED(_os_log_debug_impl)
  * by a jump to signal_error_patched (a private copy of the page). It says each call site's first error and returns the
  * error as the function does; what the function would have logged is lost, which nobody reads here anyway.
  */
-#include <libkern/OSCacheControl.h>
-#include <mach/mach.h>
 
 static int32_t
 signal_error_patched(int32_t error)
@@ -914,27 +972,6 @@ assert_patched(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t
 		say("hakios: mediaserverd: FigDebugAssert at cache address %#lx (%ld %ld %ld %ld)\n", (unsigned long)from, (long)(int32_t)a2,
 		    (long)(int32_t)a3, (long)(int32_t)a4, (long)(int32_t)a5);
 	}
-}
-
-static bool
-patch_function(uintptr_t at, void *to)
-{
-	uintptr_t target = (uintptr_t)__builtin_ptrauth_strip(to, 0);
-	uint32_t code[4];
-	vm_address_t page;
-
-	at += slide;
-	code[0] = 0x58000050;           /* ldr x16, #8 */
-	code[1] = 0xd61f0200;           /* br x16 */
-	memcpy(&code[2], &target, 8);
-	page = at & ~(vm_address_t)(vm_page_size - 1);
-	if (vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) {
-		return false;
-	}
-	memcpy((void *)at, code, sizeof(code));
-	vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-	sys_icache_invalidate((void *)at, sizeof(code));
-	return true;
 }
 
 static void
@@ -1077,6 +1114,30 @@ probe_graph(void)
 			((void (*)(id, SEL))original)(self, selector);
 		}));
 	}
+	{       /* a node's error on its way down the graph: which node, what error, from where */
+		Class output = objc_getClass("BWNodeOutput");
+		Method e = output ? class_getInstanceMethod(output, sel_registerName("emitNodeError:")) : NULL;
+
+		if (e != NULL) {
+			IMP original = method_getImplementation(e);
+			SEL selector = method_getName(e);
+
+			method_setImplementation(e, imp_implementationWithBlock((id)^void (id self, id error) {
+				static int said;
+
+				if (said++ < 4) {
+					id node = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("node"));
+
+					say("hakios: mediaserverd: graph: node error %.300s from %s\n", describe(error),
+					    node ? class_getName(object_getClass(node)) : "?");
+					said_from("a node error emitted");
+				}
+				((void (*)(id, SEL, id))original)(self, selector, error);
+			}));
+		} else {
+			say("hakios: mediaserverd: graph: no -[BWNodeOutput emitNodeError:]\n");
+		}
+	}
 	say("hakios: mediaserverd: graph: BWGraph is watched\n");
 }
 
@@ -1198,6 +1259,13 @@ session_post_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uint
 		say("hakios: mediaserverd: session: notification %.80s %.700s\n", a1 ? describe((id)a1) : "(nil)",
 		    a2 ? describe((id)a2) : "");
 	}
+	if (a1 != 0 && strstr(describe((id)a1), "StillImageComplete") != NULL) {
+		static int traced;
+
+		if (traced++ < 3) {
+			said_from("session: IrisStillImageComplete posted");
+		}
+	}
 	return session_post(a0, a1, a2, a3, a4, a5);
 }
 
@@ -1301,6 +1369,40 @@ RETURN_WATCHED(node_update_metadata, "_updateMetadataConfigurations")
 RETURN_WATCHED(node_update_depth, "_updateDepthConfiguration")
 RETURN_WATCHED(node_update_detection, "_updateObjectDetectionMetadataRegistration")
 
+/* a fault of mediaserverd's: where (cache addresses), before it dies of it as it would have */
+#include <signal.h>
+#include <sys/ucontext.h>
+
+static void
+fault_said(int number, siginfo_t *info, void *raw)
+{
+	ucontext_t *context = raw;
+	char line[500];
+	int at;
+	uintptr_t pc = 0, lr = 0, fp = 0;
+
+	if (context != NULL && context->uc_mcontext != NULL) {
+		pc = (uintptr_t)__darwin_arm_thread_state64_get_pc(context->uc_mcontext->__ss);
+		lr = (uintptr_t)__darwin_arm_thread_state64_get_lr(context->uc_mcontext->__ss);
+		fp = (uintptr_t)__darwin_arm_thread_state64_get_fp(context->uc_mcontext->__ss);
+	}
+	at = snprintf(line, sizeof(line), "hakios: mediaserverd: FAULT signal %d at address %p, pc %#lx, lr %#lx, called from:", number,
+	    info != NULL ? info->si_addr : NULL, (unsigned long)((pc & 0x0000007fffffffffUL) - slide),
+	    (unsigned long)((lr & 0x0000007fffffffffUL) - slide));
+	for (unsigned i = 0; i < 14 && fp != 0 && (fp & 7) == 0 && at < (int)sizeof(line) - 24; i++) {
+		uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
+
+		if (ret == 0) {
+			break;
+		}
+		at += snprintf(line + at, sizeof(line) - (size_t)at, " %#lx", (unsigned long)((ret & 0x0000007fffffffffUL) - slide));
+		fp = next > fp ? next : 0;
+	}
+	say("%s\n", line);
+	signal(number, SIG_DFL);
+	raise(number);
+}
+
 static void
 hook_session(void)
 {
@@ -1310,6 +1412,15 @@ hook_session(void)
 		return;
 	}
 	done = true;
+	{
+		struct sigaction action;
+
+		memset(&action, 0, sizeof(action));
+		action.sa_sigaction = fault_said;
+		action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+		sigaction(SIGSEGV, &action, NULL);
+		sigaction(SIGBUS, &action, NULL);
+	}
 	session_post = hook_function(0x1a3d91ca4UL, (void *)session_post_logged);
 	session_transition = hook_function(0x1a3d38454UL, (void *)session_transition_logged);
 	session_teardown = hook_function(0x1a3d2c928UL, (void *)session_teardown_logged);
@@ -1363,6 +1474,25 @@ static struct replacement {
 	{ "PTDisparityPostProcessing", "prewarmForMediaserverd", AT(0UL, 0UL, 0x1c2d40a44UL), (IMP)prewarm_disparity, NULL, false, false },
 	/* (20G81 only: no Photographic Styles -- see answers_no) */
 	{ "FigCaptureSourceVideoFormat", "isSemanticStyleRenderingSupported", AT(0UL, 0UL, 0x1a3ce5bacUL), (IMP)answers_no, NULL, true, false },
+	/*
+	 * (20G81) What the iPhone 13 mini's formats say they can do with a photograph, each of which puts a node in the
+	 * still image pipeline whose processor is not here: no. BWHDRNode alone took mediaserverd down half a second
+	 * into every session (a null pointer in _setupSampleBufferProcessor). What is left is one frame of the stream,
+	 * scaled and encoded.
+	 */
+	{ "FigCaptureSourceVideoFormat", "isHDRSupported", AT(0UL, 0UL, 0x1a3ce0fccUL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isGNRHDRSupported", AT(0UL, 0UL, 0x1a3dac2e8UL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isStillImageStabilizationSupported", AT(0UL, 0UL, 0x1a3d69660UL), (IMP)answers_no, NULL, true,
+	  false },
+	{ "FigCaptureSourceVideoFormat", "isDeepFusionSupported", AT(0UL, 0UL, 0x1a3e927f8UL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isLearnedNRSupported", AT(0UL, 0UL, 0x1a3e9283cUL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isDigitalFlashSupported", AT(0UL, 0UL, 0x1a3ce5b68UL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isStereoFusionSupported", AT(0UL, 0UL, 0x1a3d5dae4UL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isRedEyeReductionSupported", AT(0UL, 0UL, 0x1a3ce6628UL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isDeferredPhotoProcessingSupported", AT(0UL, 0UL, 0x1a3d99754UL), (IMP)answers_no, NULL, true,
+	  false },
+	{ "FigCaptureSourceVideoFormat", "isZeroShutterLagSupported", AT(0UL, 0UL, 0x1a3dcf69cUL), (IMP)answers_no, NULL, true, false },
+	{ "FigCaptureSourceVideoFormat", "isResponsiveShutterSupported", AT(0UL, 0UL, 0x1a3d4caccUL), (IMP)answers_no, NULL, true, false },
 	/* ... and no filtered preview at all: -[FigCapturePreviewSinkPipeline _buildVideoPreviewSinkPipeline:...] appends the
 	 * filter pipeline when the connection says previewFilterRenderingEnabled (answering no for the STYLE alone left a
 	 * BWStreamingFilterNode "not configured for semantic style rendering" that was then given a style: an exception) */
