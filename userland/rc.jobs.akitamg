@@ -1,0 +1,4 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# What MobileGestalt says about the cameras (RC_JOBS=rc.jobs.akitamg, with camera=13).
+/redwood/bin/sound_test springboard
+/redwood/bin/mg_test

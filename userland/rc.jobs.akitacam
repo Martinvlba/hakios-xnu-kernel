@@ -1,0 +1,8 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's camera for Darwin (RC_JOBS=rc.jobs.akitacam, with camera=13: devices/akita's /dev/hakios-camera, the
+# front sensor): 60 frames read by camera_test with src/camera_isp.c's exposure and white balance working on them, then
+# what AVFoundation lists (camera_avtest: libhakios.media.dylib's device in mediaserverd). The kernel's
+# "akita camera: device:" lines say when the frames came and why they stopped.
+/redwood/bin/sound_test springboard
+/redwood/bin/camera_test raw 60 sensor 2
+/redwood/bin/camera_avtest

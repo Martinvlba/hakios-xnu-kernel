@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's camera in Camera.app (RC_JOBS=rc.jobs.akitacam2, with camera=13): what AVFoundation lists, then the
+# application opened from the home screen as a finger opens it (first page, top right) and its preview left running for a
+# minute (usbmux-shot.py meanwhile). mediaserverd's "hakios: camera:" lines say what the capture stack asked of the device.
+/redwood/bin/sound_test springboard
+/redwood/bin/camera_avtest
+/redwood/bin/rwtouch wait 10 swipe 0.5 0.985 0.5 0.3 200 wait 6 tap 0.87 0.372 wait 60

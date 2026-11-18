@@ -3535,6 +3535,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		    (c[9] == 0 || c[9] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
+		/* ... and "camera=13": the Pixel 8a's (devices/akita's driver has its own argument; its /dev/hakios-camera) */
+		camera_requested |= starts_with(c, "camera=13") && (c == pi.cmdline || c[-1] == ' ') && (c[9] == 0 || c[9] == ' ');
 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
 		if (starts_with(c, "ufs=") && (c == pi.cmdline || c[-1] == ' ') && c[4] >= '1' && c[4] <= '2' &&
 		    (c[5] == 0 || c[5] == ' ')) {
@@ -4046,6 +4048,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (camera_requested) {
 		dt_begin(&w, "isp");
 		dt_prop_u32(&w, "camera-rear", 1);
+		dt_prop_u32(&w, "camera-front", 1);     /* (as the iPhone 13 mini's own node has it: front-facing-camera) */
 		dt_end(&w);
 	}
 	dt_begin(&w, "gic");

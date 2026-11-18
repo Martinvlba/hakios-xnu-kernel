@@ -1007,9 +1007,13 @@ forget_gestalt_if_changed(void)
 	static const char *const cache = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache"
 	    "/Library/Caches/com.apple.MobileGestalt.plist";
 	static const char *const note = "/private/var/db/hakios.gestalt";
-	const char *torch = boot_arg("torch");
-	const char *now = torch != NULL && torch[0] >= '1' && torch[0] <= '9' ? "torch\n" : "-\n";
-	char was[16] = "";
+	const char *torch = boot_arg("torch"), *cam = boot_arg("cam"), *camera = boot_arg("camera");
+	/* (the cameras too: the loader's /arm-io/isp node comes with cam=5 or, on the Pixel 8a, camera=13 -- a volume first
+	 * started without it kept "no camera" for good, and SpringBoard showed no Camera.app; 11-18) */
+	int has_torch = torch != NULL && torch[0] >= '1' && torch[0] <= '9';
+	int has_camera = (cam != NULL && strcmp(cam, "5") == 0) || (camera != NULL && strcmp(camera, "13") == 0);
+	const char *now = has_torch ? (has_camera ? "torch camera\n" : "torch\n") : (has_camera ? "- camera\n" : "-\n");
+	char was[24] = "";
 	int fd = open(note, O_RDONLY, 0);
 
 	if (fd >= 0) {
@@ -1020,8 +1024,8 @@ forget_gestalt_if_changed(void)
 	if (strcmp(was, now) == 0) {
 		return;
 	}
-	printf("  MobileGestalt's cache: the device tree's flash %s -> %s: %s\n", was[0] == 't' ? "yes" : was[0] ? "no" :
-	    "(not noted)", now[0] == 't' ? "yes" : "no", unlink(cache) == 0 ? "the cache removed" : strerror(errno));
+	printf("  MobileGestalt's cache: the device tree's flash and cameras %s -> %s: %s\n", was[0] ? was : "(not noted)\n", now,
+	    unlink(cache) == 0 ? "the cache removed" : strerror(errno));
 	fd = open(note, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd >= 0) {
 		(void)write(fd, now, strlen(now));

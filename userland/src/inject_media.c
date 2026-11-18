@@ -38,6 +38,7 @@
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <mach/mach_time.h>
@@ -518,6 +519,122 @@ flashlight_classes(void)
 }
 
 /*
+ * Diagnostics of how CMCapture works out its capture sources (FigCaptureSourceUtilities, 20G81): which streams the
+ * vendor is asked for by position and device type, what it gives, and how many sources the list ends with. Said only
+ * where the kernel has a camera.
+ */
+static IMP original_copy_streams, original_backings_init;
+
+static const char *
+describe(id object)
+{
+	id text = object ? ((id (*)(id, SEL))objc_msgSend)(object, sel_registerName("description")) : NULL;
+
+	return text ? ((const char *(*)(id, SEL))objc_msgSend)(text, sel_registerName("UTF8String")) : "(nil)";
+}
+
+static id
+copy_streams_logged(id self, SEL selector, id positions, id types, id device, int *error)
+{
+	int e = 0;
+	id streams = ((id (*)(id, SEL, id, id, id, int *))original_copy_streams)(self, selector, positions, types, device, &e);
+
+	if (camera) {
+		char line[300];
+
+		snprintf(line, sizeof(line), "%s", describe(positions));
+		for (char *c = line; *c; c++) {
+			*c = *c == '\n' ? ' ' : *c;
+		}
+		say("hakios: mediaserverd: streams asked of the vendor: positions %s", line);
+		snprintf(line, sizeof(line), "%s", describe(types));
+		for (char *c = line; *c; c++) {
+			*c = *c == '\n' ? ' ' : *c;
+		}
+		say(" device types %s -> %ld stream(s), error %d\n", line,
+		    streams ? (long)((unsigned long (*)(id, SEL))objc_msgSend)(streams, sel_registerName("count")) : -1L, e);
+	}
+	if (error != NULL) {
+		*error = e;
+	}
+	return streams;
+}
+
+/*
+ * Photographic Styles ("semantic style rendering": the iPhone 13's, not the iPhone X's): with it the preview is built
+ * as a FILTERED pipeline with person-segmentation inferences -- -[FigCapturePreviewSinkPipeline
+ * _appendFilteredPreviewPipeline:...] uses an inference configuration the path here never made, and mediaserverd
+ * crashed (SIGSEGV at 0x10 in objc_msgSend, every time Camera.app started its session; 11-18). There is no ISP nor
+ * neural engine to render styles with: the formats say it is not supported, and a preview is never asked to render it.
+ */
+static bool
+answers_no(__unused id self, __unused SEL selector)
+{
+	return false;
+}
+
+static IMP original_copy_device;
+
+static id
+copy_device_logged(id self, SEL selector, int client, bool inform, int *error)
+{
+	int e = 0;
+	id device = ((id (*)(id, SEL, int, bool, int *))original_copy_device)(self, selector, client, inform, &e);
+
+	if (camera) {
+		say("hakios: mediaserverd: the vendor's device for client %d: %s, error %d\n", client, device ? describe(device) : "NONE", e);
+	}
+	if (error != NULL) {
+		*error = e;
+	}
+	return device;
+}
+
+static IMP original_take_back_streams;
+
+/* who gives streams back (the first three times): a session that could not build its graph does, on its way out */
+static void
+take_back_streams_logged(id self, SEL selector, id streams, id device)
+{
+	static int said;
+
+	if (camera && said < 3) {
+		void *frames[24];
+		int n = backtrace(frames, 24);
+		char line[600];
+		int at = 0;
+
+		said++;
+		for (int i = 1; i < n && at < (int)sizeof(line) - 24; i++) {
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %#lx", (unsigned long)((uintptr_t)frames[i] - slide));
+		}
+		say("hakios: mediaserverd: streams taken back, called from (unslid):%s\n", line);
+	}
+	((void (*)(id, SEL, id, id))original_take_back_streams)(self, selector, streams, device);
+}
+
+static id
+backings_init_logged(id self, SEL selector, id dictionaries, id common, id hevc, id h264)
+{
+	if (camera) {
+		long n = dictionaries ? (long)((unsigned long (*)(id, SEL))objc_msgSend)(dictionaries, sel_registerName("count")) : -1;
+
+		say("hakios: mediaserverd: CMCapture's capture sources: %ld\n", n);
+		for (long i = 0; i < n && i < 12; i++) {
+			id one = ((id (*)(id, SEL, unsigned long))objc_msgSend)(dictionaries, sel_registerName("objectAtIndex:"), (unsigned long)i);
+			id attributes = ((id (*)(id, SEL, id))objc_msgSend)(one, sel_registerName("objectForKey:"), (id)CFSTR("Attributes"));
+			id formats = ((id (*)(id, SEL, id))objc_msgSend)(one, sel_registerName("objectForKey:"), (id)CFSTR("Formats"));
+			id name = attributes ? ((id (*)(id, SEL, id))objc_msgSend)(attributes, sel_registerName("objectForKey:"),
+			    (id)CFSTR("uniqueID")) : NULL;
+
+			say("hakios: mediaserverd:   source %ld: %s, %ld format(s)\n", i, describe(name),
+			    formats ? (long)((unsigned long (*)(id, SEL))objc_msgSend)(formats, sel_registerName("count")) : -1L);
+		}
+	}
+	return ((id (*)(id, SEL, id, id, id, id))original_backings_init)(self, selector, dictionaries, common, hevc, h264);
+}
+
+/*
  * The class methods replaced, each as soon as its class exists. `expected` is the unslid address
  * of the code in Darwin userland 16.5 (20F66): a method that is not what it was is left alone. `original`, where
  * there is one, keeps what was there (the vendor's: given as it is wherever there is one, and where
@@ -545,6 +662,22 @@ static struct replacement {
 	{ "BWNodeOutput", "emitSampleBuffer:", AT(0x1a1ea37e0UL, 0x1a1ef3760UL, 0x1a3ceafbcUL), (IMP)emit_sample_buffer, &original_emit_sample_buffer, true, false },
 	/* (20G81 only: the iPhone X's builds do not prewarm it -- 0 leaves it alone there) */
 	{ "PTDisparityPostProcessing", "prewarmForMediaserverd", AT(0UL, 0UL, 0x1c2d40a44UL), (IMP)prewarm_disparity, NULL, false, false },
+	/* (20G81 only: no Photographic Styles -- see answers_no) */
+	{ "FigCaptureSourceVideoFormat", "isSemanticStyleRenderingSupported", AT(0UL, 0UL, 0x1a3ce5bacUL), (IMP)answers_no, NULL, true, false },
+	/* ... and no filtered preview at all: -[FigCapturePreviewSinkPipeline _buildVideoPreviewSinkPipeline:...] appends the
+	 * filter pipeline when the connection says previewFilterRenderingEnabled (answering no for the STYLE alone left a
+	 * BWStreamingFilterNode "not configured for semantic style rendering" that was then given a style: an exception) */
+	{ "FigVideoCaptureConnectionConfiguration", "previewFilterRenderingEnabled", AT(0UL, 0UL, 0x1a3dbe1f8UL), (IMP)answers_no, NULL, true,
+	  false },
+	/* (20G81 only: the diagnostics of the capture sources) */
+	{ "BWFigCaptureDeviceVendor", "copyStreamsWithPositions:deviceTypes:forDevice:error:", AT(0UL, 0UL, 0x1a3d97f6cUL),
+	  (IMP)copy_streams_logged, &original_copy_streams, true, false },
+	{ "BWFigCaptureDeviceVendor", "takeBackStreams:device:", AT(0UL, 0UL, 0x1a3d5eb88UL), (IMP)take_back_streams_logged,
+	  &original_take_back_streams, true, false },
+	{ "BWFigCaptureDeviceVendor", "copyDeviceForClient:informClientWhenDeviceAvailableAgain:error:", AT(0UL, 0UL, 0x1a3d47434UL),
+	  (IMP)copy_device_logged, &original_copy_device, true, false },
+	{ "FigCaptureSourceBackings", "initWithSourceInfoDictionaries:commonSettings:hevcSettings:h264Settings:",
+	  AT(0UL, 0UL, 0x1a3ec0eccUL), (IMP)backings_init_logged, &original_backings_init, true, false },
 };
 
 /* -[FigSDOFRendering init] is in a bundle the cache's symbols say nothing of, so it is not told by an address: it is
@@ -662,6 +795,58 @@ image_added(__unused const struct mach_header *header, __unused intptr_t image_s
 	}
 }
 
+/*
+ * CMCapture keeps the list of capture sources it once worked out (FigCaptureSourceUtilities' csu_getBackings: a
+ * "CaptureSourceInfo" record -- CreationDate, DeviceModel, Sources, DependentUserDefaults -- in its preferences) and
+ * uses it again while the model and those defaults are the same. A volume that first started without a camera keeps a
+ * record with no video source: with the kernel's camera there, our device was made, no AVCaptureDevice came of it and
+ * Camera.app's preview stayed black (the Pixel 8a, 11-18). Looked for in the domains CMCapture may keep it in (said,
+ * where it is found); one without a video source is removed, so that the list is worked out again with our device.
+ */
+static void
+forget_stale_capture_sources(void)
+{
+	static const char *const domains[] = { "com.apple.cameracapture.volatile", "com.apple.cameracapture", "com.apple.coremedia",
+		                               "com.apple.avfoundation", "com.apple.mediaserverd", "com.apple.cmio" };
+
+	for (size_t i = 0; i < sizeof(domains) / sizeof(domains[0]); i++) {
+		CFStringRef domain = CFStringCreateWithCString(NULL, domains[i], kCFStringEncodingUTF8);
+		CFPropertyListRef record = CFPreferencesCopyValue(CFSTR("CaptureSourceInfo"), domain, kCFPreferencesCurrentUser,
+		    kCFPreferencesAnyHost);
+
+		if (record != NULL) {
+			CFIndex video = 0, sources = 0;
+
+			if (CFGetTypeID(record) == CFDictionaryGetTypeID()) {
+				CFTypeRef list = CFDictionaryGetValue(record, CFSTR("Sources"));
+
+				if (list != NULL && CFGetTypeID(list) == CFArrayGetTypeID()) {
+					sources = CFArrayGetCount(list);
+					for (CFIndex k = 0; k < sources; k++) {
+						CFTypeRef one = CFArrayGetValueAtIndex(list, k), type;
+
+						if (CFGetTypeID(one) != CFDictionaryGetTypeID()) {
+							continue;
+						}
+						type = CFDictionaryGetValue(one, CFSTR("mediaType"));
+						video += type == NULL || (CFGetTypeID(type) == CFStringGetTypeID() &&
+						    CFStringCompare(type, CFSTR("vide"), 0) == kCFCompareEqualTo);
+					}
+				}
+			}
+			say("hakios: mediaserverd: CMCapture's kept capture sources are in %s: %ld source(s), %ld of video%s\n", domains[i],
+			    (long)sources, (long)video, video == 0 ? ": removed, to be worked out again with the kernel's camera" : "");
+			if (video == 0) {
+				CFPreferencesSetValue(CFSTR("CaptureSourceInfo"), NULL, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+				CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+			}
+			CFRelease(record);
+		}
+		CFRelease(domain);
+	}
+}
+
+
 __attribute__((constructor))
 static void
 hakios_media_init(void)
@@ -692,6 +877,7 @@ hakios_media_init(void)
 	}
 	if (camera) {
 		say("hakios: mediaserverd: the kernel has a camera (/dev/hakios-camera)\n");
+		forget_stale_capture_sources();
 		register_hevc_encoder();
 	}
 	_dyld_register_func_for_add_image(image_added);         /* also called for every image already there */

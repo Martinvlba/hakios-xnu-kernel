@@ -348,7 +348,7 @@ output_info(int width, int height)
 }
 
 static CFDictionaryRef
-format(int sensor_width, int sensor_height, int max_fps, bool binned, double fov)
+format(int sensor_width, int sensor_height, int max_fps, bool binned, double fov, bool sifr)
 {
 	CFMutableDictionaryRef f = (CFMutableDictionaryRef)new_dict(), outputs = (CFMutableDictionaryRef)new_dict();
 	CMVideoFormatDescriptionRef fd = NULL;
@@ -360,6 +360,9 @@ format(int sensor_width, int sensor_height, int max_fps, bool binned, double fov
 	put(f, "VideoMinFrameRate", number_f(2));
 	put(f, "VideoMaxFrameRate", number_f(max_fps));
 	put(f, "VideoIsBinned", CFRetain(binned ? kCFBooleanTrue : kCFBooleanFalse));
+	if (sifr) {
+		put(f, "SIFREnabled", CFRetain(kCFBooleanTrue));
+	}
 	put(f, "VideoBinningFactorHorizontal", number_i(binned ? 2 : 1));
 	put(f, "VideoBinningFactorVertical", number_i(binned ? 2 : 1));
 	put(f, "VideoFieldOfView", number_f(fov));
@@ -429,12 +432,28 @@ static const struct camera {
 	const char      *name, *unique_id;
 	bool            turned;         /* its sensor the other way up from the iPhone's: the pictures turned half round */
 	double          focal_length, f_number, pixel_size, fov;
-	int             formats[2][3];  /* sensor width, height, frames a second of "Photo" and of a video format */
+	int             formats[2][4];  /* sensor width, height, frames a second of "Photo" and of a video format; 1: the
+	                                 * format says SIFREnabled, as the plist's entry of that size does (D16) */
 } cameras[2] = {
 	{ 1, "Back Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:0", false, 4.0, 1.8, 1.22, 65.0,
 	  { { 4032, 3024, 30 }, { 4224, 2376, 60 } } },        /* "Photo", "Video-60" */
 	{ 2, "Front Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:1", true, 2.87, 2.2, 1.0, 70.0,
 	  { { 3088, 2320, 30 }, { 3840, 2160, 30 } } },        /* "Photo", "Video-30" */
+};
+
+/*
+ * ... and as the iPhone 13 mini's are in D16/AVCaptureSession.plist (the Darwin userland of 16.6.1, d16ap: its formats are
+ * under "MultiStream" and of other sensor sizes -- with the iPhone X's sizes nothing matched: the device was made, no
+ * AVCaptureDevice came of it and Camera.app's preview stayed black, 11-18): "Photo" 4224x3024 and "Video-60" 4224x2384
+ * at the back, "Photo" 4032x3024 and "Video-60" 4032x2272 at the front. Chosen where CMCapture has a D16 directory.
+ * csu_resolveFormatIndexForNamedStreamFormat compares more than the size: a plist entry with SIFREnabled (both "Photo"
+ * entries, the back camera's video ones) is matched only by a stream format that says SIFREnabled too.
+ */
+static const struct camera cameras_d16[2] = {
+	{ 1, "Back Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:0", false, 5.7, 1.6, 1.7, 74.0,
+	  { { 4224, 3024, 60, 1 }, { 4224, 2384, 60, 1 } } },
+	{ 2, "Front Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:1", true, 2.71, 2.2, 1.0, 80.0,
+	  { { 4032, 3024, 60, 1 }, { 4032, 2272, 60, 0 } } },
 };
 
 struct stream {
@@ -1655,8 +1674,9 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 		s->out[i].name = output_names[i];
 	}
 
-	CFDictionaryRef f[2] = { format(camera->formats[0][0], camera->formats[0][1], camera->formats[0][2], false, camera->fov),
-		format(camera->formats[1][0], camera->formats[1][1], camera->formats[1][2], false, camera->fov) };
+	CFDictionaryRef f[2] = { format(camera->formats[0][0], camera->formats[0][1], camera->formats[0][2], false, camera->fov,
+		camera->formats[0][3] != 0), format(camera->formats[1][0], camera->formats[1][1], camera->formats[1][2], false,
+		camera->fov, camera->formats[1][3] != 0) };
 
 	s->formats = CFArrayCreate(NULL, (const void **)f, 2, &kCFTypeArrayCallBacks);
 	s->supported = supported(stream_props, sizeof(stream_props) / sizeof(stream_props[0]));
@@ -1801,10 +1821,14 @@ hakios_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, C
 	if (!usable || out == NULL) {
 		return ERR_UNSUPPORTED;
 	}
-	if ((stream[0] = stream_create(allocator, &cameras[0], port_back)) == NULL) {
+	const struct camera *table = access("/System/Library/PrivateFrameworks/CMCapture.framework/D16", F_OK) == 0 ? cameras_d16 :
+	    cameras;
+
+	say("the streams' formats are named as %s's", table == cameras_d16 ? "the iPhone 13 mini (D16)" : "the iPhone X (D22)");
+	if ((stream[0] = stream_create(allocator, &table[0], port_back)) == NULL) {
 		return ERR_UNSUPPORTED;
 	}
-	if ((stream[1] = stream_create(allocator, &cameras[1], port_front)) == NULL) {
+	if ((stream[1] = stream_create(allocator, &table[1], port_front)) == NULL) {
 		CFRelease(stream[0]);
 		return ERR_UNSUPPORTED;
 	}
