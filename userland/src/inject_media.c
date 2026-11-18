@@ -1194,7 +1194,7 @@ session_post_logged(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uint
 {
 	static int said;
 
-	if (said++ < 40) {
+	if (said++ < 120) {
 		say("hakios: mediaserverd: session: notification %.80s %.700s\n", a1 ? describe((id)a1) : "(nil)",
 		    a2 ? describe((id)a2) : "");
 	}

@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include "camera_isp.h"
 
@@ -60,8 +61,14 @@ hakios_camera_say(const char *format, ...)
 	va_start(ap, format);
 	n += vsnprintf(line + n, sizeof(line) - (size_t)n, format, ap);
 	va_end(ap);
-	if (n > (int)sizeof(line) - 2) {
-		n = sizeof(line) - 2;
+	if (n > (int)sizeof(line) - 14) {
+		n = sizeof(line) - 14;
+	}
+	{       /* (when: the seconds since the boot, as the kernel's log counts them) */
+		struct timespec now = { 0, 0 };
+
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		n += snprintf(line + n, sizeof(line) - (size_t)n, " @%.1f", (double)now.tv_sec + (double)now.tv_nsec / 1e9);
 	}
 	line[n++] = '\n';
 	write(2, line, (size_t)n);
