@@ -348,6 +348,19 @@ get(struct apple80211req *request)
 	case 15:                                /* the mode: a station (APPLE80211_M_STA) */
 		request->req_val = 1;
 		return 0;
+	case 106: {
+		/*
+		 * RSSI_BOUNDS: the weakest and the strongest signal the radio reports and the one below which a network is not
+		 * joined automatically. wifid asks ONCE, when it opens the device, and keeps what it had made up before if this
+		 * is refused: a threshold of +7 dBm, under which every network there is falls -- its auto-join then finds the
+		 * known network in each scan and refuses it ("Below minimum RSSI threshold" at -63 dBm; 11-19, the tester's
+		 * "it does not auto connect"; ~/akita/ref/wifi-autojoin-rssi.md). -85 lets CoreWiFi's own limits (-80, and
+		 * -90 for its last try) decide, as on an iPhone.
+		 */
+		const struct { uint32_t version; int32_t weakest, strongest, threshold; } bounds = { 1, -100, 0, -85 };
+
+		return give(request, &bounds, sizeof(bounds));
+	}
 	case 27:
 	case 254: {                             /* the channels the radio may tune to */
 		struct apple80211_channels *answer;

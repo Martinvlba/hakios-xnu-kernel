@@ -735,6 +735,22 @@ update_service_item(id self, SEL sel, long item, void *data, id sim, id other, v
 		original_update_service_item(self, sel, item, data, sim, other, g1, s1, g2, s2, g3, s3, g4, s4);
 	}
 	cellular_aggregator = self;
+	{
+		/* (16.6.1) what the aggregator's own updater left: the text and the content type (1 no service, 2 radio off, 0 in service) */
+		static int said_after;
+
+		if (said_after++ < 12 && block_frame(s1) == 16) {
+			id text = g1 ? ((id (*)(void *))((struct block_layout *)g1)->invoke)(g1) : nil;
+			long type = g3 ? ((long (*)(void *))((struct block_layout *)g3)->invoke)(g3) : -1;
+			char c[80] = "";
+
+			if (text != nil) {
+				CFStringGetCString((CFStringRef)text, c, sizeof(c), kCFStringEncodingUTF8);
+			}
+			say("hakios: cellular: after the updater: item %ld text \"%s\", content type %ld, SIM info %p; the kernel: radio %d sim %d\n", item,
+			    c, type, (void *)sim, sysctl_int("kern.hakios.cellular_radio"), sysctl_int("kern.hakios.cellular_sim"));
+		}
+	}
 	sysctlbyname("kern.hakios.cellular_operator", name, &size, NULL, 0);
 	if (said < 2) {
 		say("hakios: cellular: the service item's blocks: string getter \"%s\", setter \"%s\"\n",
@@ -993,6 +1009,16 @@ telephony_refresh(void)
 	id aggregator = app != nil && class_getInstanceMethod(object_getClass(app), getter) ? ((id (*)(id, SEL))objc_msgSend)(app, getter)
 	    : cellular_aggregator;
 
+	{
+		static int said;
+
+		if (said++ < 6) {
+			say("hakios: cellular: refresh: the application %s -statusBarStateAggregator; the aggregator %p (%s), -updateStatusBarItem: %s\n",
+			    app != nil && class_getInstanceMethod(object_getClass(app), getter) ? "has" : "has NO", (void *)aggregator,
+			    aggregator ? object_getClassName(aggregator) : "-",
+			    aggregator && class_getInstanceMethod(object_getClass(aggregator), update) ? "there" : "NOT THERE");
+		}
+	}
 	if (aggregator == nil || !class_getInstanceMethod(object_getClass(aggregator), update)) {
 		return;
 	}
