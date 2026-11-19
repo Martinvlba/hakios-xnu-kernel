@@ -1486,10 +1486,23 @@ worker(void *context)
 			continue;
 		}
 		n = read(device, buffer, bytes);
-		if (n != (ssize_t)bytes) {
+		if (n != (ssize_t)bytes || ((const struct hakios_camera_frame *)(const void *)buffer)->sensor != s->camera->sensor ||
+		    sizeof(head) + (size_t)((const struct hakios_camera_frame *)(const void *)buffer)->stride *
+		    ((const struct hakios_camera_frame *)(const void *)buffer)->height != bytes) {
 			if (n < 0 && errno == EIO) {
 				say("the kernel's camera has had a fault: no more frames");
 				break;
+			}
+			if (n >= (ssize_t)sizeof(head)) {
+				/*
+				 * Another camera's frame, or one of another size (the Pixel 8a: the kernel closes one camera and opens
+				 * the other when the other sensor is asked for, and their frames differ): the buffer is given up and
+				 * the next header says what the frames are now.
+				 */
+				free(buffer);
+				buffer = NULL;
+				switched = false;
+				continue;
 			}
 			failures += n < 0 && errno == EAGAIN ? 0 : 1;
 			continue;
