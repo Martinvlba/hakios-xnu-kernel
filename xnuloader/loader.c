@@ -3536,7 +3536,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
 		/* ... and "camera=13": the Pixel 8a's (devices/akita's driver has its own argument; its /dev/hakios-camera) */
-		camera_requested |= starts_with(c, "camera=13") && (c == pi.cmdline || c[-1] == ' ') && (c[9] == 0 || c[9] == ' ');
+		/* ("camera=14": the same device with the phone's main camera behind it) */
+		camera_requested |= (starts_with(c, "camera=13") || starts_with(c, "camera=14")) && (c == pi.cmdline || c[-1] == ' ') &&
+		    (c[9] == 0 || c[9] == ' ');
 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
 		if (starts_with(c, "ufs=") && (c == pi.cmdline || c[-1] == ' ') && c[4] >= '1' && c[4] <= '2' &&
 		    (c[5] == 0 || c[5] == ' ')) {
