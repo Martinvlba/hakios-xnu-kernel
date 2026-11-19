@@ -10,6 +10,7 @@
  *                                (what is dragged is held where it was taken, neither flung nor sprung back);
  *                                GRAB milliseconds of staying still first, for what has to be picked up
  *                                before it will move -- an icon of the home screen wants about 700
+ *   wiggle A                     the drags after it move up and down by A (a fraction of the height) while they hold
  *   pinch X Y D0 D1 [MS]         two fingers either side of X Y, D0 apart (a fraction of the width) to D1 apart in
  *                                MS milliseconds (default 600): D1 > D0 zooms in, D1 < D0 out
  *   hold X Y MS                  touch and stay
@@ -28,6 +29,7 @@
  * Example, "swipe up from the bottom edge two minutes after boot":
  *   rwtouch wait 120 swipe 0.5 0.99 0.5 0.4 250
  */
+#include <math.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach/mach_time.h>
@@ -129,6 +131,8 @@ pinch(double x, double y, double d0, double d1, int ms)
 	post_finger(HAKIOS_TOUCH_UP, 1, x + d1 / 2, y);
 }
 
+static double wiggle;           /* (the step "wiggle A": see drag) */
+
 static void
 drag(double x0, double y0, double x1, double y1, int ms, int hold, int grab)
 {
@@ -159,7 +163,14 @@ drag(double x0, double y0, double x1, double y1, int ms, int hold, int grab)
 		}
 	}
 	usleep(16000);
-	if (hold > 0) {
+	if (hold > 0 && wiggle > 0) {
+		/* (wiggle A before the drag: while held, the finger goes up and down by A of the screen, twice a second and a
+		 * half -- what brought out the black boxes on a cover sheet held most of the way down, 11-19) */
+		for (int waited = 0; waited < hold; waited += SAMPLE_MS) {
+			usleep(SAMPLE_MS * 1000);
+			post(HAKIOS_TOUCH_MOVE, x1, y1 + wiggle * sin(2 * 3.14159265358979 * waited / 400.0));
+		}
+	} else if (hold > 0) {
 		/* (a sample now and then, as a finger that stays still still gives) */
 		for (int waited = 0; waited < hold; waited += 100) {
 			usleep(100000);
@@ -265,6 +276,9 @@ main(int argc, char **argv)
 
 			pinch(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]), ms ? ms : 600);
 			i += ms ? 5 : 4;
+		} else if (strcmp(step, "wiggle") == 0 && left >= 1) {
+			wiggle = atof(argv[i + 1]);
+			i += 1;
 		} else if (strcmp(step, "drag") == 0 && left >= 6) {
 			int grab = left >= 7 && argv[i + 7][0] >= '0' && argv[i + 7][0] <= '9' ? atoi(argv[i + 7]) : 0;
 
