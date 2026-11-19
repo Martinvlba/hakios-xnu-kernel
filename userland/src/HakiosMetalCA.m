@@ -5081,6 +5081,68 @@ HM_REFUSES_OUT_LOUD
 /* A copy a kernel or a pass may have written: its rows back into the surface, the surface's seed moving as for any
  * write, and the copy then current with it (the next refresh does not read back what was just written). */
 /* (a copy of a surface's rows over 5 ms said, the first 30: the App Library's snapshot came with a ~100 ms stall, 11-10) */
+/*
+ * (11-19) The seed this process's own write-back left a surface with. Two textures over one surface that the GPU writes
+ * -- a 4:2:0 surface's two planes, each written by a kernel (mediaserverd: every camera picture scaled for the preview
+ * into one of three screen-sized surfaces) -- write back one after the other, and the second one's write-back moved
+ * the seed past what the first one knew: at its next use the first was "refreshed" from the surface, the rows of its
+ * LAST use copied over the texture, while the kernel that writes the new picture into it was on its way. The picture
+ * of that surface's last use came back -- its luma, under the new chroma: Camera.app's preview went round three old
+ * pictures in odd colours (the tester's videos). A seed that is our own write-back's is no news to a texture the GPU
+ * writes: nothing is copied (what it reads is sampled through other textures, which do copy).
+ */
+static BOOL
+hm_own_seed(uint32_t surface, uint32_t seed, BOOL set)
+{
+	static struct { uint32_t surface, seed; } known[256];
+	BOOL same = NO;
+
+	@synchronized ([HakiosMetalCommandBuffer class]) {
+		if (set) {
+			known[surface % 256].surface = surface;
+			known[surface % 256].seed = seed;
+		} else {
+			same = known[surface % 256].surface == surface && known[surface % 256].seed == seed;
+		}
+	}
+	return same;
+}
+
+/* (boot-arg metal_shadowsay=1: every copy of a surface's rows taken and written back, with a sum of the rows -- which
+ * stage hands on an old picture) */
+static int
+hm_shadowsay(void)
+{
+	static int on = -1;
+
+	if (on < 0) {
+		on = hm_boot_arg_set("metal_shadowsay");
+	}
+	return on;
+}
+
+static unsigned long
+hm_rows_sum(const uint8_t *p, size_t bytes)
+{
+	unsigned long sum = 0;
+
+	for (size_t i = 0; i < bytes; i += 61) {
+		sum += p[i];
+	}
+	return sum;
+}
+
+static int
+hm_seed_after_gpu(void)
+{
+	static int on = -1;
+
+	if (on < 0) {
+		on = strcmp(getprogname(), "backboardd") != 0 && !hm_boot_arg_set("metal_gpuseed_off");
+	}
+	return on;
+}
+
 static void
 hm_shadow_say(const char *what, unsigned surface, size_t bytes, double began, double copied, double read, double done)
 {
@@ -5097,6 +5159,28 @@ hm_shadow_say(const char *what, unsigned surface, size_t bytes, double began, do
 {
 	if (_parent != nil) {
 		[_parent hakiosWriteBackShadow];
+		return;
+	}
+	if (!_shadow && _iosurface != NULL && (_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget)) != 0 &&
+	    hm_seed_after_gpu()) {
+		/*
+		 * (11-19) A surface the GPU writes as it lies (no copy of its rows): what it drew is in the surface, and nothing
+		 * said so -- the seed moves when a PROGRAM locks a surface to write it, and here none did. mediaserverd scales
+		 * every camera picture for the preview into one of three screen-sized 4:2:0 surfaces with a kernel (their
+		 * planes as R32Uint textures); the window server's copy of each was taken once, at seed 3, and the seed stayed
+		 * 3: Camera.app's preview went round three old pictures (the tester's videos; metal_shadowsay=1 shows it).
+		 * The seed moved here, once the command buffer that wrote is done; this texture's own notion of it with it,
+		 * and the other textures' of this program over the surface (hm_own_seed: its other plane). Not in the window
+		 * server, whose own targets are the display's. Boot-arg metal_gpuseed_off=1: as before.
+		 */
+		IOSurfaceLock(_iosurface, kIOSurfaceLockAvoidSync, NULL);
+		IOSurfaceUnlock(_iosurface, kIOSurfaceLockAvoidSync, NULL);
+		_shadowSeed = IOSurfaceGetSeed(_iosurface);
+		hm_own_seed(IOSurfaceGetID(_iosurface), _shadowSeed, YES);
+		if (hm_shadowsay()) {
+			hm_print("shadowsay: surface %u plane %lu WRITTEN BY THE GPU, done at %.3f: seed %u now\n", IOSurfaceGetID(_iosurface),
+				 (unsigned long)_iosurfacePlane, hm_now(), _shadowSeed);
+		}
 		return;
 	}
 	if (!_shadow || _iosurface == NULL || (_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget)) == 0) {
@@ -5131,10 +5215,22 @@ hm_shadow_say(const char *what, unsigned surface, size_t bytes, double began, do
 			}
 		}
 	}
+	if (hm_shadowsay()) {
+		size_t changed = 0;
+
+		for (size_t i = 0; _shadowBase != NULL && i < bytes; i++) {
+			changed += now[i] != _shadowBase[i];
+		}
+		hm_print("shadowsay: surface %u plane %lu WRITTEN BACK at %.3f: texture %ux%u format %lu, %zu bytes changed from the base, "
+			 "the surface's sum now %lu, seed %u\n", IOSurfaceGetID(_iosurface), (unsigned long)_iosurfacePlane, hm_now(),
+			 (unsigned)hakios_metal_texture_width(_texture), (unsigned)hakios_metal_texture_height(_texture),
+			 (unsigned long)[self pixelFormat], changed, hm_rows_sum(surface, bytes), IOSurfaceGetSeed(_iosurface));
+	}
 	IOSurfaceUnlock(_iosurface, 0, NULL);
 	free(_shadowBase);
 	_shadowBase = now;
 	_shadowSeed = IOSurfaceGetSeed(_iosurface);
+	hm_own_seed(IOSurfaceGetID(_iosurface), _shadowSeed, YES);
 	hm_fps_shadow(NO, hm_now() - began);
 	hm_shadow_say("written back", IOSurfaceGetID(_iosurface), bytes, began, copied, read, hm_now());
 }
@@ -5393,12 +5489,24 @@ hm_bytes_sum(const uint8_t *bytes, size_t length)
 		/* (a mirror: the GPU's copy, kept by the core; only what the CPU did to the surface is news to it) */
 		if (_iosurface != NULL && (seed = IOSurfaceGetSeed(_iosurface)) != _shadowSeed) {
 			_shadowSeed = seed;
-			hakios_metal_texture_surface_changed(_texture);
+			if (!hm_own_seed(IOSurfaceGetID(_iosurface), seed, NO)) {       /* (not our own GPU's writing: see above) */
+				hakios_metal_texture_surface_changed(_texture);
+			}
 		}
 		return;
 	}
 
 	if (!_shadow || _iosurface == NULL || (seed = IOSurfaceGetSeed(_iosurface)) == _shadowSeed) {
+		return;
+	}
+	static int ownseed = -1;                /* (boot-arg metal_ownseed_off=1: as before) */
+
+	if (ownseed < 0) {
+		ownseed = !hm_boot_arg_set("metal_ownseed_off");
+	}
+	if ((_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget)) != 0 && _shadowBase != NULL && ownseed &&
+	    hm_own_seed(IOSurfaceGetID(_iosurface), seed, NO)) {
+		_shadowSeed = seed;             /* (our own write-back's, of another texture over this surface: see hm_own_seed) */
 		return;
 	}
 	if (IOSurfaceLock(_iosurface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
@@ -5421,6 +5529,14 @@ hm_bytes_sum(const uint8_t *bytes, size_t length)
 				memcpy(_shadowBase, IOSurfaceGetBaseAddress(_iosurface), bytes);
 			}
 		}
+	}
+	if (hm_shadowsay()) {
+		hm_print("shadowsay: surface %u plane %lu TAKEN at %.3f: texture %ux%u format %lu usage %#lx, the surface's sum %lu, seed %u "
+			 "(was %u)\n", IOSurfaceGetID(_iosurface), (unsigned long)_iosurfacePlane, hm_now(),
+			 (unsigned)hakios_metal_texture_width(_texture), (unsigned)hakios_metal_texture_height(_texture),
+			 (unsigned long)[self pixelFormat], (unsigned long)_usage,
+			 hm_rows_sum(IOSurfaceGetBaseAddress(_iosurface), IOSurfaceGetBytesPerRow(_iosurface) * IOSurfaceGetHeight(_iosurface)),
+			 seed, _shadowSeed);
 	}
 	IOSurfaceUnlock(_iosurface, kIOSurfaceLockReadOnly, NULL);
 	_shadowSeed = seed;
@@ -8371,7 +8487,9 @@ hm_rows_texture(HakiosMetalBlitCommandEncoder *self, hakios_metal_cb *cb, hakios
 	/* a surface read through a copy: the copy as the surface is now, and what a kernel writes back into the surface
 	 * once the command buffer is done */
 	[(HakiosMetalTexture *)texture hakiosRefreshShadow];
-	if ([(HakiosMetalTexture *)texture hakiosIsShadow] && ([(HakiosMetalTexture *)texture usage] & MTLTextureUsageShaderWrite) != 0) {
+	/* (... and a surface the kernel writes as it lies: its seed moved then, see -hakiosWriteBackShadow) */
+	if (([(HakiosMetalTexture *)texture hakiosIsShadow] || ([(HakiosMetalTexture *)texture iosurface] != NULL && hm_seed_after_gpu())) &&
+	    ([(HakiosMetalTexture *)texture usage] & MTLTextureUsageShaderWrite) != 0) {
 		HakiosMetalTexture *written = [(HakiosMetalTexture *)texture retain];
 		[_commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
 			(void)cb;
