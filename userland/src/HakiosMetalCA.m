@@ -7766,9 +7766,12 @@ hm_completed(hakios_metal_cb *cb, void *context)
 static void
 hm_loadtest(id device)
 {
-	static const struct { MTLPixelFormat format; unsigned bytes; uint32_t texel; } kinds[] = {
-		{ MTLPixelFormatBGRA8Unorm, 4, 0xff293329 }, { (MTLPixelFormat)43, 2, 0x90a5 }, { (MTLPixelFormat)40, 2, 0x2145 },
-		{ (MTLPixelFormat)43, 2, 0xffff }, { (MTLPixelFormat)43, 2, 0xc210 }, { MTLPixelFormatRGBA8Unorm, 4, 0xff293329 },
+	/* (every format a draw goes into: 8-bit, packed 16-bit, half and whole floats, RG11B10Float; sRGB ones too) */
+	static const struct { unsigned format, bytes; uint64_t texel; } kinds[] = {
+		{ 80, 4, 0xff293329 }, { 81, 4, 0xff293329 }, { 70, 4, 0xff293329 }, { 71, 4, 0xff293329 },
+		{ 43, 2, 0x90a5 }, { 43, 2, 0xc210 }, { 40, 2, 0x2145 }, { 10, 1, 0x5a }, { 30, 2, 0x5a33 },
+		{ 25, 2, 0x3800 }, { 65, 4, 0x3c003800 }, { 55, 4, 0x3f000000 }, { 115, 8, 0x3c003a0038003400ULL },
+		{ 92, 4, 0x380u | 0x380u << 11 | 0x1c0u << 22 },
 	};
 	id queue = [device newCommandQueue];
 	MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:8 height:8 mipmapped:NO];
@@ -7778,11 +7781,13 @@ hm_loadtest(id device)
 	for (int i = 0; i < 64; i++) white[i] = 0xff4080c0;
 	[source replaceRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 withBytes:white bytesPerRow:32];
 	for (unsigned k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
-		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kinds[k].format width:64 height:64 mipmapped:NO];
+		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)kinds[k].format width:64 height:64 mipmapped:NO];
 		[td setUsage:MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead];
 		id target = [device newTextureWithDescriptor:td];
 		uint8_t *rows = calloc(64 * 64, kinds[k].bytes);
-		uint32_t outside = 0, inside = 0, corner = 0;
+		uint64_t outside = 0, inside = 0, corner = 0;
+
+		if (target == nil) { hm_print("loadtest: MTLPixelFormat %u: no texture\n", kinds[k].format); continue; }
 
 		for (int i = 0; i < 64 * 64; i++) memcpy(rows + (size_t)i * kinds[k].bytes, &kinds[k].texel, kinds[k].bytes);
 		[target replaceRegion:MTLRegionMake2D(0, 0, 64, 64) mipmapLevel:0 withBytes:rows bytesPerRow:64 * kinds[k].bytes];
@@ -7791,12 +7796,12 @@ hm_loadtest(id device)
 		int r = hakios_metal_cb_blit([(HakiosMetalCommandBuffer *)cb hakiosCommandBuffer], [(HakiosMetalTexture *)source hakiosTexture], 0, 0, 0, 8, 8, [(HakiosMetalTexture *)target hakiosTexture], 0, 24, 24, 16, 16, 0);
 		[cb commit];
 		[cb waitUntilCompleted];
-		[target getBytes:&outside bytesPerRow:4 fromRegion:MTLRegionMake2D(50, 50, 1, 1) mipmapLevel:0];
-		[target getBytes:&inside bytesPerRow:4 fromRegion:MTLRegionMake2D(30, 30, 1, 1) mipmapLevel:0];
-		[target getBytes:&corner bytesPerRow:4 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
-		hm_print("loadtest: MTLPixelFormat %lu written %x: after a draw into its middle (%d, %s) outside %x and %x (%s), inside %x\n",
-		    (unsigned long)kinds[k].format, kinds[k].texel, r, hakios_metal_error(), outside, corner,
-		    outside == kinds[k].texel && corner == kinds[k].texel ? "KEPT" : "CHANGED", inside);
+		[target getBytes:&outside bytesPerRow:8 fromRegion:MTLRegionMake2D(50, 50, 1, 1) mipmapLevel:0];
+		[target getBytes:&inside bytesPerRow:8 fromRegion:MTLRegionMake2D(30, 30, 1, 1) mipmapLevel:0];
+		[target getBytes:&corner bytesPerRow:8 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
+		hm_print("loadtest: MTLPixelFormat %u written %llx: after a draw into its middle (%d, %s) outside %llx and %llx (%s), inside %llx\n",
+		    kinds[k].format, (unsigned long long)kinds[k].texel, r, r != 0 ? hakios_metal_error() : "", (unsigned long long)outside,
+		    (unsigned long long)corner, outside == kinds[k].texel && corner == kinds[k].texel ? "KEPT" : "CHANGED", (unsigned long long)inside);
 		[target release];
 	}
 	[source release];
