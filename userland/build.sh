@@ -619,6 +619,18 @@ if [ -f ../fw-wifi/fw_bcmdhd.bin_4383_a3 ]; then
 		[ -f ../fw-wifi/$f ] && install -m 0644 ../fw-wifi/$f root/fw/
 	done
 fi
+# ... and what the Pixel 8a's modem is sent besides its firmware (which the kernel reads from the phone's own modem_a
+# partition): THIS phone's calibration and identity -- nv_normal.bin, nv_protected.bin (/mnt/vendor/efs of its Android),
+# replay_region.bin (/mnt/vendor/modem_userdata) and handover.bin (161 bytes of the modem's shared memory at 0x82c, read
+# while Android runs) -- into ../fw-modem-akita; 1.5 MB (devices/akita/drivers/modem, modem=N). Never in git, and left
+# out with SHARE=1: an image with them in it is this one phone's
+rm -f root/fw/nv_normal.bin root/fw/nv_protected.bin root/fw/replay_region.bin root/fw/handover.bin
+if [ -f ../fw-modem-akita/nv_normal.bin ] && [ -z "$SHARE" ]; then
+	mkdir -p root/fw
+	for f in nv_normal.bin nv_protected.bin replay_region.bin handover.bin; do
+		[ -f ../fw-modem-akita/$f ] && install -m 0644 ../fw-modem-akita/$f root/fw/
+	done
+fi
 # the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
 # so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
 rm -f root/fw/network
