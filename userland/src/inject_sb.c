@@ -778,6 +778,10 @@ update_service_item(id self, SEL sel, long item, void *data, id sim, id other, v
 				return;
 			}
 			((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
+			if (strcmp(shown, name) != 0 && class_getInstanceMethod(object_getClass(self), sel_registerName("_notifyItemChanged:"))) {
+				/* (the aggregator's own updater says so when a value changed: ours changed it after) */
+				((void (*)(id, SEL, long))objc_msgSend)(self, sel_registerName("_notifyItemChanged:"), item);
+			}
 			if (strcmp(shown, name) != 0) {
 				snprintf(shown, sizeof(shown), "%s", name);
 				say("hakios: cellular: service \"%s\" shown (item %ld)\n", name, item);
