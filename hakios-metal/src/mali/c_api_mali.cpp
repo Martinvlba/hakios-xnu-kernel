@@ -718,6 +718,16 @@ struct hakios_metal_program {
         pos_spd_no_psiz = vs.writes_psiz && vs.no_psiz_offset ? spd(3, 3, vs.work_regs, vs.preload, code.va + vs.no_psiz_offset, false) : 0;
         writes_psiz = vs.writes_psiz != 0;
         extended_fifo = vs.extended_fifo != 0;
+        {
+            // (boot-arg metal_fetchsay, with metal_appsay inside an application: what the compiler made of the program)
+            static const bool say = bootArg("metal_fetchsay");
+            if (say) {
+                fprintf(stderr, "hakios-metal: program %s: vertex %u bytes of code, %u push constant words, varyings %u bytes, work registers %u, "
+                    "spilled %u bytes, psiz %d, extended fifo %d, layer %d; fragment %u bytes, %u words, spilled %u\n", vs.name, (unsigned)vs.size,
+                    vs.fau_words, vs.varying_bytes, vs.work_regs, vs.tls_size, (int)vs.writes_psiz, (int)vs.extended_fifo, (int)vs.writes_layer,
+                    (unsigned)fs.size, fs.fau_words, fs.tls_size);
+            }
+        }
         writes_layer = vs.writes_layer != 0;
         __asm__ volatile("dsb sy" ::: "memory");
         device = d;
@@ -1613,6 +1623,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     }();
     // (with every target that asked for a load elided -- passElide -- there is nothing to preload)
     bool preload = dj.load && dj.layers <= 1;       // (a layered pass is not loaded: refused where the draw is recorded)
+    bool lazy_pass = false;                         // (the load is a pre-frame shader's: no draw of ours started the tiler)
     if (preload && !dj.load0) {
         preload = false;
         for (unsigned i = 1; i < dj.rts; i++) {
@@ -1691,6 +1702,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
             const DrawJob::More &m = dj.more[i - 1];
             lazy = !(m.write && !m.elide && !m.missing) || m.load;
         }
+        lazy_pass = lazy;
         if (lazy) {
             const uint64_t pdcd_at = (pbl_at + 16 * nt + 0x3f) & ~0x3fULL;
             auto *w = (uint32_t *)(area + pdcd_at);
@@ -1798,7 +1810,9 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
     s[n++] = move32(60, 0x3f800000);                                            // primitive size 1.0
     s[n++] = move32(61, 0);                                                     // TILER_FLAGS2: VRS 1x1
     if (!dj.clear_only) {                                                       // (a clear: the fragment job alone)
-        if (first && !dj.load) {                                                // (started already by the preload)
+        // (11-20: also when the load is the pre-frame shader's, or nothing is loaded after all -- every target elided, a
+        // layered pass: no preload draw came first, and the heap was never told a pass began)
+        if (first && (!dj.load || lazy_pass || !preload)) {                     // (else started already by the preload's draw)
             s[n++] = 49ULL << 56 | 0ULL << 32;                                  // HEAP_OPERATION: vertex/tiler started
         }
         s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                          // RUN_IDVS: malloc, the fragment's SRT

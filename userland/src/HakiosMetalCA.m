@@ -121,6 +121,8 @@ static int hm_print_fd = -1;    /* where hm_print writes: stderr, the console, o
  * stdout is nowhere, so the window server's lines -- the client this plug-in is for -- reached no log while they went
  * to stdout; one write keeps two threads' lines from interleaving. Flushed every time for the same reason as before:
  * the processes that reach a refusal are the ones that then abort, and a line not written dies with them. */
+static bool hm_boot_arg_set(const char *what);
+
 static void
 hm_print(const char *fmt, ...)
 {
@@ -151,6 +153,8 @@ hm_print(const char *fmt, ...)
 				int console = open("/dev/console", O_WRONLY | O_NOCTTY);
 
 				if (console >= 0) fd = console;
+				/* (boot-arg metal_appsay: the library's own lines, written to stderr, to the console too) */
+				if (console >= 0 && hm_boot_arg_set("metal_appsay")) dup2(console, 2);
 			}
 		}
 		hm_print_fd = fd;
@@ -3953,9 +3957,46 @@ hm_compile_queue(void)
 				}
 			}
 		}
+		{
+			/* boot-arg metal_dumpvs=NAME (a diagnostic): the VERTEX function's module of the first three programs whose
+			 * name holds NAME, in hex, for the host's llvm-dis (the system's code: it stays in the log) */
+			static int dumped;
+			char args[1024] = {0}, name[64] = "", *at;
+			size_t size = sizeof(args) - 1;
+
+			if (dumped < 3 && sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "metal_dumpvs=")) != NULL &&
+			    sscanf(at + 13, "%63[^ ]", name) == 1 && strstr(hakios_metal_program_name(program), name) != NULL) {
+				NSData *vair = hm_bitcode_for([descriptor vertexFunction], [descriptor label], NO);
+				const uint8_t *vb = (const uint8_t *)[vair bytes];
+
+				dumped++;
+				hm_print("dumpvs %d begin %s, %lu bytes\n", dumped, hakios_metal_program_name(program), (unsigned long)[vair length]);
+				for (NSUInteger o = 0; o < [vair length]; o += 64) {
+					char line[160];
+					size_t n = 0;
+
+					for (NSUInteger i = o; i < o + 64 && i < [vair length]; i++) n += (size_t)snprintf(line + n, sizeof(line) - n, "%02x", vb[i]);
+					hm_print("dumpvs %d %06lx %s\n", dumped, (unsigned long)o, line);
+				}
+			}
+		}
 		hm_print("linked %s (%p, pipeline %s) for pixel format %u: the vertex stage binds %u resources, the fragment stage %u; fragment constants not 0:%s\n",
 			 hakios_metal_program_name(program), (void *)program, [descriptor label] ? [[descriptor label] UTF8String] : "none",
 			 format, hakios_metal_program_resource_count(program, 0), hakios_metal_program_resource_count(program, 1), [set UTF8String]);
+		if (hm_boot_arg_set("metal_fetchsay")) {
+			/* (each stage's resources as the compile found them: kind, index, size) */
+			for (unsigned stage = 0; stage < 2; stage++) {
+				char line[700];
+				int at = snprintf(line, sizeof(line), "resources of %s, %s stage:", hakios_metal_program_name(program), stage ? "fragment" : "vertex");
+				for (unsigned r = 0; r < hakios_metal_program_resource_count(program, stage) && at < 660; r++) {
+					unsigned kind = 0, index = 0, size = 0;
+					if (hakios_metal_program_resource(program, stage, r, &kind, &index, &size) == 0) {
+						at += snprintf(line + at, sizeof(line) - (size_t)at, " k%u[%u]:%u", kind, index, size);
+					}
+				}
+				hm_print("%s\n", line);
+			}
+		}
 	}
 	{
 		HakiosMetalRenderPipelineState *state = [[HakiosMetalRenderPipelineState alloc] initWithHakiosDevice:self program:program descriptor:descriptor];
@@ -10211,6 +10252,47 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 				 _pass.stencil_front_reference, _pass.cull_mode, _pass.winding, _hasViewport ? "set" : "unset", _viewport.x, _viewport.y,
 				 _viewport.width, _viewport.height, _viewport.znear, _viewport.zfar, _hasScissor ? "set" : "unset", _scissor.x,
 				 _scissor.y, _scissor.width, _scissor.height);
+		}
+	}
+	/* boot-arg metal_drawsay=NAME: the first 40 draws of programs whose name holds NAME (any process), with what they
+	 * fetch from -- the counts, the index buffer and its first indices, each vertex buffer bound with its length and
+	 * offset (Maps' terrain draws fault the GPU at addresses made of floats, 11-19) */
+	{
+		static char name[64];
+		static int say = -1, said;
+
+		if (say < 0) {
+			char args[1024] = {0};
+			size_t size = sizeof(args) - 1;
+			const char *at;
+
+			say = 0;
+			if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "metal_drawsay=")) != NULL) {
+				sscanf(at + 14, "%63[^ ]", name);
+				say = name[0] != '\0';
+			}
+		}
+		if (say && said < 40 && [_pipeline hakiosProgram] != NULL && strstr(hakios_metal_program_name([_pipeline hakiosProgram]), name) != NULL) {
+			char line[900];
+			int at = snprintf(line, sizeof(line), "drawsay %d: %s prim %lu start %lu count %lu instances %lu base vertex %ld base instance %lu",
+			    said++, hakios_metal_program_name([_pipeline hakiosProgram]), (unsigned long)primitive, (unsigned long)start, (unsigned long)count,
+			    (unsigned long)instances, (long)baseVertex, (unsigned long)baseInstance);
+			if (indexBuffer != nil) {
+				const uint8_t *ix = (const uint8_t *)[indexBuffer contents] + indexOffset;
+				unsigned long top = 0;
+				for (NSUInteger i = 0; i < count && indexOffset + (i + 1) * (indexType == MTLIndexTypeUInt16 ? 2 : 4) <= [indexBuffer length]; i++) {
+					unsigned long v = indexType == MTLIndexTypeUInt16 ? ((const uint16_t *)ix)[i] : ((const uint32_t *)ix)[i];
+					if (v > top) top = v;
+				}
+				at += snprintf(line + at, sizeof(line) - (size_t)at, "; indices %s at %lu of %lu bytes, the highest %lu", indexType == MTLIndexTypeUInt16 ? "u16" : "u32",
+				    (unsigned long)indexOffset, (unsigned long)[indexBuffer length], top);
+			}
+			for (unsigned i = 0; i < _vsHighest && at < 820; i++) {
+				if (_vsBuffers[i] != nil) {
+					at += snprintf(line + at, sizeof(line) - (size_t)at, "; v%u %lu bytes at %llu", i, (unsigned long)[_vsBuffers[i] length], (unsigned long long)_vsOffsets[i]);
+				}
+			}
+			hm_print("%s\n", line);
 		}
 	}
 	const double coreBegan = hm_fps_on() ? hm_now() : 0;

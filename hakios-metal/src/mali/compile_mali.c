@@ -419,6 +419,20 @@ lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
 		return false;
 	}
 	unsigned stride = st->fetch->layouts[buffer].stride, step = st->fetch->layouts[buffer].step_function;
+	{
+		/* boot-arg metal_fetchsay: each attribute read, its format and what the function takes it as */
+		static int say = -1;
+		if (say < 0) {
+			char args[1024] = {0};
+			size_t size = sizeof(args) - 1;
+			say = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_fetchsay") != NULL;
+		}
+		if (say) {
+			fprintf(stderr, "hakios-metal: fetch: %s: attribute %u, MTLVertexFormat %u at %u of buffer %u (stride %u, step %u) into base type %d x%u, %u bits\n",
+			    b->shader->info.name ? b->shader->info.name : "?", slot, format, st->fetch->attributes[slot].offset, buffer, stride, step,
+			    (int)glsl_get_base_type(glsl_without_array(var->type)), in->def.num_components, in->def.bit_size);
+		}
+	}
 	unsigned rate = st->fetch->layouts[buffer].step_rate ? st->fetch->layouts[buffer].step_rate : 1;
 
 	b->cursor = nir_before_instr(&in->instr);
@@ -452,8 +466,10 @@ lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
 			{ 19, 2, 16, 2 }, { 20, 2, 16, 3 }, { 21, 2, 16, 4 }, { 22, 3, 16, 2 }, { 23, 3, 16, 3 }, { 24, 3, 16, 4 },
 			{ 32, 1, 32, 1 }, { 33, 1, 32, 2 }, { 34, 1, 32, 3 }, { 35, 1, 32, 4 },
 			{ 36, 0, 32, 1 }, { 37, 0, 32, 2 }, { 38, 0, 32, 3 }, { 39, 0, 32, 4 },
-			{ 45, 0, 8, 1 }, { 46, 1, 8, 1 }, { 47, 2, 8, 1 }, { 48, 3, 8, 1 },
-			{ 49, 0, 16, 1 }, { 50, 1, 16, 1 }, { 51, 2, 16, 1 }, { 52, 3, 16, 1 },
+			/* (11-20: UChar, UCharNormalized, Char, CharNormalized; UShort .. -- the normalized ones and the signed
+			 * ones had each other's kinds) */
+			{ 45, 0, 8, 1 }, { 46, 2, 8, 1 }, { 47, 1, 8, 1 }, { 48, 3, 8, 1 },
+			{ 49, 0, 16, 1 }, { 50, 2, 16, 1 }, { 51, 1, 16, 1 }, { 52, 3, 16, 1 },
 		};
 		const bool to_int = glsl_base_type_is_integer(glsl_get_base_type(glsl_without_array(var->type)));
 		unsigned kind = ~0u, vbits = 0, n = 0;
@@ -517,12 +533,25 @@ lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
 	}
 	unsigned want = in->def.num_components, bits = in->def.bit_size;
 	nir_def *c[4];
+	/*
+	 * (11-20) A FLOAT FORMAT INTO AN INTEGER VARIABLE: converted, as the integers above are for a float one (the floats
+	 * went in as they were -- 1.0 read as 0x3f800000). No function seen so far takes one so; found while looking for
+	 * why Maps' compressed terrain faults the GPU (that one's attributes are all floats: not this).
+	 */
+	const bool int_var = glsl_base_type_is_integer(glsl_get_base_type(glsl_without_array(var->type)));
+	const enum glsl_base_type var_base = glsl_get_base_type(glsl_without_array(var->type));
+	const bool uint_var = int_var && (var_base == GLSL_TYPE_UINT || var_base == GLSL_TYPE_UINT8 || var_base == GLSL_TYPE_UINT16 || var_base == GLSL_TYPE_UINT64);
 	for (unsigned i = 0; i < want; i++) {
-		c[i] = i < v->num_components ? nir_channel(b, v, i) : nir_imm_float(b, i == 3 ? 1.0f : 0.0f);
+		if (int_var) {
+			c[i] = i < v->num_components ? (uint_var ? nir_f2u32(b, nir_channel(b, v, i)) : nir_f2i32(b, nir_channel(b, v, i))) :
+			    nir_imm_int(b, i == 3 ? 1 : 0);
+		} else {
+			c[i] = i < v->num_components ? nir_channel(b, v, i) : nir_imm_float(b, i == 3 ? 1.0f : 0.0f);
+		}
 	}
 	v = nir_vec(b, c, want);
 	if (bits != 32) {
-		v = nir_f2fN(b, v, bits);
+		v = int_var ? nir_u2uN(b, v, bits) : nir_f2fN(b, v, bits);
 	}
 	nir_def_rewrite_uses(&in->def, v);
 	nir_instr_remove(&in->instr);

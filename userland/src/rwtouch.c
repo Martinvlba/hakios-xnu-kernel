@@ -18,6 +18,7 @@
  *                                a sample every STEP milliseconds (default 8, what the touch screen gives, as
  *                                swipe and drag give them):
  *                                for measuring how far behind the finger the screen is (tools/latency.py)
+ *   hzigzag Y X0 X1 MS N [STEP]  the same from side to side, at the height Y
  *   button NAME [MS]             press a button: home, lock, volup, voldown
  *   screenshot                   the side button and volume up together
  *   read                         print the samples that arrive, forever (to watch the queue)
@@ -180,12 +181,13 @@ drag(double x0, double y0, double x1, double y1, int ms, int hold, int grab)
 	post(HAKIOS_TOUCH_UP, x1, y1);
 }
 
+/* (ACROSS: X is the height it stays at, Y0 and Y1 the two ends from left to right -- "hzigzag") */
 static void
-zigzag(double x, double y0, double y1, int ms, int times, int step_ms)
+zigzag(double x, double y0, double y1, int ms, int times, int step_ms, int across)
 {
 	uint64_t start, legs = (uint64_t)times * 2, total_us = legs * (uint64_t)ms * 1000;
 
-	post(HAKIOS_TOUCH_DOWN, x, y0);
+	post(HAKIOS_TOUCH_DOWN, across ? y0 : x, across ? x : y0);
 	start = mach_absolute_time();
 	for (uint64_t at = (uint64_t)step_ms * 1000; at <= total_us; at += (uint64_t)step_ms * 1000) {
 		uint64_t leg = at / ((uint64_t)ms * 1000), within = at % ((uint64_t)ms * 1000);
@@ -197,10 +199,10 @@ zigzag(double x, double y0, double y1, int ms, int times, int step_ms)
 		}
 		y = leg % 2 == 0 ? y0 + (y1 - y0) * part : y1 + (y0 - y1) * part;
 		sleep_until(start, at);
-		post(HAKIOS_TOUCH_MOVE, x, y);
+		post(HAKIOS_TOUCH_MOVE, across ? y : x, across ? x : y);
 	}
 	usleep(16000);
-	post(HAKIOS_TOUCH_UP, x, y0);
+	post(HAKIOS_TOUCH_UP, across ? y0 : x, across ? x : y0);
 }
 
 int
@@ -228,10 +230,10 @@ main(int argc, char **argv)
 			usleep(60000);
 			post(HAKIOS_TOUCH_UP, x, y);
 			i += 2;
-		} else if (strcmp(step, "zigzag") == 0 && left >= 5) {
+		} else if ((strcmp(step, "zigzag") == 0 || strcmp(step, "hzigzag") == 0) && left >= 5) {
 			int step_ms = left >= 6 && atoi(argv[i + 6]) > 0 ? atoi(argv[i + 6]) : 8;
 
-			zigzag(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atoi(argv[i + 4]), atoi(argv[i + 5]), step_ms);
+			zigzag(atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atoi(argv[i + 4]), atoi(argv[i + 5]), step_ms, step[0] == 'h');
 			i += left >= 6 && atoi(argv[i + 6]) > 0 ? 6 : 5;
 		} else if (strcmp(step, "hold") == 0 && left >= 3) {
 			double x = atof(argv[i + 1]), y = atof(argv[i + 2]);
