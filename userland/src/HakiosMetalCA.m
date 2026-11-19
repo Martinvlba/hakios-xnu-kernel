@@ -6344,6 +6344,154 @@ hm_hook_drawables(void)
  * The command buffer: hakios-metal's, with Metal's handlers and slot bookkeeping around it
  * ============================================================================================================ */
 
+/* ============================================================================================================
+ * (11-19) boot-arg metal_framesay=SECONDS: for twelve seconds from that time of the kernel's clock, every render pass of
+ * the window server said in one line -- when, its target (size, surface, format), its load, the pipelines and
+ * viewports of its draws, how many draws -- and every commit and present. To set beside a screen recording (rec=N,
+ * whose frames carry the same clock): what a frame with a black box in it was made of (the cover sheet's, TODO 96).
+ * ============================================================================================================ */
+static __thread char hm_fs_line[1400];
+static __thread int hm_fs_at, hm_fs_draws, hm_fs_views;
+static __thread const char *hm_fs_last;
+/* ... and a second line a pass: the target's address, then in order the scissor rectangles set (sc), the fragment
+ * textures bound (fN=address:size) and a # for every draw */
+static __thread char hm_fs_det[900];
+static __thread int hm_fs_det_at;
+
+static BOOL
+hm_fs_on(void)
+{
+	static double from = -2;
+
+	if (from == -2) {
+		char args[1024] = {0};
+		size_t size = sizeof(args) - 1;
+		const char *at;
+
+		from = -1;
+		if (strcmp(getprogname(), "backboardd") == 0 && sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 &&
+		    (at = strstr(args, "metal_framesay=")) != NULL) {
+			from = atof(at + 15);
+		}
+	}
+	if (from < 0) return NO;
+	const double now = hm_now();
+	return now >= from && now < from + 12;
+}
+
+static void
+hm_fs_add(const char *format, ...)
+{
+	va_list ap;
+
+	if (hm_fs_at <= 0 || hm_fs_at >= (int)sizeof(hm_fs_line) - 2) return;
+	va_start(ap, format);
+	int n = vsnprintf(hm_fs_line + hm_fs_at, sizeof(hm_fs_line) - (size_t)hm_fs_at, format, ap);
+	va_end(ap);
+	if (n > 0) hm_fs_at = hm_fs_at + n < (int)sizeof(hm_fs_line) ? hm_fs_at + n : (int)sizeof(hm_fs_line) - 1;
+}
+
+/* ... and the pixels (11-19): the offscreen targets of a frame whose backdrop blur was redone for a small part only (7
+ * passes: the frame before every black box on the dragged cover sheet), and of a whole frame now and then to compare,
+ * read back once the command buffer completed: a 64x64 target whole, every 4th texel; a 542x1173 one where the box is
+ * (x 240..400, y 520..650). A texel as its green and alpha, hex (a 16-bit format: the texel). */
+static __thread BOOL hm_fs_capture;         /* this pass is a backdrop's capture (a 16-bit target): its draws said whole */
+static __thread id hm_fs_targets[24];
+static __thread int hm_fs_ntargets;
+
+static void
+hm_fs_pixels(id texture, const char *what, int index)
+{
+	const NSUInteger w = [texture width], h = [texture height];
+	const BOOL small = w <= 64 && h <= 64, wide = [texture pixelFormat] != 43;
+	const NSUInteger x0 = small ? 0 : 240, y0 = small ? 0 : 520, sx = small ? 4 : 16, sy = small ? 4 : 13;
+	const NSUInteger cols = small ? w / 4 : 10, rows = small ? h / 4 : 10;
+
+	if (w < 16 || h < 16 || (!small && (w != 542 || h != 1173))) return;
+	for (NSUInteger r = 0; r < rows; r++) {
+		char line[200];
+		int at = 0;
+		for (NSUInteger c = 0; c < cols && at < 180; c++) {
+			uint8_t px[4] = {0};
+			[texture getBytes:px bytesPerRow:4 fromRegion:MTLRegionMake2D(x0 + c * sx, y0 + r * sy, 1, 1) mipmapLevel:0];
+			at += wide ? snprintf(line + at, sizeof(line) - (size_t)at, "%02x%02x ", px[1], px[3])
+			    : snprintf(line + at, sizeof(line) - (size_t)at, "%02x%02x ", px[1], px[0]);
+		}
+		hm_print("framesay: pixels %s %d %06lx %lux%lu row %2lu: %s\n", what, index, (unsigned long)((uintptr_t)texture & 0xffffff),
+		    (unsigned long)w, (unsigned long)h, (unsigned long)(y0 + r * sy), line);
+	}
+}
+
+/* at a commit: the frame's targets handed over (retained), to be read when COMMAND_BUFFER is done */
+static void
+hm_fs_commit(id command_buffer)
+{
+	static int whole;
+	const int n = hm_fs_ntargets;
+	const BOOL part = n == 7, sample = n >= 12 && ++whole % 200 == 50;
+
+	hm_fs_ntargets = 0;
+	if (!(part || sample) || !hm_fs_on()) {
+		for (int i = 0; i < n; i++) [hm_fs_targets[i] release];
+		return;
+	}
+	id *held = malloc(sizeof(id) * (size_t)n);
+	memcpy(held, hm_fs_targets, sizeof(id) * (size_t)n);
+	const double at = hm_now();
+	[command_buffer retain];
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+		[command_buffer waitUntilCompleted];
+		hm_print("framesay: pixels of the frame committed at %.4f (%s), read at %.4f\n", at, part ? "part" : "whole", hm_now());
+		for (int i = 0; i < n; i++) {
+			hm_fs_pixels(held[i], part ? "part" : "whole", i);
+			[held[i] release];
+		}
+		free(held);
+		[command_buffer release];
+	});
+}
+
+static void
+hm_fs_detail(const char *format, ...)
+{
+	va_list ap;
+
+	if (hm_fs_at <= 0 || hm_fs_det_at >= (int)sizeof(hm_fs_det) - 2) return;
+	va_start(ap, format);
+	int n = vsnprintf(hm_fs_det + hm_fs_det_at, sizeof(hm_fs_det) - (size_t)hm_fs_det_at, format, ap);
+	va_end(ap);
+	if (n > 0) hm_fs_det_at = hm_fs_det_at + n < (int)sizeof(hm_fs_det) ? hm_fs_det_at + n : (int)sizeof(hm_fs_det) - 1;
+}
+
+static void
+hm_fs_begin(MTLRenderPassDescriptor *descriptor)
+{
+	hm_fs_at = 0;
+	if (!hm_fs_on()) return;
+	MTLRenderPassColorAttachmentDescriptor *c = [[descriptor colorAttachments] objectAtIndexedSubscript:0];
+	id texture = [c texture];
+	IOSurfaceRef surface = [texture respondsToSelector:@selector(iosurface)] ? [texture iosurface] : NULL;
+
+	hm_fs_draws = hm_fs_views = 0;
+	hm_fs_last = NULL;
+	hm_fs_at = snprintf(hm_fs_line, sizeof(hm_fs_line), "pass %.4f target %lux%lu fmt %lu surface %u load %lu store %lu",
+	    hm_now(), (unsigned long)[texture width], (unsigned long)[texture height], (unsigned long)[texture pixelFormat],
+	    surface != NULL ? IOSurfaceGetID(surface) : 0, (unsigned long)[c loadAction], (unsigned long)[c storeAction]);
+	if (hm_fs_ntargets < 24) hm_fs_targets[hm_fs_ntargets++] = [texture retain];
+	hm_fs_capture = [texture pixelFormat] == 43;
+	hm_fs_det_at = snprintf(hm_fs_det, sizeof(hm_fs_det), "%.4f target %06lx", hm_now(), (unsigned long)((uintptr_t)texture & 0xffffff));
+}
+
+static void
+hm_fs_end(void)
+{
+	if (hm_fs_at > 0) {
+		hm_print("framesay: %s; %d draws\n", hm_fs_line, hm_fs_draws);
+		hm_print("framesay: detail %s\n", hm_fs_det);
+	}
+	hm_fs_at = 0;
+}
+
 @implementation HakiosMetalCommandBuffer
 
 /* _MTLCommandBuffer declares conformance to nothing, and MPSCommandBufferImageCache tests conformsToProtocol: before it
@@ -6801,6 +6949,8 @@ hm_shadow_targets(MTLRenderPassDescriptor *d, id<MTLCommandBuffer> cb)
 	struct hakios_metal_render_pass pass;
 	HakiosMetalTexture *texture = nil;
 	char why[256];
+
+	hm_fs_begin(descriptor);
 
 	if (!hm_read_render_pass(descriptor, &pass, &texture, why, sizeof(why))) {
 		hm_print("refused: a render pass: %s; the command buffer is failed and no encoder is returned\n", why);
@@ -7609,9 +7759,67 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	if (![_turned containsObject:texture]) [_turned addObject:texture];
 }
 
+/* BOOT-ARG metal_loadtest (11-19): the Load action on targets of each drawable format, by itself -- a texture filled by
+ * the processor, a small scaled copy drawn into its middle (a pass that loads, one draw under a scissor), and a texel
+ * outside the copy read back: it must be what the processor wrote. (The backdrop capture, BGR5A1, came back five times
+ * darker around the part a frame redrew: the black box on the dragged cover sheet.) Once, in the window server. */
+static void
+hm_loadtest(id device)
+{
+	static const struct { MTLPixelFormat format; unsigned bytes; uint32_t texel; } kinds[] = {
+		{ MTLPixelFormatBGRA8Unorm, 4, 0xff293329 }, { (MTLPixelFormat)43, 2, 0x90a5 }, { (MTLPixelFormat)40, 2, 0x2145 },
+		{ (MTLPixelFormat)43, 2, 0xffff }, { (MTLPixelFormat)43, 2, 0xc210 }, { MTLPixelFormatRGBA8Unorm, 4, 0xff293329 },
+	};
+	id queue = [device newCommandQueue];
+	MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:8 height:8 mipmapped:NO];
+	id source = [device newTextureWithDescriptor:sd];
+	uint32_t white[64];
+
+	for (int i = 0; i < 64; i++) white[i] = 0xff4080c0;
+	[source replaceRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 withBytes:white bytesPerRow:32];
+	for (unsigned k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kinds[k].format width:64 height:64 mipmapped:NO];
+		[td setUsage:MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead];
+		id target = [device newTextureWithDescriptor:td];
+		uint8_t *rows = calloc(64 * 64, kinds[k].bytes);
+		uint32_t outside = 0, inside = 0, corner = 0;
+
+		for (int i = 0; i < 64 * 64; i++) memcpy(rows + (size_t)i * kinds[k].bytes, &kinds[k].texel, kinds[k].bytes);
+		[target replaceRegion:MTLRegionMake2D(0, 0, 64, 64) mipmapLevel:0 withBytes:rows bytesPerRow:64 * kinds[k].bytes];
+		free(rows);
+		id cb = [queue commandBuffer];
+		int r = hakios_metal_cb_blit([(HakiosMetalCommandBuffer *)cb hakiosCommandBuffer], [(HakiosMetalTexture *)source hakiosTexture], 0, 0, 0, 8, 8, [(HakiosMetalTexture *)target hakiosTexture], 0, 24, 24, 16, 16, 0);
+		[cb commit];
+		[cb waitUntilCompleted];
+		[target getBytes:&outside bytesPerRow:4 fromRegion:MTLRegionMake2D(50, 50, 1, 1) mipmapLevel:0];
+		[target getBytes:&inside bytesPerRow:4 fromRegion:MTLRegionMake2D(30, 30, 1, 1) mipmapLevel:0];
+		[target getBytes:&corner bytesPerRow:4 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
+		hm_print("loadtest: MTLPixelFormat %lu written %x: after a draw into its middle (%d, %s) outside %x and %x (%s), inside %x\n",
+		    (unsigned long)kinds[k].format, kinds[k].texel, r, hakios_metal_error(), outside, corner,
+		    outside == kinds[k].texel && corner == kinds[k].texel ? "KEPT" : "CHANGED", inside);
+		[target release];
+	}
+	[source release];
+	[queue release];
+}
+
 - (void)commit
 {
 	BOOL met = YES;
+	{
+		static dispatch_once_t once;
+		dispatch_once(&once, ^{
+			if (strcmp(getprogname(), "backboardd") == 0 && hm_boot_arg_set("metal_loadtest")) {
+				id device = [self device];
+				dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_global_queue(0, 0), ^{ hm_loadtest(device); });
+			}
+		});
+	}
+
+	const BOOL say = hm_fs_on() || hm_fs_ntargets != 0;
+	if (say) {
+		hm_print("framesay: commit %.4f\n", hm_now());
+	}
 
 	if (_committed) {
 		HM_ONCE("a command buffer was committed twice; Metal asserts on that, this plug-in does nothing the second time\n");
@@ -7662,6 +7870,7 @@ hm_completed(hakios_metal_cb *cb, void *context)
 			[self hakiosDeliverScheduled];
 			[self release];
 		}];
+		hm_fs_commit(self);
 		return;
 	}
 	{
@@ -7671,6 +7880,7 @@ hm_completed(hakios_metal_cb *cb, void *context)
 		hm_fps_commit(hm_now() - began);
 	}
 	[self hakiosDeliverScheduled];
+	hm_fs_commit(self);
 }
 
 /* abstract in _MTLCommandBuffer (its body is doesNotRecognizeSelector:), so inheriting it aborts. The deadline is
@@ -7805,6 +8015,12 @@ hm_completed(hakios_metal_cb *cb, void *context)
  * buffer has COMPLETED, which is what Metal's display waits for anyway; the drawable is kept until then */
 - (void)presentDrawable:(id)drawable
 {
+	if (hm_fs_on() && drawable != nil) {
+		id texture = [drawable respondsToSelector:@selector(texture)] ? [drawable texture] : nil;
+		IOSurfaceRef surface = [texture respondsToSelector:@selector(iosurface)] ? [texture iosurface] : NULL;
+
+		hm_print("framesay: present %.4f surface %u\n", hm_now(), surface != NULL ? IOSurfaceGetID(surface) : 0);
+	}
 	if (drawable == nil) {
 		return;
 	}
@@ -9095,6 +9311,14 @@ hm_spec_off(void)
 
 - (void)setRenderPipelineState:(id)state
 {
+	if (hm_fs_at > 0 && state != nil) {
+		const char *label = [[(id)state label] UTF8String] ?: "?";
+
+		if (hm_fs_last == NULL || strcmp(hm_fs_last, label) != 0) {
+			hm_fs_add(" | %d: %s", hm_fs_draws, label);
+			hm_fs_last = label;
+		}
+	}
 	if (state != nil && ![state isKindOfClass:[HakiosMetalRenderPipelineState class]]) {
 		static int told;
 		char what[160];
@@ -9114,6 +9338,9 @@ hm_spec_off(void)
 
 - (void)setViewport:(MTLViewport)viewport
 {
+	if (hm_fs_at > 0 && hm_fs_views++ < 6) {
+		hm_fs_add(" vp(%.0f,%.0f %.0fx%.0f)", viewport.originX, viewport.originY, viewport.width, viewport.height);
+	}
 	_viewport.x = viewport.originX;
 	_viewport.y = viewport.originY;
 	_viewport.width = viewport.width;
@@ -9141,6 +9368,7 @@ hm_spec_off(void)
 	_scissor.width = (unsigned)rect.width;
 	_scissor.height = (unsigned)rect.height;
 	_hasScissor = YES;
+	hm_fs_detail(" sc(%u,%u %ux%u)", _scissor.x, _scissor.y, _scissor.width, _scissor.height);
 }
 
 - (void)setScissorRects:(const MTLScissorRect *)rects count:(NSUInteger)count
@@ -9335,6 +9563,10 @@ hm_spec_off(void)
 - (void)hakiosSetTexture:(id)texture atIndex:(NSUInteger)index vertex:(BOOL)vertex
 {
 	const char *stage = vertex ? "vertex" : "fragment";
+	if (!vertex && hm_fs_at > 0) {
+		hm_fs_detail(" f%lu=%06lx:%lux%lu", (unsigned long)index, (unsigned long)((uintptr_t)texture & 0xffffff),
+		    (unsigned long)[texture width], (unsigned long)[texture height]);
+	}
 	if (index >= HM_MAX_TEXTURES) {
 		hm_print("refused: %s texture index %lu is past Metal's table of %d\n", stage, (unsigned long)index, HM_MAX_TEXTURES);
 		snprintf(_refused, sizeof(_refused), "a %s texture index past %d", stage, HM_MAX_TEXTURES);
@@ -9808,6 +10040,32 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 	const double began = hm_fps_on() ? hm_now() : 0;
 	uint64_t tpidr = 0;
 
+	if (hm_fs_at > 0) {
+		hm_fs_draws++;
+		hm_fs_detail(" #");
+		if (hm_fs_capture) {
+			/* (the vertices as CoreAnimation gives them, buffer 1; its vertex constants, buffer 0; the fragment's) */
+			char line[700];
+			int at = snprintf(line, sizeof(line), "draw %d prim %lu start %lu count %lu inst %lu sc %d(%u,%u %ux%u)", hm_fs_draws - 1,
+			    (unsigned long)primitive, (unsigned long)start, (unsigned long)count, (unsigned long)instances, (int)_hasScissor,
+			    _scissor.x, _scissor.y, _scissor.width, _scissor.height);
+			for (int b = 1; b >= 0; b--) {
+				const float *f = _vsBuffers[b] != nil ? (const float *)((const uint8_t *)[_vsBuffers[b] contents] + _vsOffsets[b]) : NULL;
+				const NSUInteger have = f != NULL ? ([_vsBuffers[b] length] - _vsOffsets[b]) / 4 : 0;
+				at += snprintf(line + at, sizeof(line) - (size_t)at, " | v%d@%lu:", b, (unsigned long)_vsOffsets[b]);
+				for (NSUInteger i = 0; i < (b == 1 ? 40 : 20) && i < have && at < 640; i++) {
+					at += snprintf(line + at, sizeof(line) - (size_t)at, " %.4g", f[i]);
+				}
+			}
+			if (_fsBuffers[0] != nil && at < 600) {
+				const uint8_t *u = (const uint8_t *)[_fsBuffers[0] contents] + _fsOffsets[0];
+				at += snprintf(line + at, sizeof(line) - (size_t)at, " | f0:");
+				for (int i = 0; i < 40 && at < 690; i++) at += snprintf(line + at, sizeof(line) - (size_t)at, "%02x", u[i]);
+			}
+			hm_print("framesay: capture %.4f %s\n", hm_now(), line);
+		}
+	}
+
 	if (began != 0) __asm__ volatile("mrs %0, TPIDR_EL0" : "=r"(tpidr));   /* (the processor number: set_thread_registers, cswitch.s) */
 	if (began != 0 && hm_sampling()) {
 		static dispatch_once_t once;
@@ -10183,6 +10441,7 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 
 - (void)endEncoding
 {
+	hm_fs_end();
 	/* a Clear no draw spent: the pass still owes it (a pass that only clears is how many clients wipe a drawable) */
 	/* (not on a command buffer a refused draw already failed -- it holds an error before commit: its first sentence is the one that matters) */
 	if (hm_owes_clear(&_pass) && hakios_metal_cb_error([self hakiosCb])[0] == '\0' &&
