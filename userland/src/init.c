@@ -1011,7 +1011,7 @@ forget_gestalt_if_changed(void)
 	/* (the cameras too: the loader's /arm-io/isp node comes with cam=5 or, on the Pixel 8a, camera=13 -- a volume first
 	 * started without it kept "no camera" for good, and SpringBoard showed no Camera.app; 11-18) */
 	int has_torch = torch != NULL && torch[0] >= '1' && torch[0] <= '9';
-	int has_camera = (cam != NULL && strcmp(cam, "5") == 0) || (camera != NULL && (strcmp(camera, "13") == 0 || strcmp(camera, "14") == 0 || strcmp(camera, "15") == 0));
+	int has_camera = (cam != NULL && strcmp(cam, "5") == 0) || (camera != NULL && (strcmp(camera, "13") == 0 || strcmp(camera, "14") == 0 || strcmp(camera, "15") == 0 || strcmp(camera, "16") == 0));
 	const char *now = has_torch ? (has_camera ? "torch camera\n" : "torch\n") : (has_camera ? "- camera\n" : "-\n");
 	char was[24] = "";
 	int fd = open(note, O_RDONLY, 0);
