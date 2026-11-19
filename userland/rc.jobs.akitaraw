@@ -1,0 +1,7 @@
+# The Pixel 8a's three cameras' raw frames for the host (RC_JOBS=rc.jobs.akitaraw, with camera=15): camera_test with
+# camera_isp.c's exposure working for 60 frames, the last one kept in /private/var/mobile/Media/hakios-klog/camera-N.raw
+# (usbmux-pull-klog.py OUTDIR --all fetches them): the main camera, the front one, the ultra-wide.
+/redwood/bin/sound_test springboard
+/redwood/bin/camera_test raw 60 keepraw sensor 1
+/redwood/bin/camera_test raw 60 keepraw sensor 2
+/redwood/bin/camera_test raw 60 keepraw sensor 3

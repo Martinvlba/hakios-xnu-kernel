@@ -388,6 +388,7 @@ isp_set_ccm(struct isp *isp, const float m[9])
  */
 struct pipe {
 	float           m[3][3];
+	float           gain[3], ccm[3][3];     /* the same in two steps: the gains, the matrix (see pixel()) */
 	bool            identity;
 };
 
@@ -396,7 +397,9 @@ pipe_init(const struct isp *isp, struct pipe *p)
 {
 	p->identity = true;
 	for (int c = 0; c < 3; c++) {
+		p->gain[c] = isp->wb[c] * isp->digital * (LUT_WHITE / (float)WHITE);
 		for (int j = 0; j < 3; j++) {
+			p->ccm[c][j] = isp->ccm[c][j];
 			p->m[c][j] = isp->ccm[c][j] * isp->wb[j] * isp->digital * (LUT_WHITE / (float)WHITE);
 			p->identity = p->identity && (c == j ? isp->ccm[c][j] == 1 : isp->ccm[c][j] == 0);
 		}
@@ -420,9 +423,21 @@ pixel(const struct isp *isp, const struct pipe *p, float r, float g, float b, ui
 		rgb[2] = curve(isp, b * p->m[2][2]);
 		return;
 	}
-	rgb[0] = curve(isp, p->m[0][0] * r + p->m[0][1] * g + p->m[0][2] * b);
-	rgb[1] = curve(isp, p->m[1][0] * r + p->m[1][1] * g + p->m[1][2] * b);
-	rgb[2] = curve(isp, p->m[2][0] * r + p->m[2][1] * g + p->m[2][2] * b);
+	/*
+	 * (11-19) White balanced FIRST and held at white, the matrix after: where the sensor is full -- a window, a lamp
+	 * -- its three colours are the same number, and gains of 2 in red and 1.6 in blue folded into the matrix made
+	 * that pink (the Pixel 8a's main camera: every window). Held at white, what is full stays white through a
+	 * matrix whose rows sum to 1.
+	 */
+	r *= p->gain[0];
+	g *= p->gain[1];
+	b *= p->gain[2];
+	r = r > LUT_WHITE ? LUT_WHITE : r;
+	g = g > LUT_WHITE ? LUT_WHITE : g;
+	b = b > LUT_WHITE ? LUT_WHITE : b;
+	rgb[0] = curve(isp, p->ccm[0][0] * r + p->ccm[0][1] * g + p->ccm[0][2] * b);
+	rgb[1] = curve(isp, p->ccm[1][0] * r + p->ccm[1][1] * g + p->ccm[1][2] * b);
+	rgb[2] = curve(isp, p->ccm[2][0] * r + p->ccm[2][1] * g + p->ccm[2][2] * b);
 }
 
 /* the lens shading's gains at (u, v), 0 to 1 across the sensor */

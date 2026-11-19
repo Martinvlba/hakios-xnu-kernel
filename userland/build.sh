@@ -693,6 +693,12 @@ for tuned in ../fw-camera/com.qti.tuned.hakios_*.bin; do
 	mkdir -p root/fw
 	../tools/camtuning.py "$tuned" "root/fw/camera-$sensor.isp" >/dev/null
 done
+# The Pixel 8a's cameras' colour tuning (devices/akita/tools/camtuning-akita.py, out of Android's own description of each
+# camera: ../fw-camera-akita/camera-akita-{main,front,uw}.isp, not in the repository): libhakios.media's processor reads
+# them by the kernel's sensor number (src/camera_device.c, load_tuning).
+for tuned in ../fw-camera-akita/camera-akita-*.isp; do
+	[ -f "$tuned" ] && [ -z "$SHARE" ] && mkdir -p root/fw && install -m 0644 "$tuned" root/fw/
+done
 # ... and with ADSP=1 the image of the audio DSP, from the same place into ../fw-audio (drivers/audio/hakios.adsp.c):
 # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
 # the loader takes.

@@ -30,6 +30,7 @@
  * Everything asked of the device and the streams that is not answered here is said in mediaserverd's
  * log ("hakios: camera: ..."), once per property.
  */
+#include <sys/sysctl.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
@@ -122,6 +123,7 @@ static CMBaseClassID (*device_class_id)(void);
 static CMBaseClassID (*stream_class_id)(void);
 static CFStringRef port_back;           /* kFigCapturePortType_BackFacingCamera */
 static CFStringRef port_front;          /* kFigCapturePortType_FrontFacingCamera */
+static CFStringRef port_superwide;      /* kFigCapturePortType_BackFacingSuperWideCamera */
 
 /*
  * The frames' metadata: what H10ISP's stream attaches to every frame (a dictionary under
@@ -169,6 +171,8 @@ find_functions(void)
 	port_back = port != NULL ? *port : NULL;
 	port = dlsym(RTLD_DEFAULT, "kFigCapturePortType_FrontFacingCamera");
 	port_front = port != NULL ? *port : NULL;
+	port = dlsym(RTLD_DEFAULT, "kFigCapturePortType_BackFacingSuperWideCamera");
+	port_superwide = port != NULL ? *port : NULL;
 	port = dlsym(RTLD_DEFAULT, "kFigCaptureSampleBufferAttachmentKey_MetadataDictionary");
 	md_attachment = port != NULL ? *port : NULL;
 	for (int i = 0; i < MD_KEYS; i++) {
@@ -462,11 +466,15 @@ static const struct camera {
  * csu_resolveFormatIndexForNamedStreamFormat compares more than the size: a plist entry with SIFREnabled (both "Photo"
  * entries, the back camera's video ones) is matched only by a stream format that says SIFREnabled too.
  */
-static const struct camera cameras_d16[2] = {
+static const struct camera cameras_d16[3] = {
 	{ 1, "Back Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:0", false, 5.7, 1.6, 1.7, 74.0,
 	  { { 4224, 3024, 60, 1 }, { 4224, 2384, 60, 1 } } },
 	{ 2, "Front Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:1", true, 2.71, 2.2, 1.0, 80.0,
 	  { { 4032, 3024, 60, 1 }, { 4032, 2272, 60, 0 } } },
+	/* (11-19) the ultra-wide, where the kernel has one (the Pixel 8a with camera=15: its sensor 3): the plist's "Back
+	 * Ultra Wide Camera", whose stream formats are the back camera's own (its baseCaptureDeviceUniqueID) */
+	{ 3, "Back Ultra Wide Camera", "com.apple.avfoundation.avcapturedevice.built-in_video:5", false, 1.54, 2.4, 1.0, 120.0,
+	  { { 4224, 3024, 60, 1 }, { 4224, 2384, 60, 1 } } },
 };
 
 struct stream {
@@ -1418,14 +1426,20 @@ static void
 load_tuning(struct isp *isp, uint32_t sensor)
 {
 	static const char *const names[] = { "ov02b10", "s5khm2sd", "ov16a1q", "s5k4h7" };
+	/* (the Pixel 8a's, where the image has them: devices/akita/tools/camtuning-akita.py's, out of what Android says of
+	 * each camera -- its main camera is the kernel's sensor 1, the front one 2, the ultra-wide 3) */
+	static const char *const akita[] = { NULL, "akita-main", "akita-front", "akita-uw" };
 	char path[96];
 
 	if (sensor >= sizeof(names) / sizeof(names[0])) {
 		return;
 	}
-	snprintf(path, sizeof(path), "/redwood/fw/camera-%s.isp", names[sensor]);
+	snprintf(path, sizeof(path), "/redwood/fw/camera-%s.isp", akita[sensor] != NULL ? akita[sensor] : names[sensor]);
+	if (akita[sensor] == NULL || access(path, R_OK) != 0) {
+		snprintf(path, sizeof(path), "/redwood/fw/camera-%s.isp", names[sensor]);
+	}
 	if (isp_load_tuning(isp, path)) {
-		say("the %s's colour tuning from %s: %u colour matrices' lights, %u lens shadings'", names[sensor], path,
+		say("camera %u's colour tuning from %s: %u colour matrices' lights, %u lens shadings'", sensor, path,
 		    isp->tuning->ccm.lights, isp->tuning->lsc.lights);
 	} else {
 		say("no colour tuning for the %s (%s): no colour matrix, no lens shading", names[sensor], path);
@@ -1603,7 +1617,7 @@ worker(void *context)
  * takes a moment to settle and the exposure longer), the second only when the graph starts the
  * stream itself (`graph` true, the FigCaptureStream start method).
  */
-static CMBaseObjectRef all_streams[2];  /* the device's, back and front */
+static CMBaseObjectRef all_streams[3];  /* the device's: back, front and, where there is one, the ultra-wide */
 static OSStatus stream_stop(CMBaseObjectRef o);
 
 static OSStatus
@@ -1621,7 +1635,7 @@ stream_begin(CMBaseObjectRef o, bool graph)
 		return 0;
 	}
 	/* one camera at a time: the kernel gives one sensor's frames (the other stream's worker stopped first) */
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < 3; i++) {
 		if (all_streams[i] != NULL && all_streams[i] != o && stream_of(all_streams[i])->running) {
 			say("stream: the %s's frames stop for the %s's", stream_of(all_streams[i])->camera->name, s->camera->name);
 			(void)stream_stop(all_streams[i]);
@@ -1936,8 +1950,12 @@ OSStatus
 hakios_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, CMBaseObjectRef *out)
 {
 	static bool found, usable;
-	CMBaseObjectRef device = NULL, stream[2];
+	CMBaseObjectRef device = NULL, stream[3] = { NULL, NULL, NULL };
 	struct device *d;
+	int n = 2;
+	char args[1024] = "";
+	size_t args_size = sizeof(args) - 1;
+	const char *at;
 
 	(void)options;
 	if (!found) {
@@ -1958,21 +1976,42 @@ hakios_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, C
 		CFRelease(stream[0]);
 		return ERR_UNSUPPORTED;
 	}
+	/*
+	 * The ultra-wide: the kernel's third sensor, there with the Pixel 8a's camera=15 (its three cameras, one at a time).
+	 * Only when asked for (camera_uw=1) yet: with the stream there, AVFoundation still lists two devices -- no "Back
+	 * Ultra Wide Camera" comes of it -- and Camera.app starts the back camera at "2x", the middle of the main sensor
+	 * (the plist's dual camera has the wide one at 1.97x of the ultra-wide: it takes the pair for that), 11-19.
+	 */
+	if (table == cameras_d16 && port_superwide != NULL && sysctlbyname("kern.bootargs", args, &args_size, NULL, 0) == 0 &&
+	    (at = strstr(args, "camera=15")) != NULL && (at == args || at[-1] == ' ') && (at[9] == 0 || at[9] == ' ') &&
+	    strstr(args, "camera_uw=1") != NULL) {
+		if ((stream[2] = stream_create(allocator, &table[2], port_superwide)) != NULL) {
+			n = 3;
+		}
+	}
 	if (derived_create(allocator, &device_vtable, device_class_id(), &device) != 0 || device == NULL) {
 		CFRelease(stream[0]);
 		CFRelease(stream[1]);
+		if (stream[2] != NULL) {
+			CFRelease(stream[2]);
+		}
 		say("the device cannot be made");
 		return ERR_UNSUPPORTED;
 	}
 	d = derived_storage(device);
 	memset(d, 0, sizeof(*d));
-	d->streams = CFArrayCreate(NULL, (const void **)stream, 2, &kCFTypeArrayCallBacks);
+	d->streams = CFArrayCreate(NULL, (const void **)stream, n, &kCFTypeArrayCallBacks);
 	all_streams[0] = stream[0];             /* (kept by the device's array) */
 	all_streams[1] = stream[1];
+	all_streams[2] = stream[2];
 	d->supported = supported(device_props, sizeof(device_props) / sizeof(device_props[0]));
 	CFRelease(stream[0]);
 	CFRelease(stream[1]);
+	if (stream[2] != NULL) {
+		CFRelease(stream[2]);
+	}
 	*out = device;
-	say("the device made: two streams, the back camera and the front one");
+	say("the device made: %s", n == 3 ? "three streams, the back camera, the front one and the ultra-wide" :
+	    "two streams, the back camera and the front one");
 	return 0;
 }

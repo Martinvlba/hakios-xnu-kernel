@@ -297,7 +297,7 @@ raw(int frames, bool ae, bool awb, bool keep_raw, bool full, int sensor)
 	struct isp_stats s;
 	uint64_t started = mach_absolute_time(), previous = 0, first_seq = 0;
 	size_t bytes;
-	int device = open(HAKIOS_CAMERA_DEVICE, O_RDWR), got = 0, failures = 0;
+	int device = open(HAKIOS_CAMERA_DEVICE, O_RDWR), got = 0, failures = 0, passed = 0;
 	ssize_t n;
 
 	if (device < 0) {
@@ -326,6 +326,25 @@ raw(int frames, bool ae, bool awb, bool keep_raw, bool full, int sensor)
 		uint64_t t0 = mach_absolute_time();
 
 		n = read(device, f, bytes);
+		/* (a kernel that gives one camera at a time goes on with the last one's frames until the one asked for is up, and
+		 * the cameras' frames differ in size: another camera's frame is passed over, the buffer made the new frames' size) */
+		if (n >= (ssize_t)sizeof(head) && memcmp(f->magic, HAKIOS_CAMERA_MAGIC, 8) == 0) {
+			size_t want = sizeof(head) + (size_t)f->stride * f->height;
+
+			if (sensor >= 0 && f->sensor != (uint32_t)sensor && passed < 600) {
+				/* (... and asked for again now and then: Darwin's own camera stack may have asked for another since) */
+				if (++passed % 30 == 0) {
+					(void)choose_sensor(device, (unsigned)sensor);
+				}
+				continue;
+			}
+			if (want != bytes) {
+				printf("camera_test: frames of %ux%u now (sensor %u)\n", f->width, f->height, f->sensor);
+				bytes = want;
+				f = realloc(f, bytes);
+				continue;
+			}
+		}
 		if (n != (ssize_t)bytes) {
 			printf("camera_test: a read gave %zd of %zu bytes (%s)\n", n, bytes, n < 0 ? strerror(errno) : "short");
 			failures++;
@@ -359,8 +378,25 @@ raw(int frames, bool ae, bool awb, bool keep_raw, bool full, int sensor)
 	    f->sequence - first_seq + 1 - got, ms_since(started) / 1000);
 
 	if (keep_raw) {
-		struct hakios_camera_command *k = (struct hakios_camera_command *)((uint8_t *)f + f->header_bytes) - 1;
 		uint32_t frame_bytes = f->stride * f->height, w = f->width, h = f->height, stride = f->stride;
+		/*
+		 * (11-19) ... and as a file where the host's log reader finds it (the Pixel 8a: its kernel keeps no picture,
+		 * devices/akita/tools/usbmux-pull-klog.py fetches that directory): the frame's header and the frame, with what
+		 * the exposure and the white balance came to in the name's line above.
+		 */
+		char path[96];
+		int out;
+
+		snprintf(path, sizeof(path), "/private/var/mobile/Media/hakios-klog/camera-%u.raw", f->sensor);
+		out = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (out >= 0) {
+			ssize_t wrote = write(out, f, f->header_bytes + frame_bytes);
+
+			close(out);
+			printf("camera_test: the frame (header and RAW10, %zd bytes; %u lines, gain %u/%u) is in %s\n", wrote,
+			    f->exposure_lines, f->gain, f->gain_unity, path);
+		}
+		struct hakios_camera_command *k = (struct hakios_camera_command *)((uint8_t *)f + f->header_bytes) - 1;
 
 		/* (the command goes over the end of the header, just before the frame's bytes) */
 		memset(k, 0, sizeof(*k));
