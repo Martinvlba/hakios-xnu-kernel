@@ -7667,6 +7667,9 @@ hm_completed(hakios_metal_cb *cb, void *context)
 {
 	HakiosMetalCommandBuffer *self = (HakiosMetalCommandBuffer *)context;
 
+	if (hm_fs_on()) {
+		hm_print("framesay: done %.4f of %p\n", hm_now(), (void *)self);       /* (the GPU's interrupt reached this process) */
+	}
 	/* boot-arg metal_passsay=1: the last resolve of this buffer -- nine pixels of what it left in its target (and of the
 	 * samples it read, sample 0 as stored), the first 24 of a process */
 	{
@@ -7798,7 +7801,7 @@ hm_loadtest(id device)
 		[cb waitUntilCompleted];
 		[target getBytes:&outside bytesPerRow:8 fromRegion:MTLRegionMake2D(50, 50, 1, 1) mipmapLevel:0];
 		[target getBytes:&inside bytesPerRow:8 fromRegion:MTLRegionMake2D(30, 30, 1, 1) mipmapLevel:0];
-		[target getBytes:&corner bytesPerRow:8 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
+		[target getBytes:&corner bytesPerRow:8 fromRegion:MTLRegionMake2D(21, 26, 1, 1) mipmapLevel:0];   /* (beside the copy, in its tile) */
 		hm_print("loadtest: MTLPixelFormat %u written %llx: after a draw into its middle (%d, %s) outside %llx and %llx (%s), inside %llx\n",
 		    kinds[k].format, (unsigned long long)kinds[k].texel, r, r != 0 ? hakios_metal_error() : "", (unsigned long long)outside,
 		    (unsigned long long)corner, outside == kinds[k].texel && corner == kinds[k].texel ? "KEPT" : "CHANGED", (unsigned long long)inside);
@@ -7823,7 +7826,7 @@ hm_loadtest(id device)
 
 	const BOOL say = hm_fs_on() || hm_fs_ntargets != 0;
 	if (say) {
-		hm_print("framesay: commit %.4f\n", hm_now());
+		hm_print("framesay: commit %.4f of %p\n", hm_now(), (void *)self);
 	}
 
 	if (_committed) {

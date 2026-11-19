@@ -1678,6 +1678,39 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         s[n++] = move32(74, 0);
         s[n++] = 36ULL << 56 | 74ULL << 40 | 2 << 8 | 1 << 4 | 1;              // FLUSH_CACHE2: L2/LSC clean, others invalidated
         s[n++] = WAIT_ALL;
+        // (11-19) THE LOAD AS A PRE-FRAME SHADER, ONLY WHERE THE PASS DRAWS (metal_lazyload=0: the triangle, as before): the same fragment
+        // shader and tables in a pre-frame draw descriptor of mode Intersect -- a tile no draw touches is neither read
+        // nor written back (the render targets' clean-pixel writes and the framebuffer's empty-tile writes off), its
+        // memory is the load. What Mesa's panvk does for a colour preload. The triangle through the tiler loads and
+        // writes back the whole target, 10 MB each way for a screen: CoreAnimation draws the screen in three passes a
+        // frame while a list scrolls (two of them a navigation bar's worth), ~2 ms each -- 75 frames a second of 120.
+        // Not with depth/stencil, samples or layers; not when a target that is stored starts from a clear.
+        static const bool lazy_on = !bootArg("metal_lazyload=0");
+        bool lazy = lazy_on && !dj.zs && dj.samples <= 1 && dj.load0;
+        for (unsigned i = 1; i < nt && lazy; i++) {
+            const DrawJob::More &m = dj.more[i - 1];
+            lazy = !(m.write && !m.elide && !m.missing) || m.load;
+        }
+        if (lazy) {
+            const uint64_t pdcd_at = (pbl_at + 16 * nt + 0x3f) & ~0x3fULL;
+            auto *w = (uint32_t *)(area + pdcd_at);
+            memset(w, 0, 0x180);
+            w[0] = 1u << 0 | 1u << 1 | 1u << 9;                                 // kills, is killed, clean fragments written
+            w[1] = 0xffff | ((1u << nt) - 1) << 16;
+            w[5] = dj.dcd2;
+            w[7] = 0x3f800000;
+            *(uint64_t *)&w[10] = d->descriptors.va + 0x1980;
+            *(uint64_t *)&w[12] = (area_va + pbl_at) | nt;
+            w[17] = (uint32_t)((dj.pre_fs_fau.size() + 1) / 2);
+            *(uint64_t *)&w[24] = t_va | MALI_TABLES;
+            *(uint64_t *)&w[26] = dj.pre_frag_spd;
+            *(uint64_t *)&w[28] = d->descriptors.va + 0x1200;
+            *(uint64_t *)&w[30] = pfs_va;
+            fb[0] = (fb[0] & ~7u) | 2;                                          // pre-frame 0: where geometry is
+            *(uint64_t *)&fb[6] = area_va + pdcd_at;
+            fb[12] &= ~(1u << 29);                                              // empty tiles not written
+            for (unsigned i = 0; i < nt; i++) rt[16 * i + 1] &= ~(1u << 31);    // nor clean pixels
+        } else {
         s[n++] = move48(0, 0);
         s[n++] = move48(4, t_va | MALI_TABLES);
         s[n++] = move48(8, pvs_va);
@@ -1714,6 +1747,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         s[n++] = move32(61, 0);
         s[n++] = 49ULL << 56 | 0ULL << 32;                                      // HEAP_OPERATION: vertex/tiler started
         s[n++] = 6ULL << 56 | 1ULL << 33 | 1ULL << 38;                          // RUN_IDVS
+        }
     }
     s[n++] = move48(0, vsrt);                                                   // the vertex stage's SRT (0: none)
     s[n++] = move48(4, srt);                                                    // fragment SRT
@@ -1902,7 +1936,7 @@ drawBytes(const DrawJob &dj)
     }
     if (dj.load) {
         bytes += 0x40 + ((dj.pre_vs_fau.size() * 4 + 0x3f) & ~0x3fULL) + ((dj.pre_fs_fau.size() * 4 + 0x3f) & ~0x3fULL) + 0x80 +
-            (2 * dj.rts + 1) * 32 + 0x80 + 16 * dj.rts;
+            (2 * dj.rts + 1) * 32 + 0x80 + 16 * dj.rts + 0x1c0;      // (... and the pre-frame DCDs, lazyLoad)
     }
     return bytes;
 }
