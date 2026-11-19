@@ -1055,9 +1055,44 @@ telephony_refresh(void)
 	}
 }
 
+/*
+ * (11-19, the tester: "try getting no sim showing") Control Center's expanded status bar has its top-left group -- the
+ * bars, the carrier's text ("No SIM"), Wi-Fi -- only where UIKit's -[_UIStatusBarVisualProvider_iOS hasCellularCapability]
+ * says yes, and that is MobileGestalt's "cellular-data": false here, nothing in the device tree saying a baseband (the
+ * home screen's bar does not ask, which is why the bars showed there and nothing in Control Center). Answered yes in
+ * SpringBoard when the kernel was started with its modem (a modem= boot-argument); the layout is made once, when a
+ * status bar is, so this goes in before any is (~/akita/ref/modem-android/statusbar-nosim.md).
+ */
+static void
+cellular_capability_hook(void)
+{
+	char args[1024];
+	size_t size = sizeof(args) - 1;
+	Class provider = objc_getClass("_UIStatusBarVisualProvider_iOS");
+	Method method = provider ? class_getInstanceMethod(provider, sel_registerName("hasCellularCapability")) : NULL;
+	const char *at;
+
+	memset(args, 0, sizeof(args));
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0 || (at = strstr(args, "modem=")) == NULL ||
+	    (at != args && at[-1] != ' ') || at[6] < '1' || at[6] > '9') {
+		return;         /* (no modem started by the kernel: as it was) */
+	}
+	if (method == NULL) {
+		say("hakios: cellular: no -[_UIStatusBarVisualProvider_iOS hasCellularCapability]: Control Center's bar stays without its cellular group\n");
+		return;
+	}
+	method_setImplementation(method, imp_implementationWithBlock((id)^BOOL (id self) {
+		(void)self;
+		return YES;
+	}));
+	say("hakios: cellular: -[_UIStatusBarVisualProvider_iOS hasCellularCapability] answers yes (the kernel has a modem): Control "
+	    "Center's bar gets its bars and carrier text\n");
+}
+
 static void
 cellular_hook(void)
 {
+	cellular_capability_hook();
 	signal_view_hook();
 	telephony_domain_hook();
 	{
