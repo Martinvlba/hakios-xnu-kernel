@@ -1095,6 +1095,113 @@ cellular_capability_hook(void)
 	    "Center's bar gets its bars and carrier text\n");
 }
 
+/*
+ * (11-19, the tester: "why hasn't it prompted to place pin?") THE SIM'S PIN. Darwin's own telephony does not run on the
+ * kernel's modem, so nobody asked: a card that wants its PIN stayed "SIM Locked". Now, when the kernel says the PIN is
+ * wanted (kern.hakios.cellular_pin_state 1; 4: the last one was refused), an alert of SpringBoard's own asks for it --
+ * a secure number field, the tries the card has left -- and hands the digits to the kernel (kern.hakios.cellular_pin,
+ * write only), which sends them to the card. The digits are never said on the console. With one try left it does not
+ * ask (a third wrong PIN locks the card until its PUK): that try is for a phone that can take the PUK.
+ */
+static void
+sim_pin_prompt(void)
+{
+	static bool showing, cancelled;
+	static id window;
+	int state = sysctl_int("kern.hakios.cellular_pin_state"), tries = sysctl_int("kern.hakios.cellular_pin_tries");
+	Class alert_class = objc_getClass("UIAlertController"), action_class = objc_getClass("UIAlertAction");
+	Class window_class = objc_getClass("UIWindow"), controller_class = objc_getClass("UIViewController");
+	Class app_class = objc_getClass("UIApplication"), scene_class = objc_getClass("UIWindowScene");
+
+	if (state != 1 && state != 4) {
+		cancelled = false;
+		return;
+	}
+	if (showing || cancelled || alert_class == Nil || action_class == Nil || window_class == Nil || controller_class == Nil ||
+	    app_class == Nil || scene_class == Nil) {
+		return;
+	}
+	if (tries >= 0 && tries < 2) {
+		static bool said;
+
+		if (!said) {
+			said = true;
+			say("hakios: cellular: the SIM's PIN has %d tr%s left: not asked for here\n", tries, tries == 1 ? "y" : "ies");
+		}
+		return;
+	}
+
+	id app = ((id (*)(id, SEL))objc_msgSend)((id)app_class, sel_registerName("sharedApplication"));
+	id scenes = app != nil ? ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes")) : nil;
+	id all = scenes != nil ? ((id (*)(id, SEL))objc_msgSend)(scenes, sel_registerName("allObjects")) : nil;
+	unsigned long n = all != nil ? ((unsigned long (*)(id, SEL))objc_msgSend)(all, sel_registerName("count")) : 0;
+	id scene = nil;
+
+	for (unsigned long i = 0; i < n && scene == nil; i++) {
+		id one = ((id (*)(id, SEL, unsigned long))objc_msgSend)(all, sel_registerName("objectAtIndex:"), i);
+
+		if (((BOOL (*)(id, SEL, Class))objc_msgSend)(one, sel_registerName("isKindOfClass:"), scene_class)) {
+			scene = one;
+		}
+	}
+	if (scene == nil) {
+		return;                 /* (too early: at the next look) */
+	}
+
+	CFStringRef message = CFStringCreateWithFormat(NULL, NULL, CFSTR("%s%d attempts remaining."),
+	    state == 4 ? "Incorrect PIN. " : "Enter the PIN of the SIM card. ", tries);
+	id alert = ((id (*)(id, SEL, id, id, long))objc_msgSend)((id)alert_class,
+	    sel_registerName("alertControllerWithTitle:message:preferredStyle:"), (id)CFSTR("SIM Locked"), (id)message, 1L);
+	id root = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)controller_class, sel_registerName("alloc")),
+	    sel_registerName("init"));
+
+	CFRelease(message);
+	window = ((id (*)(id, SEL, id))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)window_class, sel_registerName("alloc")),
+	    sel_registerName("initWithWindowScene:"), scene);
+	if (alert == nil || root == nil || window == nil) {
+		return;
+	}
+	((void (*)(id, SEL, id))objc_msgSend)(alert, sel_registerName("addTextFieldWithConfigurationHandler:"), (id)^(id field) {
+		((void (*)(id, SEL, BOOL))objc_msgSend)(field, sel_registerName("setSecureTextEntry:"), YES);
+		((void (*)(id, SEL, long))objc_msgSend)(field, sel_registerName("setKeyboardType:"), 4L);       /* the number pad */
+		((void (*)(id, SEL, id))objc_msgSend)(field, sel_registerName("setPlaceholder:"), (id)CFSTR("PIN"));
+	});
+
+	id unlock = ((id (*)(id, SEL, id, long, id))objc_msgSend)((id)action_class, sel_registerName("actionWithTitle:style:handler:"),
+	    (id)CFSTR("Unlock"), 0L, (id)^(id action) {
+		id fields = ((id (*)(id, SEL))objc_msgSend)(alert, sel_registerName("textFields"));
+		id field = fields != nil ? ((id (*)(id, SEL))objc_msgSend)(fields, sel_registerName("firstObject")) : nil;
+		id text = field != nil ? ((id (*)(id, SEL))objc_msgSend)(field, sel_registerName("text")) : nil;
+		const char *digits = text != nil ? ((const char *(*)(id, SEL))objc_msgSend)(text, sel_registerName("UTF8String")) : NULL;
+
+		(void)action;
+		if (digits != NULL && digits[0] != 0) {
+			int r = sysctlbyname("kern.hakios.cellular_pin", NULL, NULL, (void *)(uintptr_t)digits, strlen(digits) + 1);
+
+			say("hakios: cellular: the SIM's PIN (%zu digits) handed to the kernel: %s\n", strlen(digits),
+			    r == 0 ? "taken" : strerror(errno));
+		}
+		((void (*)(id, SEL, BOOL))objc_msgSend)(window, sel_registerName("setHidden:"), YES);
+		showing = false;
+	});
+	id cancel = ((id (*)(id, SEL, id, long, id))objc_msgSend)((id)action_class, sel_registerName("actionWithTitle:style:handler:"),
+	    (id)CFSTR("Cancel"), 1L, (id)^(id action) {
+		(void)action;
+		cancelled = true;       /* (until the card's state changes or the next start) */
+		((void (*)(id, SEL, BOOL))objc_msgSend)(window, sel_registerName("setHidden:"), YES);
+		showing = false;
+	});
+
+	((void (*)(id, SEL, id))objc_msgSend)(alert, sel_registerName("addAction:"), cancel);
+	((void (*)(id, SEL, id))objc_msgSend)(alert, sel_registerName("addAction:"), unlock);
+	((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("setRootViewController:"), root);
+	((void (*)(id, SEL, double))objc_msgSend)(window, sel_registerName("setWindowLevel:"), 2100.0);
+	((void (*)(id, SEL))objc_msgSend)(window, sel_registerName("makeKeyAndVisible"));
+	((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(root, sel_registerName("presentViewController:animated:completion:"), alert, YES, nil);
+	showing = true;
+	say("hakios: cellular: the SIM's PIN is asked for (state %d, %d tries left)\n", state, tries);
+}
+
 static void
 cellular_hook(void)
 {
@@ -1171,6 +1278,7 @@ cellular_hook(void)
 		int registered = sysctl_int("kern.hakios.cellular_registered"), bars = sysctl_int("kern.hakios.cellular_bars");
 		int sim = sysctl_int("kern.hakios.cellular_sim");
 
+		sim_pin_prompt();
 		/* the service text ("No SIM", "No Service", the network): when the card's state or the registration changes */
 		if ((sim != last_sim || registered != last_registered) && cellular_aggregator != nil) {
 			SEL update = sel_registerName("_updateServiceItem");
