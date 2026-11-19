@@ -4579,7 +4579,11 @@ rawBlend(hakios_metal_program *p, unsigned i)
     // -- it took every target for RGBA8, clamped to 0..1) -- told otherwise, the program takes the shader-blend compile
     // for nothing
     const unsigned f = p->rt_format[i];
-    static const bool told_always = bootArg("metal_rtfmt=1");   // (a test: every float attachment's format told)
+    // (11-19) ALWAYS, now: a function that only READS a float attachment (framebuffer fetch) has no blend of its own there,
+    // was not told, and read the half floats as RGBA8 -- RenderBox's accumulator_color reads the coverage its
+    // mask_accumulate draws left in an RG16Float attachment: every shape filled that way was missing (the News widget's
+    // placeholders, "No events today" in Calendar's). Float attachments are the widgets' alone; metal_rtfmt=0: as before.
+    static const bool told_always = !bootArg("metal_rtfmt=0");
     p->shader_blend.format[i] = f == 55 || ((told_always || (p->shader_blend.mask & 1u << i)) && (f == 25 || f == 65 || f == 115 || f == 92)) ||
         f == 71 || f == 81 ? f : 0;       // (an sRGB target's always: a framebuffer fetch from it must decode, 11-13)
     if (f != 55 || !p->rt_blend_on[i]) {
