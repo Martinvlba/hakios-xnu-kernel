@@ -609,6 +609,34 @@ struct block_layout {
 };
 #define BLOCK_CALL(block, type, ...) ((type)((struct block_layout *)(block))->invoke)((block), __VA_ARGS__)
 
+/*
+ * A block's own signature ("v16@?0@8": returns nothing, 16 bytes of arguments -- the block and one object), where its
+ * descriptor carries one. The setters differ between Darwin userlands: 16.5's take the data and the value (24 or 20
+ * bytes), 16.6.1's (the iPhone 13 mini's) the value alone (16 or 12) -- calling one the other's way sent the data
+ * object where the string belongs and SpringBoard died of it (11-19). So each is called as its signature says.
+ */
+static const char *
+block_signature(void *block)
+{
+	struct block_layout *b = block;
+	/* (arm64e signs the descriptor's pointer: the address is its low 39 bits) */
+	const uintptr_t *descriptor = b ? (const uintptr_t *)(*(const uintptr_t *)(b + 1) & 0x7fffffffffULL) : NULL;
+
+	if (descriptor == NULL || (b->flags & (1 << 30)) == 0) {
+		return NULL;
+	}
+	return (const char *)(descriptor[(b->flags & (1 << 25)) != 0 ? 4 : 2] & 0x7fffffffffULL);
+}
+
+/* how many bytes of arguments the block takes (itself included); 0: its signature is not there */
+static int
+block_frame(void *block)
+{
+	const char *signature = block_signature(block);
+
+	return signature != NULL && signature[0] == 'v' ? atoi(signature + 1) : 0;
+}
+
 static void
 update_signal_item(id self, SEL sel, long item, void *data, id sim, void *getter, void *setter)
 {
@@ -660,7 +688,22 @@ update_signal_item(id self, SEL sel, long item, void *data, id sim, void *getter
 		shown = 5;
 	}
 	if ((up > 0 || registered > 0) && shown > 0 && setter != NULL && data != NULL) {
-		BLOCK_CALL(setter, void (*)(void *, void *, int), data, shown);
+		int frame = block_frame(setter);
+
+		if (frame == 12) {
+			BLOCK_CALL(setter, void (*)(void *, int), shown);
+		} else if (frame == 20) {
+			BLOCK_CALL(setter, void (*)(void *, void *, int), data, shown);
+		} else {
+			static int said_once;
+
+			if (!said_once++) {
+				say("hakios: cellular: the bars' setter has a signature not known here (\"%s\"): not called\n",
+				    block_signature(setter) ? block_signature(setter) : "none");
+			}
+			cellular_last_bars = shown;
+			return;
+		}
 		((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
 		if (shown != cellular_last_bars) {
 			say("hakios: cellular: %d bars shown (item %ld; kernel bars %d, %d dBm, registered %d)\n", shown, item, bars, dbm, registered);
@@ -690,16 +733,50 @@ update_service_item(id self, SEL sel, long item, void *data, id sim, id other, v
 	if (original_update_service_item) {
 		original_update_service_item(self, sel, item, data, sim, other, g1, s1, g2, s2, g3, s3, g4, s4);
 	}
+	cellular_aggregator = self;
 	sysctlbyname("kern.hakios.cellular_operator", name, &size, NULL, 0);
+	if (said < 2) {
+		say("hakios: cellular: the service item's blocks: string getter \"%s\", setter \"%s\"\n",
+		    block_signature(g1) ? block_signature(g1) : "none", block_signature(s1) ? block_signature(s1) : "none");
+	}
 	if (said++ < 4) {
 		say("hakios: cellular: service item %ld: data %p, SIM info %p, other %p; string getter %p setter %p, content type getter %p "
 		    "setter %p; the kernel's network \"%s\"\n", item, data, (void *)sim, (void *)other, g1, s1, g3, s3, name);
 	}
-	if (registered > 0 && name[0] != 0 && s1 != NULL && data != NULL) {
+	/*
+	 * Not registered: what an iPhone says there. "No SIM" when the kernel's modem runs and found no card
+	 * (kern.hakios.cellular_sim 0), "No Service" with a card and no network; nothing while no modem runs (-1).
+	 */
+	if (registered <= 0 || name[0] == 0) {
+		int sim = sysctl_int("kern.hakios.cellular_sim"), radio = sysctl_int("kern.hakios.cellular_radio");
+
+		name[0] = 0;
+		if (sim == 0) {
+			snprintf(name, sizeof(name), "No SIM");
+		} else if (sim > 0 && radio >= 0) {
+			snprintf(name, sizeof(name), "No Service");
+		}
+	}
+	if (name[0] != 0 && s1 != NULL && data != NULL) {
 		CFStringRef string = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
 
 		if (string != NULL) {
-			BLOCK_CALL(s1, void (*)(void *, void *, CFStringRef), data, string);
+			int frame = block_frame(s1);
+
+			if (frame == 16) {
+				BLOCK_CALL(s1, void (*)(void *, CFStringRef), string);
+			} else if (frame == 24) {
+				BLOCK_CALL(s1, void (*)(void *, void *, CFStringRef), data, string);
+			} else {
+				static int said_once;
+
+				if (!said_once++) {
+					say("hakios: cellular: the service string's setter has a signature not known here (\"%s\"): not called\n",
+					    block_signature(s1) ? block_signature(s1) : "none");
+				}
+				CFRelease(string);
+				return;
+			}
 			((void (*)(id, SEL, long, BOOL))objc_msgSend)(self, sel_registerName("_setItem:enabled:"), item, YES);
 			if (strcmp(shown, name) != 0) {
 				snprintf(shown, sizeof(shown), "%s", name);
@@ -821,8 +898,20 @@ cellular_hook(void)
 
 	dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), 3 * NSEC_PER_SEC, NSEC_PER_SEC / 2);
 	dispatch_source_set_event_handler(timer, ^{
-		static int last_registered = -2, last_bars = -2;
+		static int last_registered = -2, last_bars = -2, last_sim = -2;
 		int registered = sysctl_int("kern.hakios.cellular_registered"), bars = sysctl_int("kern.hakios.cellular_bars");
+		int sim = sysctl_int("kern.hakios.cellular_sim");
+
+		/* the service text ("No SIM", "No Service", the network): when the card's state or the registration changes */
+		if ((sim != last_sim || registered != last_registered) && cellular_aggregator != nil) {
+			SEL update = sel_registerName("_updateServiceItem");
+
+			last_sim = sim;
+			if (class_getInstanceMethod(object_getClass(cellular_aggregator), update)) {
+				((void (*)(id, SEL))objc_msgSend)(cellular_aggregator, update);
+				say("hakios: cellular: the service item asked to update (SIM %d, registered %d)\n", sim, registered);
+			}
+		}
 
 		if ((registered != last_registered || bars != last_bars) && cellular_aggregator != nil) {
 			SEL update = sel_registerName("_updateSignalStrengthItem");
