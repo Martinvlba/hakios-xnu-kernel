@@ -927,7 +927,9 @@ telephony_domain_hook(void)
 			return kernel_modem_runs() ? sysctl_int("kern.hakios.cellular_sim") > 0 : was;
 		}, "is a card in");
 		telephony_getter(sim, "signalStrengthBars", (id)^unsigned long long (id self) {
-			return kernel_modem_runs() ? (unsigned long long)sysctl_int("kern.hakios.cellular_bars")
+			/* (bars only of the network the phone is registered on: see serviceState) */
+			return kernel_modem_runs() ? (sysctl_int("kern.hakios.cellular_registered") > 0 ?
+			    (unsigned long long)sysctl_int("kern.hakios.cellular_bars") : 0ull)
 			    : bars ? bars(self, sel_registerName("signalStrengthBars")) : 0;
 		}, "bars");
 		telephony_getter(sim, "maxSignalStrengthBars", (id)^unsigned long long (id self) {
@@ -943,7 +945,10 @@ telephony_domain_hook(void)
 			/* (the text shown is exactly this: the network's name once registered, else what an iPhone says) */
 			if (sysctl_int("kern.hakios.cellular_registered") <= 0 ||
 			    sysctlbyname("kern.hakios.cellular_operator", name, &size, NULL, 0) != 0 || name[0] == 0) {
-				snprintf(name, sizeof(name), "%s", sysctl_int("kern.hakios.cellular_sim") > 0 ? "No Service" : "No SIM");
+				/* (the kernel's cellular_sim: 0 no card, 1 a card whose application is not ready -- its PIN is wanted --, 5 ready) */
+				int card = sysctl_int("kern.hakios.cellular_sim");
+
+				snprintf(name, sizeof(name), "%s", card <= 0 ? "No SIM" : card == 1 ? "SIM Locked" : "No Service");
 			}
 			return (id)CFAutorelease(CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8));
 		}, "the network's name");
@@ -962,20 +967,21 @@ telephony_domain_hook(void)
 			id (*secondary)(id, SEL) = ORIGINAL(sim, "secondaryServiceDescription", id (*)(id, SEL));
 
 			/*
-			 * (11-19, the tester: "try working on the modem signal indicator") The bars are drawn only at
-			 * cellularServiceState 2. They are the modem's own measurement, so they are shown whenever it hears a
-			 * network -- registered on it or not (no SIM in the phone: the radio still hears the strongest network
-			 * and says its strength once a second); the text beside them still says "No SIM" / "No Service" then.
+			 * (11-19 evening, the tester: "remove faked signal strength ... it should say sos or no signal without sim
+			 * card") As an iPhone: 2 (in service: the bars, the network's name) only when REGISTERED; 3 (emergency calls
+			 * only: "SOS") when not registered while the radio hears a network -- no card, a card waiting for its PIN, a
+			 * network that refuses it --; 0 (no service) when it hears none. (Until now 2 whenever a network was heard,
+			 * so that the bars showed without a card: the modem's own measurement, but not what a phone shows.)
 			 */
 			telephony_getter(sim, "serviceState", (id)^unsigned long long (id self) {
-				return kernel_modem_runs() ? (sysctl_int("kern.hakios.cellular_registered") > 0 ||
-				    sysctl_int("kern.hakios.cellular_bars") > 0 ? 2ull : 0ull) : state ? state(self, sel_registerName("serviceState")) : 0;
-			}, "2 in service or a network heard, 0 not");
+				return kernel_modem_runs() ? (sysctl_int("kern.hakios.cellular_registered") > 0 ? 2ull :
+				    sysctl_int("kern.hakios.cellular_bars") > 0 ? 3ull : 0ull) : state ? state(self, sel_registerName("serviceState")) : 0;
+			}, "2 in service, 3 emergency only (a network heard), 0 none");
 			telephony_getter(sim, "cellularServiceState", (id)^unsigned long long (id self) {
-				return kernel_modem_runs() ? (sysctl_int("kern.hakios.cellular_registered") > 0 ||
-				    sysctl_int("kern.hakios.cellular_bars") > 0 ? 2ull : 0ull)
+				return kernel_modem_runs() ? (sysctl_int("kern.hakios.cellular_registered") > 0 ? 2ull :
+				    sysctl_int("kern.hakios.cellular_bars") > 0 ? 3ull : 0ull)
 				    : cell_state ? cell_state(self, sel_registerName("cellularServiceState")) : 0;
-			}, "2 in service or a network heard, 0 not");
+			}, "2 in service, 3 emergency only (a network heard), 0 none");
 			telephony_getter(sim, "dataNetworkType", (id)^unsigned long long (id self) {
 				int rat = sysctl_int("kern.hakios.cellular_rat");
 
