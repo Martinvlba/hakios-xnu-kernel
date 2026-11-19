@@ -934,7 +934,15 @@ rtFormat(unsigned f, uint32_t &rt1)
 }
 // the render target's internal format (word 0, bits 26..), the blend descriptor's memory format, and a clear colour
 // as the tile buffer holds it, for a target whose word 1 is RT1
-inline uint32_t rtInternal(uint32_t rt1) { return (rt1 & kRtRaw) ? 34 : (rt1 & kRtWide) ? 18 : (rt1 & kRtFloat) ? (rt1 >> 3) & 31 : 1; }
+// (11-19) THE PACKED 16-BIT TARGETS have tile buffer formats of their own, as Mesa's blendable formats say (pan_format.c:
+// B5G5R5A1 -> internal R5G5B5A1, 6; B5G6R5 -> R5G6B5A0, 5): each channel there is its bits and as many fraction bits
+// again (5.5 5.5 5.5 1.1; 5.5 6.4 5.5 0.2 -- pan_clear.c's tib_layouts). Held as RGBA8 (internal 1) with the 16-bit
+// write-back, a channel came out as its top three bits: every such target four times too dark, and FOUR TIMES DARKER
+// AGAIN at each Load (boot-arg metal_loadtest: 0x90a5 written, 0x8421 after a pass that loaded it). CoreAnimation's
+// backdrop capture is a BGR5A1 one: the blurred sheet too dark, and a black box where a frame redrew a part of it only.
+inline bool rt5551(uint32_t rt1) { return !(rt1 & kRtOurs) && ((rt1 >> 3) & 31) == 28; }
+inline bool rt565(uint32_t rt1) { return !(rt1 & kRtOurs) && ((rt1 >> 3) & 31) == 21; }
+inline uint32_t rtInternal(uint32_t rt1) { return (rt1 & kRtRaw) ? 34 : (rt1 & kRtWide) ? 18 : (rt1 & kRtFloat) ? (rt1 >> 3) & 31 : rt5551(rt1) ? 6 : rt565(rt1) ? 5 : 1; }
 inline uint32_t rtKilobytes(uint32_t rt1) { return (rt1 & kRtWide) ? 2 : 1; }   // of the tile buffer, a 16x16 tile (or 8x8 of 4 samples)
 inline uint32_t
 rtBlend(uint32_t rt1)
@@ -945,6 +953,8 @@ rtBlend(uint32_t rt1)
     // (11-13) AN sRGB TARGET's memory format says so (bit 20, as a texture of it does): without it the blend unit wrote
     // the shader's linear colour into the tile buffer as it was -- BGRA8Unorm_sRGB and RGBA8Unorm_sRGB targets came out
     // linear, some forty times too dark in the shadows: Maps' and Weather's maps in dark mode were all but black
+    if (rt5551(rt1)) return 225u << 12;                         // RGB5_A1_PU (not dithered), RGBA
+    if (rt565(rt1)) return 227u << 12 | 16;                     // R5G6B5_PU, RGB1
     if (!(rt1 & kRtFloat)) return 237u << 12 | ((rt1 & 1u << 14) ? 1u << 20 : 0u);
     return ((rt1 >> 3) & 31) == 16 ? 199u << 12 : 207u << 12;
 }
@@ -979,6 +989,15 @@ rtClear(uint32_t rt1, const double *k)
         uint32_t h[3];
         for (int i = 0; i < 3; i++) h[i] = k[i] > 0 ? halfOf(k[i]) & 0x7fff : 0;
         return h[0] >> 4 | (h[1] >> 4) << 11 | (h[2] >> 5) << 22;
+    }
+    if (rt5551(rt1) || rt565(rt1)) {
+        // (the tile buffer's layout: red from bit 0, a channel's value above its fraction bits)
+        auto fixed = [](double v, unsigned bits, unsigned frac) {
+            v = v < 0 ? 0 : v > 1 ? 1 : v;
+            return (uint32_t)(v * ((1u << bits) - 1) + 0.5) << frac;
+        };
+        return rt5551(rt1) ? fixed(k[0], 5, 5) | fixed(k[1], 5, 5) << 10 | fixed(k[2], 5, 5) << 20 | fixed(k[3], 1, 1) << 30
+                           : fixed(k[0], 5, 5) | fixed(k[1], 6, 4) << 10 | fixed(k[2], 5, 5) << 20;
     }
     if (rt1 & kRtFloat) {
         uint32_t r = halfOf(k[0]);
