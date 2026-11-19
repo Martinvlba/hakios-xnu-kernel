@@ -691,7 +691,8 @@ update_signal_item(id self, SEL sel, long item, void *data, id sim, void *getter
 		int frame = block_frame(setter);
 
 		if (frame == 12) {
-			BLOCK_CALL(setter, void (*)(void *, int), shown);
+			cellular_last_bars = shown;     /* (16.6.1: the bars too come from the SIM info's getters) */
+			return;
 		} else if (frame == 20) {
 			BLOCK_CALL(setter, void (*)(void *, void *, int), data, shown);
 		} else {
@@ -764,7 +765,9 @@ update_service_item(id self, SEL sel, long item, void *data, id sim, id other, v
 			int frame = block_frame(s1);
 
 			if (frame == 16) {
-				BLOCK_CALL(s1, void (*)(void *, CFStringRef), string);
+				/* 16.6.1: the text comes from the SIM info's own getters (telephony_domain_hook): nothing set by hand */
+				CFRelease(string);
+				return;
 			} else if (frame == 24) {
 				BLOCK_CALL(s1, void (*)(void *, void *, CFStringRef), data, string);
 			} else {
@@ -840,10 +843,99 @@ signal_view_hook(void)
 	}
 }
 
+/*
+ * 16.6.1 (11-19): the status bar's cellular items are worked out by SpringBoard from the telephony status domain --
+ * an STTelephonyStatusDomainData with an STTelephonyStatusDomainSIMInfo for each SIM (is a SIM present, the service
+ * state, the carrier's text, the bars), which CommCenter's side fills on an iPhone. Nothing fills it here, so the
+ * getters themselves answer from the kernel's modem (sysctl kern.hakios.cellular_*) once it runs
+ * (cellular_radio >= 0): Darwin then draws "No SIM", the carrier's name and the bars by its own rules. Before the
+ * modem runs, and on a phone without one, every getter answers as it did. What each original answered is said once.
+ */
+static bool
+kernel_modem_runs(void)
+{
+	return sysctl_int("kern.hakios.cellular_radio") >= 0;
+}
+
+static void
+telephony_getter(Class cls, const char *name, id block, const char *what)
+{
+	Method method = cls ? class_getInstanceMethod(cls, sel_registerName(name)) : NULL;
+
+	if (method == NULL) {
+		say("hakios: cellular: no -[%s %s]\n", cls ? class_getName(cls) : "?", name);
+		return;
+	}
+	method_setImplementation(method, imp_implementationWithBlock(block));
+	say("hakios: cellular: -[%s %s] answers from the kernel's modem (%s)\n", class_getName(cls), name, what);
+}
+
+static void
+telephony_domain_hook(void)
+{
+	Class data = objc_getClass("STTelephonyStatusDomainData"), sim = objc_getClass("STTelephonyStatusDomainSIMInfo");
+	Method m;
+
+	if (data == Nil || sim == Nil) {
+		return;         /* (16.5 has no such classes: the setters' way above) */
+	}
+#define ORIGINAL(cls, name, type) ((m = class_getInstanceMethod(cls, sel_registerName(name))) ? (type)method_getImplementation(m) : NULL)
+	{
+		BOOL (*enabled)(id, SEL) = ORIGINAL(data, "isCellularRadioCapabilityEnabled", BOOL (*)(id, SEL));
+		BOOL (*dead)(id, SEL) = ORIGINAL(data, "isRadioModuleDead", BOOL (*)(id, SEL));
+		BOOL (*present)(id, SEL) = ORIGINAL(sim, "isSIMPresent", BOOL (*)(id, SEL));
+		unsigned long long (*state)(id, SEL) = ORIGINAL(sim, "serviceState", unsigned long long (*)(id, SEL));
+		unsigned long long (*cell_state)(id, SEL) = ORIGINAL(sim, "cellularServiceState", unsigned long long (*)(id, SEL));
+		unsigned long long (*bars)(id, SEL) = ORIGINAL(sim, "signalStrengthBars", unsigned long long (*)(id, SEL));
+		unsigned long long (*max_bars)(id, SEL) = ORIGINAL(sim, "maxSignalStrengthBars", unsigned long long (*)(id, SEL));
+		id (*description)(id, SEL) = ORIGINAL(sim, "serviceDescription", id (*)(id, SEL));
+		static int said;
+
+		telephony_getter(data, "isCellularRadioCapabilityEnabled", (id)^BOOL (id self) {
+			return kernel_modem_runs() ? YES : enabled ? enabled(self, sel_registerName("isCellularRadioCapabilityEnabled")) : NO;
+		}, "yes");
+		telephony_getter(data, "isRadioModuleDead", (id)^BOOL (id self) {
+			return kernel_modem_runs() ? NO : dead ? dead(self, sel_registerName("isRadioModuleDead")) : NO;
+		}, "no");
+		telephony_getter(sim, "isSIMPresent", (id)^BOOL (id self) {
+			BOOL was = present ? present(self, sel_registerName("isSIMPresent")) : NO;
+
+			if (said < 3) {
+				said++;
+				say("hakios: cellular: a SIM info as Darwin has it: present %d, service state %llu, cellular service state %llu, bars "
+				    "%llu of %llu\n", was, state ? state(self, sel_registerName("serviceState")) : 99,
+				    cell_state ? cell_state(self, sel_registerName("cellularServiceState")) : 99,
+				    bars ? bars(self, sel_registerName("signalStrengthBars")) : 99,
+				    max_bars ? max_bars(self, sel_registerName("maxSignalStrengthBars")) : 99);
+			}
+			return kernel_modem_runs() ? sysctl_int("kern.hakios.cellular_sim") > 0 : was;
+		}, "is a card in");
+		telephony_getter(sim, "signalStrengthBars", (id)^unsigned long long (id self) {
+			return kernel_modem_runs() ? (unsigned long long)sysctl_int("kern.hakios.cellular_bars")
+			    : bars ? bars(self, sel_registerName("signalStrengthBars")) : 0;
+		}, "bars");
+		telephony_getter(sim, "maxSignalStrengthBars", (id)^unsigned long long (id self) {
+			return kernel_modem_runs() ? 4 : max_bars ? max_bars(self, sel_registerName("maxSignalStrengthBars")) : 0;
+		}, "of 4");
+		telephony_getter(sim, "serviceDescription", (id)^id (id self) {
+			char name[64] = "";
+			size_t size = sizeof(name) - 1;
+
+			if (!kernel_modem_runs() || sysctl_int("kern.hakios.cellular_registered") <= 0 ||
+			    sysctlbyname("kern.hakios.cellular_operator", name, &size, NULL, 0) != 0 || name[0] == 0) {
+				return description ? description(self, sel_registerName("serviceDescription")) : nil;
+			}
+			return (id)CFAutorelease(CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8));
+		}, "the network's name");
+	}
+#undef ORIGINAL
+}
+
 static void
 cellular_hook(void)
 {
 	signal_view_hook();
+	telephony_domain_hook();
 	{
 		const char *service_selector = "_updateServiceItem:withData:SIMInfo:otherSIMInfo:serviceStringGetter:serviceStringSetter:"
 		    "serviceCrossfadeStringGetter:serviceCrossfadeStringSetter:serviceContentTypeGetter:serviceContentTypeSetter:"
