@@ -161,6 +161,9 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.installd.dylib installd
 /redwood/lib/libhakios.bt.dylib BlueTool bluetoothd
 /redwood/lib/libhakios.tweaks.dylib Preferences"}
+# INJECT_LOG="wifid ...": those jobs are started with libhakios.log.dylib as well (their os_log lines on the console)
+[ -n "$INJECT_LOG" ] && INJECT="$INJECT
+/redwood/lib/libhakios.log.dylib $INJECT_LOG"
 mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
@@ -330,6 +333,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# ... and inside installd: every signature check answered as valid (src/inject_installd.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.installd.dylib -framework CoreFoundation \
 			-lmis -o obj/libhakios.installd.dylib src/inject_installd.c
+		# a diagnostic: a stock daemon's os_log lines on the console (src/inject_log.c; INJECT_LOG="wifid ..." names the jobs)
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.log.dylib -framework CoreFoundation -o obj/libhakios.log.dylib src/inject_log.c
 		# ... and inside BlueTool: bluetoothd's "boot" and "init" answered as done (src/inject_bt.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.bt.dylib -o obj/libhakios.bt.dylib src/inject_bt.c
 		# (CAMERA_DEBUG=1: the capture session's diagnostics in src/inject_media.c, HAKIOS_CAMERA_DEBUG)
@@ -489,6 +494,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	cp obj/libhakios.dylib obj/libhakios.sb.dylib root/lib/
 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libhakios.bt.dylib ] && cp obj/libhakios.bt.dylib root/lib/
+	rm -f root/lib/libhakios.log.dylib
+	[ -n "$INJECT_LOG" ] && [ -f obj/libhakios.log.dylib ] && cp obj/libhakios.log.dylib root/lib/
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.lockdown.dylib ] && cp obj/libhakios.lockdown.dylib root/lib/
 	[ -f obj/libhakios.akd.dylib ] && cp obj/libhakios.akd.dylib root/lib/

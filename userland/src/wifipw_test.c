@@ -13,6 +13,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #define SSID	CFSTR("hakios-wifipw-test")
@@ -55,6 +56,69 @@ main(int argc, char **argv)
 	if (set_password == NULL || copy_password == NULL || remove_password == NULL) {
 		printf("wifipw_test: MobileWiFi or its functions not found: %s\n", dlerror());
 		return 1;
+	}
+	if (argc > 1 && strcmp(argv[1], "keybag") == 0) {
+		/* wifipw_test keybag: what the keybag says of the lock (what Auto-Join waits for before it reads a password) */
+		void *mkb = dlopen("/System/Library/PrivateFrameworks/MobileKeyBag.framework/MobileKeyBag", RTLD_NOW);
+		int (*since_boot)(void) = mkb ? dlsym(mkb, "MKBDeviceUnlockedSinceBoot") : NULL;
+		int (*lock_state)(CFDictionaryRef) = mkb ? dlsym(mkb, "MKBGetDeviceLockState") : NULL;
+		int (*formatted)(void) = mkb ? dlsym(mkb, "MKBDeviceFormattedForContentProtection") : NULL;
+
+		printf("wifipw_test: keybag: MKBDeviceUnlockedSinceBoot %d, MKBGetDeviceLockState %d (0 unlocked, 1 locked, 2 locking, 3 no "
+		    "passcode), formatted for content protection %d\n", since_boot ? since_boot() : -99, lock_state ? lock_state(NULL) : -99,
+		    formatted ? formatted() : -99);
+		return 0;
+	}
+	if (argc > 2 && strcmp(argv[1], "plist") == 0) {
+		/* wifipw_test plist PATH: a property list file said as text (the known networks' records: no password is in them) */
+		CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)argv[2], (CFIndex)strlen(argv[2]), false);
+		CFReadStreamRef stream = url ? CFReadStreamCreateWithFile(NULL, url) : NULL;
+		CFPropertyListRef list = NULL;
+
+		if (stream != NULL && CFReadStreamOpen(stream)) {
+			list = CFPropertyListCreateWithStream(NULL, stream, 0, kCFPropertyListImmutable, NULL, NULL);
+		}
+		if (list == NULL) {
+			printf("wifipw_test: plist: %s could not be read\n", argv[2]);
+		} else {
+			CFStringRef text = CFCopyDescription(list);
+			CFIndex n = CFStringGetMaximumSizeForEncoding(CFStringGetLength(text), kCFStringEncodingUTF8) + 1;
+			char *c = malloc((size_t)n), *line, *save = NULL;
+
+			CFStringGetCString(text, c, n, kCFStringEncodingUTF8);
+			for (line = strtok_r(c, "\n", &save); line != NULL; line = strtok_r(NULL, "\n", &save)) {
+				printf("wifipw_test: plist: %.300s\n", line);
+				usleep(1500);
+			}
+		}
+		return 0;
+	}
+	if (argc > 1 && strcmp(argv[1], "keep") == 0) {
+		/* wifipw_test keep: the made-up network's password kept and LEFT (then `check hakios-wifipw-test` after a restart) */
+		printf("wifipw_test: keep: WiFiSecuritySetPassword: %s\n", set_password(SSID, SECRET) ? "yes" : "NO");
+		read_back("keep");
+		return 0;
+	}
+	if (argc > 2 && strcmp(argv[1], "check") == 0) {
+		/* wifipw_test check NAME: is a password kept for that network (what Auto-Join asks)? Its length only. */
+		CFStringRef name = CFStringCreateWithCString(NULL, argv[2], kCFStringEncodingUTF8);
+		CFStringRef pw = copy_password(name);
+
+		printf("wifipw_test: check: WiFiSecurityCopyPassword for the network given: %s", pw == NULL ? "NOTHING KEPT\n" : "a password of ");
+		if (pw != NULL) {
+			printf("%ld characters\n", (long)CFStringGetLength(pw));
+			CFRelease(pw);
+		}
+		q = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+		CFDictionarySetValue(q, kSecClass, kSecClassGenericPassword);
+		CFDictionarySetValue(q, kSecAttrService, CFSTR("AirPort"));
+		CFDictionarySetValue(q, kSecAttrSynchronizable, kSecAttrSynchronizableAny);
+		CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitAll);
+		CFDictionarySetValue(q, kSecReturnAttributes, kCFBooleanTrue);
+		status = SecItemCopyMatching(q, &attrs);
+		printf("wifipw_test: check: every item of service AirPort: status %d, %ld item(s)\n", (int)status,
+		    attrs != NULL && CFGetTypeID(attrs) == CFArrayGetTypeID() ? (long)CFArrayGetCount(attrs) : 0L);
+		return 0;
 	}
 	read_back("before");
 	printf("wifipw_test: WiFiSecuritySetPassword: %s\n", set_password(SSID, SECRET) ? "yes" : "NO");
