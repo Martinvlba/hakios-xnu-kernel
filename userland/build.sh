@@ -637,6 +637,12 @@ if [ -f ../fw-modem-akita/nv_normal.bin ] && [ -z "$SHARE" ]; then
 	for f in nv_normal.bin nv_protected.bin replay_region.bin handover.bin; do
 		[ -f ../fw-modem-akita/$f ] && install -m 0644 ../fw-modem-akita/$f root/fw/
 	done
+	# ... and the carriers' configuration the modem asks for once it knows whose SIM it has (Android's
+	# /vendor/firmware/carrierconfig, copied to ../fw-modem-akita/carrierconfig: devices/akita/tools/mkcarrierpack.py
+	# packs its manifests and which network takes which into one file)
+	if [ -f ../fw-modem-akita/carrierconfig/cfg.db ]; then
+		../devices/akita/tools/mkcarrierpack.py ../fw-modem-akita/carrierconfig root/fw/carrierconfig.pack >/dev/null
+	fi
 fi
 # the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
 # so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
