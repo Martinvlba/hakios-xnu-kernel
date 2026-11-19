@@ -62,7 +62,7 @@ said(void *dso, os_log_type_t type, const char *format, const uint8_t *buf, uint
 	static uint64_t seen[6000];
 	static int count;
 	static int busy;
-	char line[900];
+	char line[1700];
 	int at;
 	uint64_t hash = 1469598103934665603ULL;
 	struct timespec now;
@@ -86,7 +86,7 @@ said(void *dso, os_log_type_t type, const char *format, const uint8_t *buf, uint
 				const char *text = NULL;
 
 				memcpy(&text, buf + off + 2, 8);
-				at += snprintf(line + at, sizeof(line) - (size_t)at, " | %.200s", text ? text : "(null)");
+				at += snprintf(line + at, sizeof(line) - (size_t)at, " | %.1200s", text ? text : "(null)");
 			} else if (kind == 4 && length == 8) {
 				CFTypeRef object = NULL;
 
@@ -244,8 +244,31 @@ hook_the_cache(void)
 	if (!jump_written(impl, (void *)impl_hooked)) {
 		return;
 	}
-	/* (os_log_type_enabled itself is not replaced: it may be shorter than the jump, and wifid died of that, 11-19) */
-	(void)enabled;
+	/*
+	 * "Is this level enabled" answered yes for the cache's own callers too (their debug and info lines): the jump is
+	 * written over the function only where four instructions of it are there to write over -- a plain branch at its
+	 * start is followed once, a return within the first four leaves it alone (HAKIOS_LOG_ALL_LEVELS=0 too).
+	 */
+	if (enabled != 0 && getenv("HAKIOS_LOG_DEFAULT_LEVELS") == NULL) {
+		uint32_t w[4];
+		bool fits = true;
+
+		memcpy(w, (void *)enabled, sizeof(w));
+		if ((w[0] & 0xfc000000) == 0x14000000) {        /* b somewhere: there */
+			int32_t offset = (int32_t)(w[0] << 6) >> 6;
+
+			enabled += (intptr_t)offset * 4;
+			memcpy(w, (void *)enabled, sizeof(w));
+		}
+		for (int i = 0; i < 4; i++) {
+			fits &= w[i] != 0xd65f03c0 && w[i] != 0xd65f0fff && w[i] != 0xd65f0bff && (w[i] & 0xfc000000) != 0x14000000;
+		}
+		fprintf(stderr, "hakios: log: %s: os_log_type_enabled begins %08x %08x %08x %08x: %s\n", getprogname(), w[0], w[1], w[2], w[3],
+		    fits ? "answered yes for everybody" : "left alone");
+		if (fits) {
+			(void)jump_written(enabled, (void *)every_level);
+		}
+	}
 	fprintf(stderr, "hakios: log: %s[%d]: the logging function hooked in the shared cache\n", getprogname(), getpid());
 }
 

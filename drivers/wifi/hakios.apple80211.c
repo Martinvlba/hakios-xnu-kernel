@@ -278,6 +278,30 @@ give_network(const struct apple80211req *request, const struct hakios_sta_bss *b
 			}
 		}
 	}
+	{
+		/* (11-19, why wifid's auto-join finds no network: what a result carries, the first 60 said) */
+		static unsigned said;
+
+		if (said < 60) {
+			said++;
+			printf("apple80211: a network given: \"%.*s\" channel %u flags 0x%x, %d dBm, age %u ms, capability 0x%04x, elements %u of "
+			    "%u (room %u, the request %u bytes), %u rates\n", (int)result->ssid_length, result->ssid, result->channel.channel,
+			    result->channel.flags, result->rssi, result->age_ms, result->capability, result->elements_length, bss->elements_length,
+			    room, request->req_len, result->rate_count);
+			for (unsigned at = 0; at + 2 <= result->elements_length && at + 2 + result->elements[at + 1] <= result->elements_length;
+			    at += 2 + result->elements[at + 1]) {
+				if (result->elements[at] == 48) {       /* the RSN element: version, group, pairwise and key management suites */
+					char text[3 * 40 + 1] = "";
+					unsigned n = result->elements[at + 1] < 40 ? result->elements[at + 1] : 40;
+
+					for (unsigned i = 0; i < n; i++) {
+						snprintf(text + 3 * i, 4, " %02x", result->elements[at + 2 + i]);
+					}
+					printf("apple80211:   its RSN element (%u bytes):%s\n", result->elements[at + 1], text);
+				}
+			}
+		}
+	}
 	error = give(request, result, sizeof(*result));
 	kfree_data(result, sizeof(*result));
 	return error;
