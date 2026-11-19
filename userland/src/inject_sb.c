@@ -921,14 +921,90 @@ telephony_domain_hook(void)
 			char name[64] = "";
 			size_t size = sizeof(name) - 1;
 
-			if (!kernel_modem_runs() || sysctl_int("kern.hakios.cellular_registered") <= 0 ||
-			    sysctlbyname("kern.hakios.cellular_operator", name, &size, NULL, 0) != 0 || name[0] == 0) {
+			if (!kernel_modem_runs()) {
 				return description ? description(self, sel_registerName("serviceDescription")) : nil;
+			}
+			/* (the text shown is exactly this: the network's name once registered, else what an iPhone says) */
+			if (sysctl_int("kern.hakios.cellular_registered") <= 0 ||
+			    sysctlbyname("kern.hakios.cellular_operator", name, &size, NULL, 0) != 0 || name[0] == 0) {
+				snprintf(name, sizeof(name), "%s", sysctl_int("kern.hakios.cellular_sim") > 0 ? "No Service" : "No SIM");
 			}
 			return (id)CFAutorelease(CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8));
 		}, "the network's name");
+		/*
+		 * (an agent's reading of 16.6.1's SBStatusBarStateAggregator, ~/akita/ref/modem-android/statusbar-16.6.1.md:)
+		 * the updaters read the two service states -- 0 no service, 1 searching, 2 in service (the bars are drawn only
+		 * at cellularServiceState 2), 3 emergency only --, the data network type (7: LTE) and whether data goes over it;
+		 * isSIMPresent, label and maxSignalStrengthBars are not read by them at all.
+		 */
+		{
+			unsigned long long (*network)(id, SEL) = ORIGINAL(sim, "dataNetworkType", unsigned long long (*)(id, SEL));
+			BOOL (*providing)(id, SEL) = ORIGINAL(sim, "isProvidingDataConnection", BOOL (*)(id, SEL));
+			BOOL (*bootstrap)(id, SEL) = ORIGINAL(sim, "isBootstrap", BOOL (*)(id, SEL));
+			BOOL (*without)(id, SEL) = ORIGINAL(sim, "isRegisteredWithoutCellular", BOOL (*)(id, SEL));
+			BOOL (*sos)(id, SEL) = ORIGINAL(data, "isInactiveSOSEnabled", BOOL (*)(id, SEL));
+			id (*secondary)(id, SEL) = ORIGINAL(sim, "secondaryServiceDescription", id (*)(id, SEL));
+
+			telephony_getter(sim, "serviceState", (id)^unsigned long long (id self) {
+				return kernel_modem_runs() ? (sysctl_int("kern.hakios.cellular_registered") > 0 ? 2ull : 0ull)
+				    : state ? state(self, sel_registerName("serviceState")) : 0;
+			}, "2 in service, 0 not");
+			telephony_getter(sim, "cellularServiceState", (id)^unsigned long long (id self) {
+				return kernel_modem_runs() ? (sysctl_int("kern.hakios.cellular_registered") > 0 ? 2ull : 0ull)
+				    : cell_state ? cell_state(self, sel_registerName("cellularServiceState")) : 0;
+			}, "2 in service, 0 not");
+			telephony_getter(sim, "dataNetworkType", (id)^unsigned long long (id self) {
+				int rat = sysctl_int("kern.hakios.cellular_rat");
+
+				if (!kernel_modem_runs()) {
+					return network ? network(self, sel_registerName("dataNetworkType")) : 0;
+				}
+				/* (only LTE's number is known: 7; the others show no glyph for now) */
+				return sysctl_int("kern.hakios.cellular_registered") > 0 && (rat == 14 || rat == 20) ? 7ull : 0ull;
+			}, "7 LTE");
+			telephony_getter(sim, "isProvidingDataConnection", (id)^BOOL (id self) {
+				return kernel_modem_runs() ? sysctl_int("kern.hakios.cellular_data") > 0
+				    : providing ? providing(self, sel_registerName("isProvidingDataConnection")) : NO;
+			}, "a data session");
+			telephony_getter(sim, "isBootstrap", (id)^BOOL (id self) {
+				return kernel_modem_runs() ? NO : bootstrap ? bootstrap(self, sel_registerName("isBootstrap")) : NO;
+			}, "no");
+			telephony_getter(sim, "isRegisteredWithoutCellular", (id)^BOOL (id self) {
+				return kernel_modem_runs() ? NO : without ? without(self, sel_registerName("isRegisteredWithoutCellular")) : NO;
+			}, "no");
+			telephony_getter(sim, "secondaryServiceDescription", (id)^id (id self) {
+				return kernel_modem_runs() ? nil : secondary ? secondary(self, sel_registerName("secondaryServiceDescription")) : nil;
+			}, "none");
+			telephony_getter(data, "isInactiveSOSEnabled", (id)^BOOL (id self) {
+				return kernel_modem_runs() ? NO : sos ? sos(self, sel_registerName("isInactiveSOSEnabled")) : NO;
+			}, "no");
+		}
 	}
 #undef ORIGINAL
+}
+
+/* the aggregator asked to work the cellular items out again: 4 the bars, 6 the text, 9 the network type */
+static void
+telephony_refresh(void)
+{
+	Class app_class = objc_getClass("UIApplication");
+	id app = app_class ? ((id (*)(id, SEL))objc_msgSend)((id)app_class, sel_registerName("sharedApplication")) : nil;
+	SEL getter = sel_registerName("statusBarStateAggregator"), update = sel_registerName("updateStatusBarItem:");
+	id aggregator = app != nil && class_getInstanceMethod(object_getClass(app), getter) ? ((id (*)(id, SEL))objc_msgSend)(app, getter)
+	    : cellular_aggregator;
+
+	if (aggregator == nil || !class_getInstanceMethod(object_getClass(aggregator), update)) {
+		return;
+	}
+	if (class_getInstanceMethod(object_getClass(aggregator), sel_registerName("beginCoalescentBlock"))) {
+		((void (*)(id, SEL))objc_msgSend)(aggregator, sel_registerName("beginCoalescentBlock"));
+	}
+	((void (*)(id, SEL, long))objc_msgSend)(aggregator, update, 4);
+	((void (*)(id, SEL, long))objc_msgSend)(aggregator, update, 6);
+	((void (*)(id, SEL, long))objc_msgSend)(aggregator, update, 9);
+	if (class_getInstanceMethod(object_getClass(aggregator), sel_registerName("endCoalescentBlock"))) {
+		((void (*)(id, SEL))objc_msgSend)(aggregator, sel_registerName("endCoalescentBlock"));
+	}
 }
 
 static void
@@ -994,7 +1070,15 @@ cellular_hook(void)
 
 	dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), 3 * NSEC_PER_SEC, NSEC_PER_SEC / 2);
 	dispatch_source_set_event_handler(timer, ^{
-		static int last_registered = -2, last_bars = -2, last_sim = -2;
+		static int last_registered = -2, last_bars = -2, last_sim = -2, last_all = -2;
+		int all = sysctl_int("kern.hakios.cellular_registered") * 1000 + sysctl_int("kern.hakios.cellular_bars") * 100 +
+		    sysctl_int("kern.hakios.cellular_sim") * 10 + sysctl_int("kern.hakios.cellular_radio") + sysctl_int("kern.hakios.cellular_rat") * 10000;
+
+		if (all != last_all) {          /* (16.6.1: the items worked out again from the getters) */
+			last_all = all;
+			telephony_refresh();
+			say("hakios: cellular: the status bar's cellular items asked to update (state %d)\n", all);
+		}
 		int registered = sysctl_int("kern.hakios.cellular_registered"), bars = sysctl_int("kern.hakios.cellular_bars");
 		int sim = sysctl_int("kern.hakios.cellular_sim");
 
