@@ -1031,6 +1031,21 @@ telephony_refresh(void)
 	if (class_getInstanceMethod(object_getClass(aggregator), sel_registerName("endCoalescentBlock"))) {
 		((void (*)(id, SEL))objc_msgSend)(aggregator, sel_registerName("endCoalescentBlock"));
 	}
+	{
+		/* what came of it: the raw data's "item enabled" bytes (its first field) for 4, 6 and 9, and the airplane mode */
+		static int said;
+		Ivar raw = class_getInstanceVariable(object_getClass(aggregator), "_data");
+		Class airplane_class = objc_getClass("SBAirplaneModeController");
+		id airplane = airplane_class ? ((id (*)(id, SEL))objc_msgSend)((id)airplane_class, sel_registerName("sharedInstance")) : nil;
+
+		if (said++ < 8) {
+			const uint8_t *d = raw ? (const uint8_t *)(void *)aggregator + ivar_getOffset(raw) : NULL;
+
+			say("hakios: cellular: after the refresh: items enabled: 4 (bars) %d, 6 (text) %d, 9 (network type) %d; the text \"%.40s\"; "
+			    "airplane mode %d\n", d ? d[4] : -1, d ? d[6] : -1, d ? d[9] : -1, d ? (const char *)d + 0x1c0 : "?",
+			    airplane ? (int)((BOOL (*)(id, SEL))objc_msgSend)(airplane, sel_registerName("isInAirplaneMode")) : -1);
+		}
+	}
 }
 
 static void
