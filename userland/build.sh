@@ -258,6 +258,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/cputop src/cputop.c
 		# iOS's thermal pressure level from the kernel's sensors, in thermalmonitord's place (com.hakios.thermalstate)
 		$DYN -o obj/thermal_state src/thermal_state.c
+		# the GNSS receiver's fixes for CoreLocation, its memory kept across starts (com.hakios.locfeed; src/locfeed.m)
+		$DYN -fobjc-arc -framework Foundation -framework CoreLocation -o obj/locfeed src/locfeed.m &&
+			{ ${LDID:-ldid} -Ssrc/locfeed.entitlements obj/locfeed 2>/dev/null || echo "build.sh: no ldid: locfeed is unsigned"; }
 		# the kernel's log kept in a file on the data partition (com.hakios.klogsave; the boot before's end on the console)
 		$DYN -o obj/klogsave src/klogsave.c
 		# a file written, mapped and shared as WebKit's network cache does it (src/filemap_test.c; rc.jobs.filemap)
@@ -459,6 +462,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/thermal_state ] && cp obj/thermal_state root/bin/
+	[ -f obj/locfeed ] && cp obj/locfeed root/bin/
 	[ -f obj/healthcheck ] && cp obj/healthcheck root/bin/
 	[ -f obj/klogsave ] && cp obj/klogsave root/bin/
 	[ -f obj/memsay ] && cp obj/memsay root/bin/
@@ -592,7 +596,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# the system image, so mkjobs.py judges "is this daemon's program there" by the listing of the volume
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
-	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist com.hakios.ptp.plist root/LaunchDaemons/
+	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist com.hakios.ptp.plist com.hakios.locfeed.plist root/LaunchDaemons/
 	[ -f obj/klogsave ] && cp com.hakios.klogsave.plist root/LaunchDaemons/
 	[ -f obj/memsay ] && cp com.hakios.memsay.plist root/LaunchDaemons/
 	VOLUME=""
@@ -825,6 +829,12 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_$ARCH ]; then
 	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
 		mkdir -p flashboot/fw
 		cp ../fw-audio/aw882xx_acf.bin flashboot/fw/
+	fi
+	# the sensor core's registry as Android's HAL gives it after an AoC start (../fw-sensors/usf-registry.bin: the board's
+	# scripts and THIS phone's factory calibration -- never in git, left out with SHARE=1; devices/akita/drivers/aoc)
+	if [ -f ../fw-sensors/usf-registry.bin ] && [ -z "$SHARE" ]; then
+		mkdir -p flashboot/fw
+		cp ../fw-sensors/usf-registry.bin flashboot/fw/
 	fi
 	# the GNSS receiver's firmware, configuration block and start messages (../fw-gnss: see the root's fw/ above)
 	if [ -f ../fw-gnss/kepler.bin ]; then

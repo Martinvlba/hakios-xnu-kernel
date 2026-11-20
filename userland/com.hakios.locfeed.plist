@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.locfeed</string>
+	<!-- the GNSS receiver's fixes for CoreLocation and its memory kept across starts (src/locfeed.m); with gnss=N among
+	     the kernel's arguments, else it ends at once. As root: the memory save goes to /var/db/hakios. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/locfeed</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>
