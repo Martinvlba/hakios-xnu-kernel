@@ -564,6 +564,137 @@ my_function_uniform(void *context, unsigned index, size_t components, size_t cou
 	orig_function_uniform(context, index, components, count, values);
 }
 
+/*
+ * Boot-arg touch_lat=1: a line for every client commit the window server applies (CA::Render::Context::did_commit, entered
+ * through a jump written over its first four instructions, kept in a trampoline as inject_log.c does for _os_log_impl):
+ *   tl: r CONTEXT FLAG1 TIME FLAG2 at US
+ * CONTEXT the server's context object (one per client layer tree), TIME its double argument (a commit time, CA's seconds?),
+ * US mach_absolute_time in microseconds. For frame pacing: when the application's frame reached the server, against
+ * the server's frame starts (tools/frames.py's "tl:" lines).
+ */
+#include <libkern/OSCacheControl.h>
+#include <sys/mman.h>
+
+#define CA_RENDER_CONTEXT_DID_COMMIT AT(0, 0, 0x1886f6238UL)   /* CA::Render::Context::did_commit(bool, double, bool) */
+typedef void (*did_commit_fn)(void *, bool, double, bool);
+static did_commit_fn did_commit_trampoline;
+static mach_timebase_info_data_t commit_timebase;
+
+static void
+did_commit_hooked(void *context, bool flag1, double time, bool flag2)
+{
+	uint64_t us = mach_absolute_time() * commit_timebase.numer / commit_timebase.denom / 1000;
+
+	did_commit_trampoline(context, flag1, time, flag2);
+	say("tl: r %lx %d %.6f %d at %llu\n", (unsigned long)((uintptr_t)context & 0xffffff), flag1, time, flag2,
+	    (unsigned long long)us);
+}
+
+/* AT (slid) entered through a jump to OURS; the first four instructions kept in a trampoline (returned, signed) */
+static void *
+inline_hook(const char *what, uintptr_t at, void *ours)
+{
+	uint32_t first[4], code[4], *trampoline;
+	uintptr_t back, target;
+	vm_address_t page;
+
+	memcpy(first, (void *)at, sizeof(first));
+	if (first[0] != 0xd503237f) {   /* pacibsp: the function as read from this cache */
+		say("hakios: %s begins %08x: not hooked\n", what, first[0]);
+		return NULL;
+	}
+	for (int i = 1; i < 4; i++) {   /* (nothing there may depend on where it runs) */
+		uint32_t w = first[i];
+
+		if ((w & 0x1f000000) == 0x10000000 || (w & 0x7c000000) == 0x14000000 || (w & 0xff000010) == 0x54000000 ||
+		    (w & 0x7e000000) == 0x34000000 || (w & 0x7e000000) == 0x36000000 || (w & 0x3b000000) == 0x18000000) {
+			say("hakios: %s: instruction %08x moves badly: not hooked\n", what, w);
+			return NULL;
+		}
+	}
+	trampoline = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	if (trampoline == MAP_FAILED) {
+		return NULL;
+	}
+	memcpy(trampoline, first, sizeof(first));
+	trampoline[4] = 0x58000050;     /* ldr x16, #8 */
+	trampoline[5] = 0xd61f0200;     /* br x16 */
+	back = at + 16;
+	memcpy(&trampoline[6], &back, 8);
+	if (mprotect(trampoline, 0x4000, PROT_READ | PROT_EXEC) != 0) {
+		return NULL;
+	}
+	sys_icache_invalidate(trampoline, 32);
+	target = (uintptr_t)__builtin_ptrauth_strip(ours, 0);
+	code[0] = 0x58000050;
+	code[1] = 0xd61f0200;
+	memcpy(&code[2], &target, 8);
+	page = at & ~(vm_address_t)(vm_page_size - 1);
+	if (vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) {
+		say("hakios: %s: the page stays read-only: not hooked\n", what);
+		return NULL;
+	}
+	memcpy((void *)at, code, sizeof(code));
+	vm_protect(mach_task_self(), page, 2 * vm_page_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+	sys_icache_invalidate((void *)at, sizeof(code));
+	return __builtin_ptrauth_sign_unauthenticated((void *)trampoline, 0, 0);
+}
+
+/*
+ * ... and every refresh tick of the window server (CA::WindowServer::IOMFBServer::vsync_callback(fb, ?, TIMESTAMP,
+ * INTERVAL, server)), which draws by render_for_time(TIMESTAMP + INTERVAL) -- that decides whether there is anything to
+ * draw -- unless server +0x2b0 (CA seconds; usually 0) is later than that or TIMESTAMP before server +0x2d8:
+ *   tl: y TIMESTAMP_US INTERVAL_US +0x2b0_US +0x2d8_US at US
+ * (11-20: ticks on every refresh, ~60 us after the display driver's beat, INTERVAL its measured 8.36 ms.)
+ */
+#define IOMFB_SERVER_VSYNC_CALLBACK AT(0, 0, 0x1885875fcUL)
+typedef void (*vsync_callback_fn)(void *, uint64_t, uint64_t, uint64_t, void *);
+static vsync_callback_fn vsync_trampoline;
+
+static uint64_t
+host_us(uint64_t host)
+{
+	return host * commit_timebase.numer / commit_timebase.denom / 1000;
+}
+
+static void
+vsync_hooked(void *fb, uint64_t a, uint64_t timestamp, uint64_t interval, void *server)
+{
+	double next = *(volatile double *)((char *)server + 0x2b0);
+	uint64_t not_before = *(volatile uint64_t *)((char *)server + 0x2d8), t0 = mach_absolute_time();
+
+	vsync_trampoline(fb, a, timestamp, interval, server);
+	say("tl: y %llu %llu %lld %llu at %llu\n", (unsigned long long)host_us(timestamp), (unsigned long long)host_us(interval),
+	    isinf(next) ? -1LL : (long long)(next * 1e6), (unsigned long long)host_us(not_before), (unsigned long long)host_us(t0));
+}
+
+static void
+commit_lines(void)
+{
+	void *t;
+
+	mach_timebase_info(&commit_timebase);
+	if (CA_RENDER_CONTEXT_DID_COMMIT == 0) {
+		return;
+	}
+	if ((t = inline_hook("did_commit", CA_RENDER_CONTEXT_DID_COMMIT + slide, (void *)did_commit_hooked)) != NULL) {
+		did_commit_trampoline = (did_commit_fn)t;
+	}
+	if ((t = inline_hook("vsync_callback", IOMFB_SERVER_VSYNC_CALLBACK + slide, (void *)vsync_hooked)) != NULL) {
+		vsync_trampoline = (vsync_callback_fn)t;
+	}
+	say("hakios: touch_lat=1: the window server's commits said (tl: r)\n");
+	/* (frame pacing: QuartzCore's switches for frame-rate arbitration / reduced server vsync render, once settled) */
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_SEC), dispatch_get_global_queue(0, 0), ^{
+		if (AT(0, 0, 1) != 0) {
+			say("hakios: QuartzCore: capability %d (once %ld), arbitration flag %d, reduced-render flag %d, use_vbl %d\n",
+			    *(volatile uint8_t *)(0x1dda90ca8UL + slide), (long)*(volatile intptr_t *)(0x1dda918b0UL + slide),
+			    *(volatile uint8_t *)(0x1dda922c2UL + slide), *(volatile uint8_t *)(0x1dda922c4UL + slide),
+			    *(volatile uint8_t *)(0x1dda910b8UL + slide));
+		}
+	});
+}
+
 static void
 window_server_fixes(void)
 {
@@ -1778,6 +1909,9 @@ hakios_init(void)
 		}
 		if (strstr(arguments, "metal_watch=1") != NULL || strstr(arguments, "ca_metallib=") != NULL) {
 			watch_metallib_lookups(arguments);
+		}
+		if (strstr(arguments, "touch_lat=1") != NULL) {
+			commit_lines();
 		}
 		cb_watching = strstr(arguments, "cb_watch=1") != NULL;
 		cb_watch();     /* (the brightness bridge always; the sayings with cb_watch=1) */

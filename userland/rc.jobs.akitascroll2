@@ -1,0 +1,3 @@
+# Settings scrolled up and down by a steady synthetic finger sampled every 2 ms (rc.jobs.akitascroll: every 4 ms, which beats against the 8.36 ms refresh -- a frame without a new sample now and then: 16 % late there, 4 % here). Frame pacing: tools/frames.py.
+/redwood/bin/sound_test springboard
+/redwood/bin/rwtouch wait 8 notify com.hakios.unlock wait 2 swipe 0.5 0.985 0.5 0.3 200 wait 30 tap 0.62 0.765 wait 8 zigzag 0.5 0.75 0.3 900 30 2 wait 600
