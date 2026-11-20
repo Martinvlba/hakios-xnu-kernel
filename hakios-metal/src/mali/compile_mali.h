@@ -69,6 +69,8 @@ struct mali_kernel_binary {
 	unsigned workgroup[3];  /* fixed by the kernel, or 0 0 0 */
 	unsigned threadgroup_bytes;
 	unsigned threadgroup_arg_base;  /* where a [[threadgroup(0)]] argument starts; ~0u when there is none */
+	unsigned imageblock_bytes, imageblock_base;     /* (11-20) an explicit imageblock: a pixel's bytes (0: none), its start in
+	                                                 * threadgroup memory -- a pixel a thread, sized at dispatch */
 	char name[128];
 	unsigned stage;                 /* 0 compute, 1 vertex, 2 fragment */
 	/* a vertex function's: IDVS, the varying shader's offset in CODE (0: none), its registers and preload; the bytes

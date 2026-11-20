@@ -104,6 +104,12 @@ struct air_shader_info {
     * dispatch threadgroup_arg_base + the encoder's length in all. */
    bool has_threadgroup_arg;
    unsigned threadgroup_arg_base;
+   /* (11-20) an explicit imageblock in a compute function: a pixel's bytes (0: none), and where it starts in
+    * threadgroup memory (past the static arrays, 16-aligned); the runtime gives the dispatch
+    * imageblock_base + threads in a threadgroup x imageblock_bytes in all -- the imageblock is the threadgroup's
+    * size, a pixel a thread (air_to_nir.c: IMAGEBLOCKS) */
+   unsigned imageblock_bytes;
+   unsigned imageblock_base;
 };
 
 /* -- the translator --------------------------------------------------------- */

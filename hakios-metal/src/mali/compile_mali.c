@@ -1227,6 +1227,8 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 	}
 	out->threadgroup_bytes = air_info.threadgroup_bytes;
 	out->threadgroup_arg_base = air_info.has_threadgroup_arg ? air_info.threadgroup_arg_base : ~0u;
+	out->imageblock_bytes = air_info.imageblock_bytes;
+	out->imageblock_base = air_info.imageblock_base;
 	for (unsigned i = 0; i < 3; i++) {
 		out->workgroup[i] = s->info.workgroup_size_variable ? 0 : s->info.workgroup_size[i];
 	}

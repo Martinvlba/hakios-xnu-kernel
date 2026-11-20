@@ -815,6 +815,14 @@ add_resource(struct air_ctx *c, enum air_resource_kind kind, unsigned index, uns
    };
 }
 
+/* the threadgroup's width and height, 32-bit (an imageblock's: IMAGEBLOCKS) */
+nir_def *
+air_imageblock_size(struct air_ctx *c)
+{
+   nir_def *tg = load_sysval(c, AIR_SV_THREADS_PER_TG);
+   return tg ? nir_trim_vector(&c->b, nir_u2u32(&c->b, tg), 2) : NULL;
+}
+
 unsigned
 air_null_texture_slot(struct air_ctx *c)
 {
@@ -922,6 +930,32 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
       }
       add_resource(c, rk, index, size, read, write, param, node);
       c->params[param] = air_val_ptr(c, p);
+      return true;
+   }
+
+   if (md_key(node, "air.imageblock") >= 0) {
+      /*
+       * IMAGEBLOCKS (11-20: the camera's NRFV3, STF, ...: 198 kernels). An explicit imageblock of a compute function is
+       * a 2D array of structs in tile memory on Apple's GPUs: each thread writes its pixel (air.imageblock_data at its
+       * position), a barrier, then neighbours are read, and one thread writes a member's region to a texture
+       * (air.write_imageblock_slice_to_texture_2d). Here it is threadgroup memory past the static arrays, as big as the
+       * threadgroup (a pixel a thread: get_imageblock_width/height are the threadgroup's width and height -- the
+       * kernels' own bounds, 16 x 16 for 16 x 16 threadgroups, say as much); the runtime sizes it at dispatch.
+       */
+      uint64_t bytes = 0;
+      if (c->nir->info.stage != MESA_SHADER_COMPUTE)
+         return air_error(c, "interface: an imageblock outside a compute function (tile shaders)");
+      if (md_key(node, "explicit") < 0 || !md_key_int(node, "air.imageblock_data_size", &bytes) || bytes == 0 || bytes > 256)
+         return air_error(c, "interface: an imageblock of an implicit layout or of %u bytes a pixel", (unsigned)bytes);
+      if (c->imageblock_bytes)
+         return air_error(c, "interface: a second imageblock");
+      c->imageblock_bytes = (unsigned)bytes;
+      /* (the handle is never read: the intrinsics name no imageblock -- but it is a struct { ptr } handed to callees
+       * and taken apart with extractvalue: an aggregate of one null pointer) */
+      struct air_ptr p = { .class = AIR_PTR_NONE };
+      struct air_val *h = air_val_agg(c, 1);
+      h->elems[0] = air_val_ptr(c, p);
+      c->params[param] = h;
       return true;
    }
 
@@ -1485,6 +1519,14 @@ air_value_kind_name(const struct air_value *v)
 static bool
 translate_instruction(struct air_ctx *c, const struct air_inst *in)
 {
+   /* (11-20) a vector of a width NIR has not (5 to 7, 9 to 15: NRFV3's ycc2rgb builds a 3x3 matrix as <9 x float>):
+    * refused here -- building one crashed the process (an ALU instruction of 9 components), mediaserverd on the phone */
+   const struct air_type *rt = in->base.type;
+   for (unsigned k = 0; k <= in->num_operands; k++) {
+      const struct air_type *t = k == 0 ? rt : in->operands[k - 1] ? in->operands[k - 1]->type : NULL;
+      if (t && t->kind == AIR_TYPE_VECTOR && !nir_num_components_valid((unsigned)t->count) && in->op != AIR_OP_CALL)
+         return air_error(c, "instruction: a vector of %u components (NIR has none)", (unsigned)t->count);
+   }
    switch (in->op) {
    case AIR_OP_BINOP:
       return translate_binop(c, in);
@@ -3720,6 +3762,13 @@ air_to_nir(void *mem_ctx, const void *bitcode, size_t size, const char *entry_po
       plan_globals(&c);
       plan_global_folding(&c);
       plan_scratch_dirty(&c);
+   }
+   if (!c.error[0] && c.imageblock_bytes) {
+      if (c.tg_arg_param_plus1)
+         air_error(&c, "interface: an imageblock and a threadgroup argument (both sized at dispatch)");
+      c.imageblock_base = ALIGN_POT(c.shared_size, 16);
+      c.info->imageblock_bytes = c.imageblock_bytes;
+      c.info->imageblock_base = c.imageblock_base;
    }
    if (!c.error[0] && c.tg_arg_param_plus1 && c.params[c.tg_arg_param_plus1 - 1]) {
       /* the threadgroup argument past the static arrays (at 0 the two would

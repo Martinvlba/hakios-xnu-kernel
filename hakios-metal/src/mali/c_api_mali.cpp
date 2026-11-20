@@ -3225,6 +3225,9 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
     if (k->binary.threadgroup_arg_base != ~0u && k->binary.threadgroup_arg_base + cb->threadgroup_length > wls) {
         wls = k->binary.threadgroup_arg_base + cb->threadgroup_length;     // the argument, past the static arrays
     }
+    if (k->binary.imageblock_bytes != 0 && k->binary.imageblock_base + total * k->binary.imageblock_bytes > wls) {
+        wls = k->binary.imageblock_base + total * k->binary.imageblock_bytes;   // (11-20) an imageblock: a pixel a thread
+    }
     if (wls != 0) {
         uint32_t per_task = d->max_threads / (d->max_tasks ? d->max_tasks : 1);
         uint32_t wg_per_task = (per_task + total - 1) / total;

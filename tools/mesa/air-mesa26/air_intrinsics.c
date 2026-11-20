@@ -62,6 +62,126 @@ is_signed_part(const char *s)
 /* -- the families ------------------------------------------------------- */
 
 /*
+ * IMAGEBLOCKS (11-20; air_to_nir.c says what they are here): air.imageblock_data(coord, 0, 0) the pixel's place in
+ * threadgroup memory; air.get_imageblock_width/height the threadgroup's; air.write_imageblock_slice_to_texture_2d.T
+ * (texture, slice, ?, origin, size, coord, lod, ?, ?) -- one thread writes the region SIZE from ORIGIN of the slice
+ * (a member's place in pixel (0, 0)) to the texture at COORD: a loop here over its pixels, each read from threadgroup
+ * memory as T and stored as the texture's.
+ */
+/* a new block of the function's unstructured CFG (as air_to_nir.c's nir_block_of makes them) */
+static nir_block *
+ib_block(struct air_ctx *c)
+{
+   nir_block *n = AIR_BLOCK_CREATE(c->nir, c->b.impl);
+   exec_list_push_tail(&c->b.impl->body, &n->cf_node.node);
+   n->cf_node.parent = &c->b.impl->cf_node;
+   return n;
+}
+
+static bool
+imageblock_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, bool *handled)
+{
+   const char *op = n->part[0];
+   *handled = true;
+   if (strcmp(op, "imageblock_data") && strcmp(op, "get_imageblock_width") && strcmp(op, "get_imageblock_height") &&
+       strcmp(op, "write_imageblock_slice_to_texture_2d")) {
+      *handled = false;
+      return true;
+   }
+   if (!c->imageblock_bytes)
+      return air_error(c, "intrinsic: air.%s without an imageblock", op);
+   nir_builder *b = &c->b;
+   nir_def *size = air_imageblock_size(c);
+   if (!size)
+      return false;
+   nir_def *w = nir_channel(b, size, 0);
+
+   if (!strcmp(op, "get_imageblock_width") || !strcmp(op, "get_imageblock_height")) {
+      nir_def *v = nir_channel(b, size, op[15] == 'w' ? 0 : 1);
+      air_set(c, &in->base, air_val_ssa(c, nir_u2uN(b, v, air_nir_bit_size(c, in->base.type))));
+      return true;
+   }
+   if (!strcmp(op, "imageblock_data")) {
+      nir_def *coord = in->num_operands > 1 ? air_get_ssa(c, in->operands[1]) : NULL;
+      if (!coord || coord->num_components < 2)
+         return air_error(c, "intrinsic: air.imageblock_data without a 2D coordinate");
+      uint64_t k;
+      for (unsigned i = 2; i < in->num_operands; i++)
+         if (!air_const_uint(in->operands[i], &k) || k != 0)
+            return air_error(c, "intrinsic: air.imageblock_data with argument %u not 0 (a sample or a slice)", i);
+      coord = nir_u2u32(b, coord);
+      nir_def *pixel = nir_iadd(b, nir_imul(b, nir_channel(b, coord, 1), w), nir_channel(b, coord, 0));
+      struct air_ptr p = { .class = AIR_PTR_SHARED };
+      p.offset = nir_iadd_imm(b, nir_imul_imm(b, pixel, c->imageblock_bytes), c->imageblock_base);
+      air_set(c, &in->base, air_val_ptr(c, p));
+      return true;
+   }
+
+   /* write_imageblock_slice_to_texture_2d.[i16.]T(texture, slice, i1, origin, size, coord, lod, i1, i32) */
+   if (in->num_operands < 7)
+      return air_error(c, "intrinsic: air.%s with %u arguments", op, in->num_operands - 1);
+   struct air_val *tv = air_get(c, in->operands[1]), *sv = air_get(c, in->operands[2]);
+   if (!tv || !sv)
+      return false;
+   if (tv->kind != AIR_VAL_PTR || tv->ptr.class != AIR_PTR_TEXTURE || !tv->ptr.is_image)
+      return air_error(c, "intrinsic: air.%s to something that is not a texture written", op);
+   if (sv->kind != AIR_VAL_PTR || sv->ptr.class != AIR_PTR_SHARED)
+      return air_error(c, "intrinsic: air.%s of something that is not an imageblock slice", op);
+   nir_def *origin = air_get_ssa(c, in->operands[4]), *rsize = air_get_ssa(c, in->operands[5]);
+   nir_def *coord = air_get_ssa(c, in->operands[6]);
+   if (!origin || !rsize || !coord)
+      return false;
+   uint64_t lod = 0;
+   if (in->num_operands > 7 && (!air_const_uint(in->operands[7], &lod) || lod != 0))
+      return air_error(c, "intrinsic: air.%s to a level other than 0", op);
+   /* the element: the name's last part (f16, v2f16, v4f16, f32, v4f32, ...) */
+   const char *ty = n->part[n->num - 1];
+   unsigned comps = ty[0] == 'v' ? (unsigned)atoi(ty + 1) : 1;
+   const char *base = ty[0] == 'v' ? strpbrk(ty + 1, "fiu") : ty;
+   if (!base || comps < 1 || comps > 4)
+      return air_error(c, "intrinsic: air.%s (an element this does not know)", op);
+   unsigned bits = (unsigned)atoi(base + 1);
+   bool is_float = base[0] == 'f';
+   if (bits != 8 && bits != 16 && bits != 32)
+      return air_error(c, "intrinsic: air.%s (%u-bit elements)", op, bits);
+   origin = nir_u2u32(b, origin);
+   rsize = nir_u2u32(b, rsize);
+   coord = nir_u2u32(b, coord);
+   nir_def *rw = nir_channel(b, rsize, 0), *count = nir_imul(b, rw, nir_channel(b, rsize, 1));
+   nir_def *slice = sv->ptr.offset ? sv->ptr.offset : nir_imm_int(b, 0);
+
+   /* the loop as this translator's CFG is made: unstructured blocks (nir_lower_goto_ifs structures them later) --
+    * here: i = 0; head: if (i < count) body else after; body: ...; i++; goto head; after: the rest of the block */
+   nir_builder entry = nir_builder_at(nir_before_impl(b->impl));
+   nir_def *reg = nir_decl_reg(&entry, 1, 32, 0);
+   nir_block *head = ib_block(c), *body = ib_block(c), *after = ib_block(c);
+   nir_store_reg(b, nir_imm_int(b, 0), reg);
+   nir_goto(b, head);
+   b->cursor = nir_after_block(head);
+   {
+      nir_def *i = nir_load_reg(b, reg);
+      nir_goto_if(b, body, nir_ult(b, i, count), after);
+   }
+   b->cursor = nir_after_block(body);
+   {
+      nir_def *i = nir_load_reg(b, reg);
+      nir_def *x = nir_umod(b, i, rw), *y = nir_udiv(b, i, rw);
+      nir_def *px = nir_iadd(b, nir_channel(b, origin, 0), x), *py = nir_iadd(b, nir_channel(b, origin, 1), y);
+      nir_def *off = nir_iadd(b, slice, nir_imul_imm(b, nir_iadd(b, nir_imul(b, py, w), px), c->imageblock_bytes));
+      nir_def *v = nir_load_shared(b, comps, bits, off, .base = 0, .align_mul = MAX2(bits / 8, 1));
+      v = is_float ? nir_f2f32(b, v) : nir_u2u32(b, v);
+      nir_def *at = nir_vec2(b, nir_iadd(b, nir_channel(b, coord, 0), x), nir_iadd(b, nir_channel(b, coord, 1), y));
+      nir_image_store(b, ptr_binding(c, tv->ptr), nir_pad_vector(b, at, 4), nir_imm_int(b, 0),
+                      nir_pad_vector_imm_int(b, v, 0, 4), nir_imm_int(b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
+                      .image_array = false, .src_type = is_float ? nir_type_float32 : nir_type_uint32);
+      nir_store_reg(b, nir_iadd_imm(b, i, 1), reg);
+      nir_goto(b, head);
+   }
+   b->cursor = nir_after_block(after);   /* (the block's remaining instructions, its phi stores and terminator: here) */
+   return true;
+}
+
+/*
  * SIMD GROUPS AND QUADS (11-20): Metal's simd_* and quad_* functions as NIR's subgroup intrinsics, which the Mali's
  * compiler lowers itself (bifrost_nir.c: nir_lower_subgroups -- shuffles onto CLPER, reductions, scans, quads):
  *   simd_shuffle(_down|_up|_xor), simd_broadcast        shuffle / shuffle_down / shuffle_up / shuffle_xor
@@ -1402,6 +1522,10 @@ air_translate_call(struct air_ctx *c, const struct air_inst *in, const char *nam
       return atomic_op(c, in, &n);
 
    bool handled = false;
+   if (!imageblock_op(c, in, &n, &handled))
+      return false;
+   if (handled)
+      return true;
    if (!simd_op(c, in, &n, &handled))
       return false;
    if (handled)
