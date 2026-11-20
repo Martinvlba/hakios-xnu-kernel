@@ -36,6 +36,7 @@
 #include <notify.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -1039,6 +1040,21 @@ service_set_property(__unused void *target, void *refcon, __unused IOHIDServiceC
 	char name[96] = "?", text[160] = "?";
 	CFStringRef description;
 
+	{
+		/* (the sensor services: every property set, with the service's name -- who configures them) */
+		CFStringRef product = CFDictionaryGetValue(((struct service *)refcon)->properties, CFSTR("Product"));
+		char pname[64] = "", kname[64] = "", vtext[96] = "";
+		static unsigned said;
+
+		if (product != NULL && key != NULL && CFStringGetCString(product, pname, sizeof(pname), kCFStringEncodingUTF8) &&
+		    (strstr(pname, "accelerometer") || strstr(pname, "orientation")) && said++ < 60) {
+			CFStringRef d = value ? CFCopyDescription(value) : NULL;
+
+			CFStringGetCString(key, kname, sizeof(kname), kCFStringEncodingUTF8);
+			if (d) { CFStringGetCString(d, vtext, sizeof(vtext), kCFStringEncodingUTF8); CFRelease(d); }
+			say("hakios: sensors: \"%s\" set %s = %.80s\n", pname, kname, vtext);
+		}
+	}
 	/* the last thing the event server does when it opens a service; see make_service() */
 	if (key != NULL && value != NULL && CFEqual(key, CFSTR("DeviceOpenedByEventSystem")) &&
 	    CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value)) {
@@ -1075,9 +1091,11 @@ service_notification(__unused void *target, __unused void *refcon, __unused IOHI
 {
 }
 
+static IOHIDEventRef sensor_copy_event(void *target, void *refcon, IOHIDServiceClientRef service, uint32_t type,
+    IOHIDEventRef matching, uint32_t options);
 static const struct virtual_service_callbacks service_callbacks = {
 	.version = 2, .notification = service_notification, .setProperty = service_set_property,
-	.copyProperty = service_copy_property,
+	.copyProperty = service_copy_property, .copyEvent = sensor_copy_event,
 };
 
 /*
@@ -1141,6 +1159,143 @@ make_service(IOHIDEventSystemClientRef client, const char *product, int page, in
 		service = NULL;
 	}
 	return service;
+}
+
+/*
+ * THE MOTION SENSORS AS iOS TAKES THEM (11-20): on the iPhone 13 mini the accelerometer (and gyro, compass, light and
+ * proximity sensors) are HID services of the always-on processor, Apple's vendor page 0xff00 -- usages 3
+ * (accelerometer), 9 (gyro); backboardd and CoreMotion find them by those. Here a virtual service of ours stands for
+ * the accelerometer, fed from the Pixel's sensors once they are read (TODO 34: the AoC's USF); until then, with
+ * boot-arg accel_fake=X,Y,Z (in g, as an iPhone: upright portrait is 0,-1,0), that vector fifty times a second -- to
+ * see who opens the service and whether the interface turns.
+ */
+#define HID_PAGE_APPLE_VENDOR           0xff00
+#define HID_USAGE_ACCELEROMETER         0x03
+#define HID_USAGE_GYRO                  0x09
+extern IOHIDEventRef IOHIDEventCreateAccelerometerEvent(CFAllocatorRef allocator, uint64_t time, double x, double y, double z,
+    uint32_t options);
+
+static IOHIDServiceClientRef accelerometer;
+static double accel_fake[3];
+static bool accel_fake_on;
+
+/*
+ * ... AND THE DEVICE'S ORIENTATION, which the always-on processor works out itself and CoreMotion's
+ * CMDeviceOrientationManager takes (IOHIDFamily's IOHIDEventDriver: a service of the HID sensor page 0x20, usage 0x8a,
+ * "Device Orientation"; orientation events of type CMUsage, the orientation a usage of Apple's motion page 0xff0c --
+ * ambiguous, portrait, upside down, landscape left, landscape right, face up, face down from BASE on; Apple's test
+ * descriptor has them from 0x64; orient_base=0x20 for the other numbering seen).
+ */
+#define HID_PAGE_SENSOR                 0x20
+#define HID_USAGE_DEVICE_ORIENTATION    0x8a
+#define EVENT_TYPE_ORIENTATION          10
+#define ORIENTATION_TYPE_CMUSAGE        1
+#define FIELD_ORIENTATION_TYPE          (EVENT_TYPE_ORIENTATION << 16 | 3)
+#define FIELD_ORIENTATION_USAGE         (EVENT_TYPE_ORIENTATION << 16 | 4)
+enum { ORIENT_AMBIGUOUS, ORIENT_PORTRAIT, ORIENT_UPSIDE_DOWN, ORIENT_LANDSCAPE_LEFT, ORIENT_LANDSCAPE_RIGHT, ORIENT_FACE_UP,
+	ORIENT_FACE_DOWN };
+extern IOHIDEventRef IOHIDEventCreateOrientationEvent(CFAllocatorRef allocator, uint64_t time, double x, double y, double z,
+    uint32_t options);
+static IOHIDServiceClientRef orientation_service;
+static IOHIDEventRef orientation_last;          /* (what copyEvent answers) */
+static unsigned orient_base = 0x64;
+
+/* the orientation a gravity vector (in g, an iPhone's axes) gives; WAS where there is no clear answer */
+static int
+orientation_of(const double g[3], int was)
+{
+	double ax = fabs(g[0]), ay = fabs(g[1]), az = fabs(g[2]);
+
+	if (az > 0.8) return g[2] < 0 ? ORIENT_FACE_UP : ORIENT_FACE_DOWN;
+	if (ay > 0.6 && ay > ax) return g[1] < 0 ? ORIENT_PORTRAIT : ORIENT_UPSIDE_DOWN;
+	if (ax > 0.6 && ax > ay) return g[0] < 0 ? ORIENT_LANDSCAPE_LEFT : ORIENT_LANDSCAPE_RIGHT;
+	return was;
+}
+
+static void
+send_orientation(int orientation)
+{
+	IOHIDEventRef e = IOHIDEventCreateOrientationEvent(NULL, mach_absolute_time(), 0, 0, 0, 0);
+
+	if (e == NULL || orientation_service == NULL) {
+		return;
+	}
+	IOHIDEventSetIntegerValue(e, FIELD_ORIENTATION_TYPE, ORIENTATION_TYPE_CMUSAGE);
+	IOHIDEventSetIntegerValue(e, FIELD_ORIENTATION_USAGE, (CFIndex)(orient_base + (unsigned)orientation));
+	IOHIDVirtualServiceClientDispatchEvent(orientation_service, e);
+	if (orientation_last != NULL) CFRelease(orientation_last);
+	orientation_last = e;
+	static unsigned said;
+
+	if (said++ < 4) say("hakios: sensors: orientation %d (usage %#x) sent\n", orientation, orient_base + (unsigned)orientation);
+}
+
+/* copyEvent of the sensor services: the last orientation event (Apple's own test asks the service so) */
+static IOHIDEventRef
+sensor_copy_event(__unused void *target, __unused void *refcon, __unused IOHIDServiceClientRef service, uint32_t type,
+    __unused IOHIDEventRef matching, __unused uint32_t options)
+{
+	static unsigned said;
+
+	if (said++ < 6) say("hakios: sensors: copyEvent of type %u asked\n", type);
+	return type == EVENT_TYPE_ORIENTATION && orientation_last != NULL ? (IOHIDEventRef)CFRetain(orientation_last) : NULL;
+}
+
+static void *
+accelerometer_feed(__unused void *unused)
+{
+	unsigned sent = 0;
+	int orientation = -1;
+
+	for (;;) {
+		int now = orientation_of(accel_fake, orientation < 0 ? ORIENT_PORTRAIT : orientation);
+
+		/* (and again every half second: a client that subscribes later -- CoreMotion's, seconds after the service is
+		 * there -- gets no event dispatched before it did) */
+		if (now != orientation || sent % 25 == 0) {
+			orientation = now;
+			send_orientation(orientation);
+		}
+		IOHIDEventRef e = IOHIDEventCreateAccelerometerEvent(NULL, mach_absolute_time(), accel_fake[0], accel_fake[1], accel_fake[2], 0);
+
+		if (e != NULL) {
+			IOHIDVirtualServiceClientDispatchEvent(accelerometer, e);
+			CFRelease(e);
+			if (sent++ == 0) {
+				say("hakios: sensors: the first accelerometer event sent (%.2f %.2f %.2f g)\n", accel_fake[0], accel_fake[1], accel_fake[2]);
+			}
+		}
+		usleep(20000);
+	}
+	return NULL;
+}
+
+static void
+sensor_services(IOHIDEventSystemClientRef client)
+{
+	char args[1024] = { 0 };
+	size_t size = sizeof(args) - 1;
+	const char *at;
+	pthread_t thread;
+
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "accel_fake=")) != NULL &&
+	    sscanf(at + 11, "%lf,%lf,%lf", &accel_fake[0], &accel_fake[1], &accel_fake[2]) == 3) {
+		accel_fake_on = true;
+	}
+	if (!accel_fake_on) {
+		return;                 /* (nothing to give yet: no service, so that nothing waits on one that stays still) */
+	}
+	if ((at = strstr(args, "orient_base=")) != NULL) {
+		orient_base = (unsigned)strtoul(at + 12, NULL, 0);
+	}
+	accelerometer = make_service(client, "HakiOS accelerometer", HID_PAGE_APPLE_VENDOR, HID_USAGE_ACCELEROMETER, false);
+	orientation_service = make_service(client, "HakiOS device orientation", HID_PAGE_SENSOR, HID_USAGE_DEVICE_ORIENTATION, false);
+	say("hakios: sensors: accelerometer service %p, orientation service %p (usages from %#x)\n", (void *)accelerometer,
+	    (void *)orientation_service, orient_base);
+	if (accelerometer != NULL) {
+		pthread_create(&thread, NULL, accelerometer_feed, NULL);
+		pthread_detach(thread);
+	}
 }
 
 /* One frame of the touch screen: the hand, and under it every finger that is down or has just lifted. */
@@ -1277,6 +1432,9 @@ input_thread(__unused void *arg)
 	}
 	if (screen != NULL) {
 		buttons = make_service(client, "HakiOS buttons", HID_PAGE_CONSUMER, HID_USAGE_CONSUMER_CONTROL, false);
+	}
+	if (screen != NULL) {
+		sensor_services(client);
 	}
 	say("hakios: input: touch screen service %p, buttons %p\n", (void *)screen, (void *)buttons);
 	dispatch_semaphore_signal(input_services_made); /* see wait_for_als_arrival() */
