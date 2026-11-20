@@ -59,10 +59,19 @@ case "$size" in
 	CRYPTEX_DMG=096-57245-083.dmg                   # Cryptex1,SystemOS (dyld shared cache, arm64e)
 	APP_CRYPTEX_DMG=096-57613-084.dmg               # Cryptex1,AppOS
 	;;
+11440848869)
+	# iPhone 13 mini (iPhone14,4, d16ap), iOS 27.2.1 24B156 (2026-11-20, the tester's choice). Kernel xnu-13432.42.3.
+	# The root filesystem and the OS cryptex are encrypted (.dmg.aea): aea-decrypt.py opens them with the key
+	# Apple publishes for released builds (the URL is in each file).
+	BUILD=24B156 VERSION=27.2.1 DEVICE=d16ap MODEL=iPhone14,4 ARCH=arm64e
+	ROOTFS_DMG=141-09352-223.dmg.aea                # OS
+	CRYPTEX_DMG=141-08508-235.dmg.aea               # Cryptex1,SystemOS
+	APP_CRYPTEX_DMG=141-08824-252.dmg               # Cryptex1,AppOS
+	;;
 *)
 	echo "unpack.sh: $IPSW is $size bytes: not a build this knows --" >&2
 	echo "  16.5 20F66 (6165698198) or 16.7.16 20H392 (6171035648) for iPhone10,3/10,6 (d22ap, arm64)," >&2
-	echo "  or 16.6.1 20G81 (6755700733) for iPhone14,4 (d16ap, arm64e)." >&2
+	echo "  or 16.6.1 20G81 (6755700733) / 27.2.1 24B156 (11440848869) for iPhone14,4 (d16ap, arm64e)." >&2
 	exit 1
 	;;
 esac
@@ -73,6 +82,12 @@ if [ -f build.conf ] && ! grep -q "^BUILD=$BUILD\$" build.conf; then
 fi
 printf 'BUILD=%s\nVERSION=%s\nCACHE=%s\nDEVICE=%s\nMODEL=%s\nARCH=%s\n' "$BUILD" "$VERSION" "$CACHE" "$DEVICE" "$MODEL" "$ARCH" > build.conf
 UNZBM=../xnu-deps/host/bin/unzbm
+member() { # member NAME OUT: copy a disk image out of the IPSW, decrypting an .aea one
+	case "$1" in
+	*.aea) python3 aea-decrypt.py "$IPSW" "$1" "$2" ;;
+	*) python3 ipsw-member.py "$IPSW" "$1" "$2" ;;
+	esac
+}
 
 for tool in python3 7z cc; do
 	command -v $tool >/dev/null || { echo "unpack.sh: $tool is not installed"; exit 1; }
@@ -93,7 +108,7 @@ unzbm_all() { # unzbm_all DIR: expand every LZBITMAP file below DIR
 if [ ! -f .done-rootfs ] || [ select-system.py -nt .done-rootfs ]; then
 	if [ ! -f rootfs.dmg ]; then
 		echo "unpack.sh: copying the root filesystem image out of the IPSW (4.7 GB)"
-		python3 ipsw-member.py "$IPSW" $ROOTFS_DMG rootfs.dmg.part
+		member $ROOTFS_DMG rootfs.dmg.part
 		mv rootfs.dmg.part rootfs.dmg
 	fi
 	echo "unpack.sh: listing the image"
@@ -116,7 +131,7 @@ fi
 if [ ! -f .done-cryptex ]; then
 	if [ ! -f cryptex-os.dmg ]; then
 		echo "unpack.sh: copying the OS cryptex image out of the IPSW (2.7 GB)"
-		python3 ipsw-member.py "$IPSW" $CRYPTEX_DMG cryptex-os.dmg.part
+		member $CRYPTEX_DMG cryptex-os.dmg.part
 		mv cryptex-os.dmg.part cryptex-os.dmg
 	fi
 	echo "unpack.sh: extracting the cryptex"
@@ -140,7 +155,7 @@ fi
 if [ ! -f .done-cryptex-app ]; then
 	if [ ! -f cryptex-app.dmg ]; then
 		echo "unpack.sh: copying the App cryptex image out of the IPSW (10 MB)"
-		python3 ipsw-member.py "$IPSW" $APP_CRYPTEX_DMG cryptex-app.dmg.part
+		member $APP_CRYPTEX_DMG cryptex-app.dmg.part
 		mv cryptex-app.dmg.part cryptex-app.dmg
 	fi
 	echo "unpack.sh: extracting the App cryptex"
