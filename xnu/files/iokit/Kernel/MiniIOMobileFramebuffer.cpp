@@ -2434,31 +2434,12 @@ counted:
 		uint64_t when = hakios_display_ops != NULL && hakios_display_ops->vblank_time != NULL ? hakios_display_ops->vblank_time() : 0;
 
 		/*
-		 * (11-20) THE REFRESH THAT SHOWS IT, AND ALWAYS LATER THAN THE LAST: the display driver's beat is the last refresh it
-		 * caught -- the one BEFORE the swap's (the flip is written at a read's end and scanned at the next), and not caught
-		 * at every refresh: a quarter of the swaps were told the same time as the swap before. CoreAnimation puts its frame
-		 * timer's phase by these times; told so it slipped a refresh now and then while scrolling (17-22 % of frames a
-		 * refresh late). fb_fi_next=1: the first refresh after now on that beat, and at least a period after the time
-		 * told last. MEASURED (pace-fi-next/old): no better (19.9 % against 16.7 % late) -- so off; the slips are not
-		 * the told time's.
+		 * (11-20) The display driver's vsync clock (hakios.akita_display.c: vs_beat): the last refresh before now on a
+		 * phase-locked beat -- the gap the switch was made in, the refresh before the one that reads the frame; never
+		 * later than now. CoreAnimation's IOMFBDisplay::add_timing DROPS a presentation time later than now (and one no
+		 * later than the time before): fb_fi_next=1 of the morning (the next refresh after now) was dropped every time,
+		 * so its "no better" said nothing -- removed.
 		 */
-		static uint32_t fi_next = 0xffffffff;
-		static uint64_t last_told;
-		if (fi_next == 0xffffffff && !PE_parse_boot_argn("fb_fi_next", &fi_next, sizeof(fi_next))) {
-			fi_next = 0;
-		}
-		if (fi_next && when != 0) {
-			uint64_t period, now = mach_absolute_time();
-
-			nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
-			if (now >= when) {
-				when += period * ((now - when) / period + 1);
-			}
-			if (last_told != 0 && when < last_told + period - period / 4) {
-				when = last_told + period;
-			}
-			last_told = when;
-		}
 		fbFrameInfo(swapWord(swap, SWAP_ID), when != 0 ? when : mach_absolute_time());
 		if (gTouchLat) {
 			/* "tl: f ID told US at US": the presentation time told to the window server (frame info), and when */
