@@ -91,10 +91,11 @@ source ../xnu-env.sh
 DARWIN=${DARWIN:-../sysimage}
 CACHE=$DARWIN/$( (. $DARWIN/build.conf 2>/dev/null; echo ${CACHE:-20F66__iPhone10,3_6}) )
 # the userland architecture of the unpacked build (unpack.sh writes ARCH to build.conf): arm64 for the
-# iPhone X (d22ap, A11); arm64e for the iPhone 13 mini (d16ap, A15, PAC). The injected stubs below and the
+# iPhone X (d22ap, A11); arm64e for the iPhone 13 mini (d16ap, A15, PAC) -- THE DEFAULT since 11-20 (the newer iOS
+# releases are arm64e too; a build.conf without ARCH, ../sysimage's, is a d16ap one). The injected stubs below and the
 # dyld shared cache file name both follow it. NB arm64e stubs need PAC-signed pointers + chained fixups --
 # this flag is necessary but not sufficient for the arm64e rebase (see rebase-13mini.md, TODO 64).
-ARCH=$( (. $DARWIN/build.conf 2>/dev/null; echo ${ARCH:-arm64}) )
+ARCH=$( (. $DARWIN/build.conf 2>/dev/null; echo ${ARCH:-arm64e}) )
 CC="xnu-clang -arch $ARCH -Os -static -nostdlib -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra"
 LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
 DYN="xnu-clang -arch $ARCH -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"

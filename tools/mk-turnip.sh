@@ -10,10 +10,10 @@
 #
 # Needs on this machine what mk-mesa.sh needs, and glslangValidator (apt: glslang-tools) for Turnip's own shaders.
 set -e
-# ARCH=arm64 (the default: the iPhone X's userland, d22ap) or arm64e (the iPhone 13 mini's, d16ap: an arm64 library does
-# not load into an arm64e process). arm64 builds where it always did; another architecture beside it, its name on the
+# ARCH=arm64e (the default since 11-20: the iPhone 13 mini's userland, d16ap, and the newer iOS releases'; an arm64
+# library does not load into an arm64e process) or arm64 (the iPhone X's, d22ap). arm64 builds where it always did; another architecture beside it, its name on the
 # cross file and on the build and output directories, so that neither build takes the other's objects.
-ARCH=${ARCH:-arm64}
+ARCH=${ARCH:-arm64e}
 case $ARCH in arm64) SFX= ;; arm64e) SFX=-arm64e ;; *) echo "$0: ARCH=$ARCH: arm64 or arm64e" >&2; exit 1 ;; esac
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=25.0.7

@@ -40,11 +40,11 @@ HOSTOUT   = out/host-mesa$(if $(SAN),-$(SAN))
 endif
 # the SDK as hakios lays it out: theos, or on macOS xnu-deps/theos-mac
 SDK       ?= $(abspath $(firstword $(wildcard $(THEOS)/sdks/iPhoneOS16.5.sdk $(HAKIOS)/xnu-deps/theos-mac/sdks/iPhoneOS16.5.sdk $(HOME)/theos/sdks/iPhoneOS16.5.sdk)))
-# ARCH: the userland's architecture, as userland/build.sh has it from the unpacked build's build.conf: arm64 (the
-# iPhone X's, d22ap; the default) or arm64e (the iPhone 13 mini's, d16ap: an arm64 library does not load into its
-# processes). The Mali build of another architecture than arm64 goes beside it, out/ios-mali-$(ARCH), over Mesa's
+# ARCH: the userland's architecture, as userland/build.sh has it from the unpacked build's build.conf: arm64e (the
+# iPhone 13 mini's, d16ap, and the newer iOS releases': the default since 11-20; an arm64 library does not load into
+# its processes) or arm64 (the iPhone X's, d22ap). The Mali build of another architecture than arm64 goes beside it, out/ios-mali-$(ARCH), over Mesa's
 # archives of that architecture (ARCH=arm64e tools/mesa/pan/mk-pan-ios.sh -> out-ios-arm64e); out/ios is not divided.
-ARCH      ?= arm64
+ARCH      ?= arm64e
 ifeq ($(filter arm64 arm64e,$(ARCH)),)
 $(error ARCH=$(ARCH): arm64 or arm64e)
 endif
