@@ -726,6 +726,9 @@ struct hakios_metal_program {
                     "spilled %u bytes, psiz %d, extended fifo %d, layer %d; fragment %u bytes, %u words, spilled %u\n", vs.name, (unsigned)vs.size,
                     vs.fau_words, vs.varying_bytes, vs.work_regs, vs.tls_size, (int)vs.writes_psiz, (int)vs.extended_fifo, (int)vs.writes_layer,
                     (unsigned)fs.size, fs.fau_words, fs.tls_size);
+                fprintf(stderr, "hakios-metal: program %s: the varying shader at +%u, work registers %u, preload %llx (the position shader's %llx); "
+                    "fragment work registers %u, preload %llx\n", vs.name, vs.secondary_offset, vs.secondary_work_regs,
+                    (unsigned long long)vs.secondary_preload, (unsigned long long)vs.preload, fs.work_regs, (unsigned long long)fs.preload);
             }
         }
         writes_layer = vs.writes_layer != 0;

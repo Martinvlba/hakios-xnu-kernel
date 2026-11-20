@@ -381,6 +381,22 @@ static void
 types_init(void)
 {
 	glsl_type_singleton_init_or_ref();
+	{
+		/* boot-arg metal_nossara (a test, 11-20): the compiler's older register allocator (BIFROST_DBG_NOSSARA) */
+		char args[1024] = {0};
+		size_t size = sizeof(args) - 1;
+		/* boot-arg metal_asm=PROCESS (a diagnostic): in that process the compiler prints every shader, NIR and machine
+		 * code (BIFROST_MESA_DEBUG=shaders; with metal_appsay the lines reach the console) */
+		const char *who = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 ? strstr(args, "metal_asm=") : NULL;
+		if (who != NULL && strncmp(who + 10, getprogname(), strlen(getprogname())) == 0) {
+			setenv("BIFROST_MESA_DEBUG", "shaders", 1);
+		}
+		size = sizeof(args) - 1;
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_nossara") != NULL) {
+			/* (=2: its spill test too -- a small register file, every shader spills) */
+			setenv("BIFROST_MESA_DEBUG", strstr(args, "metal_nossara=2") != NULL ? "nossara,spill" : "nossara", 1);     /* (read once, at the first compile) */
+		}
+	}
 }
 
 /*
