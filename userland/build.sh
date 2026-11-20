@@ -644,6 +644,19 @@ if [ -f ../fw-modem-akita/nv_normal.bin ] && [ -z "$SHARE" ]; then
 		../devices/akita/tools/mkcarrierpack.py ../fw-modem-akita/carrierconfig root/fw/carrierconfig.pack >/dev/null
 	fi
 fi
+# ... and the GNSS receiver's (Samsung Kepler, devices/akita/drivers/gnss, gnss=N): its firmware (Android's
+# /vendor/firmware/kepler.bin), the 0x390-byte configuration block gnssd writes over the firmware's head (read back from
+# the modem's shared memory on Android), and gnssd's own start messages (gnss-start.bin, out of a trace of it) -- in
+# ../fw-gnss, the vendor's, never in git; 1 MB
+# (with FLASHBOOT=1 they go to flashboot.apfs instead -- below: the root's RAM disk is at the boot payload's limit, 63 MB,
+# and flashboot's 4 MB had 3.6 free; the kernel looks in both, flashboot first)
+rm -f root/fw/kepler.bin root/fw/gnss-cfg.bin root/fw/gnss-start.bin
+if [ -f ../fw-gnss/kepler.bin ] && [ -z "$FLASHBOOT" ]; then
+	mkdir -p root/fw
+	for f in kepler.bin gnss-cfg.bin gnss-start.bin; do
+		[ -f ../fw-gnss/$f ] && install -m 0644 ../fw-gnss/$f root/fw/
+	done
+fi
 # the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
 # so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
 rm -f root/fw/network
@@ -812,6 +825,13 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_$ARCH ]; then
 	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
 		mkdir -p flashboot/fw
 		cp ../fw-audio/aw882xx_acf.bin flashboot/fw/
+	fi
+	# the GNSS receiver's firmware, configuration block and start messages (../fw-gnss: see the root's fw/ above)
+	if [ -f ../fw-gnss/kepler.bin ]; then
+		mkdir -p flashboot/fw
+		for f in kepler.bin gnss-cfg.bin gnss-start.bin; do
+			[ -f ../fw-gnss/$f ] && cp ../fw-gnss/$f flashboot/fw/
+		done
 	fi
 	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
 	# /private/preboot/jb once the Darwin volume is the root -- the volume where a rootless jailbreak keeps its
