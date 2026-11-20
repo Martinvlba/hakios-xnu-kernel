@@ -1245,7 +1245,9 @@ describeRaw(uint32_t mali_format, unsigned bytes, uint64_t va, uint32_t stride, 
     tex[4] = (uint32_t)plane_va;
     tex[5] = (uint32_t)(plane_va >> 32);
     plane[0] = 10 | 1 << 4 | 2 << 8 | (bytes == 1 ? 0u : bytes == 2 ? 1u : 2u) << 24;
-    plane[1] = stride * h;
+    // (11-20) the plane's size: every sample's slice, not the first's -- samples 1..3 of a reloaded four-sample depth were
+    // read past it, as zeroes: after a split pass most of Maps' terrain failed its depth test (a quarter of it shown)
+    plane[1] = stride * h * (samples > 1 ? samples : 1);
     plane[2] = (uint32_t)va;
     plane[3] = (uint32_t)(va >> 32);
     plane[4] = stride;
