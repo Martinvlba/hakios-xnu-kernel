@@ -349,8 +349,16 @@ isp_awb(struct isp *isp, const struct isp_stats *s)
 	}
 	r = r < 0.5f ? 0.5f : r > 4 ? 4 : r;
 	b = b < 0.5f ? 0.5f : b > 4 ? 4 : b;
-	isp->wb[0] = isp->wb[0] * 0.9f + r * 0.1f;
-	isp->wb[2] = isp->wb[2] * 0.9f + b * 0.1f;
+	/*
+	 * (11-20) The first measurement taken whole, the next three half, then a tenth a frame: from gains of 1 (or
+	 * the other camera's, after a switch) the picture began GREEN and took a second or more to come right (the
+	 * tester: "front is greenish at start and then it switches to normal"). The slow steps after keep it steady.
+	 */
+	float k = isp->awb_frames == 0 ? 1.0f : isp->awb_frames < 4 ? 0.5f : 0.1f;
+
+	isp->awb_frames++;
+	isp->wb[0] = isp->wb[0] * (1 - k) + r * k;
+	isp->wb[2] = isp->wb[2] * (1 - k) + b * k;
 }
 
 /* the part of the sensor's cells the picture shows: its middle, in the picture's proportions, 1/zoom of it each way */

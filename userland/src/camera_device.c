@@ -1595,12 +1595,15 @@ worker(void *context)
 		const uint8_t *raw = buffer + f->header_bytes;
 		struct hakios_camera_command c;
 
-		isp_measure(&isp, f, raw, &st);
-		isp_awb(&isp, &st);
 		if (f->sensor != tuned_for) {
+			/* (11-20) the new sensor's tuning before its first frame is measured, and its white balance from that
+			 * frame at once (isp_awb), not walked over from the other camera's */
 			tuned_for = f->sensor;
 			load_tuning(&isp, f->sensor);
+			isp.awb_frames = 0;
 		}
+		isp_measure(&isp, f, raw, &st);
+		isp_awb(&isp, &st);
 		/*
 		 * Slowly, a second or so: the colour temperature is guessed from the white balance, the tuning it
 		 * picks changes what the white balance sees, and the colour matrix makes every swing of it plain.
