@@ -4,6 +4,7 @@ for it (the 63 MB limit).  The prefix ends up in /var/mobile/Media/.jb, where in
 (src/init.c, mount_writable).
 
 usage: afc-push-jb.py [JB_ROOT]    default JB_ROOT: ../jb/root/var/jb (tools/mk-jb.sh's output)
+       afc-push-jb.py --tar [JB_ROOT]   the same as one file, Media/jb.tar, extracted by init at the next start
 """
 import os, plistlib, socket, ssl, struct, sys, tempfile, time
 
@@ -106,8 +107,13 @@ class Afc:
 
 
 def connect_afc():
-    _, r = mux_request({'MessageType': 'ListDevices'})
-    devs = [d for d in r.get('DeviceList', []) if d.get('Properties', {}).get('ConnectionType') == 'USB']
+    # (11-20) the phone can drop out of usbmuxd's list for a moment while AFC reconnects: wait up to a minute for it
+    for _ in range(30):
+        _, r = mux_request({'MessageType': 'ListDevices'})
+        devs = [d for d in r.get('DeviceList', []) if d.get('Properties', {}).get('ConnectionType') == 'USB']
+        if devs:
+            break
+        time.sleep(2)
     if not devs:
         sys.exit('afc-push-jb: no device')
     dev_id = devs[0]['DeviceID']
@@ -157,6 +163,7 @@ def connect_afc():
 def push_tree(reconnect_fn, local_root, remote_root):
     dirs, files, links, sent_bytes = 0, 0, 0, 0
     symlinks = []
+    skipped = []
     t0 = time.time()
     afc = reconnect_fn()
     ops = 0
@@ -192,9 +199,20 @@ def push_tree(reconnect_fn, local_root, remote_root):
                 try:
                     sent_bytes += afc.put(local_path, remote)
                 except (EOFError, OSError, ConnectionError) as e:
-                    print('\n  reconnecting after %s on %s ...' % (e, remote))
-                    afc = reconnect_fn()
-                    sent_bytes += afc.put(local_path, remote)
+                    for attempt in range(5):
+                        print('\n  reconnecting after %r on %s ...' % (e, remote))
+                        time.sleep(2)
+                        try:
+                            afc = reconnect_fn()
+                            sent_bytes += afc.put(local_path, remote)
+                            break
+                        except (EOFError, OSError, ConnectionError) as e2:
+                            e = e2
+                    else:
+                        # (11-20: usr/libexec/sudo/sudo_noexec.so every time -- the phone's afcd drops the connection
+                        # on it) left out, said at the end; nothing Sileo needs
+                        skipped.append(remote)
+                        afc = reconnect_fn()
                 files += 1
                 ops += 3
             if (files + links) % 200 == 0:
@@ -219,10 +237,78 @@ def push_tree(reconnect_fn, local_root, remote_root):
               (files, links, len(symlinks), dirs, sent_bytes >> 20, time.time() - t0))
     else:
         print('\r  %d files, %d dirs, %d MB in %.0f s' % (files, dirs, sent_bytes >> 20, time.time() - t0))
+    for r in skipped:
+        print('  LEFT OUT (would not go): %s' % r)
     return files + links
 
 
+def remote_size(afc, path):
+    # AFC_GET_FILE_INFO (10): "key\0value\0" pairs, st_size among them; -1 when it is not there
+    try:
+        _, data = afc.call(10, path.encode() + b'\0')
+    except OSError:
+        return -1
+    parts = data.split(b'\0')
+    for k, v in zip(parts[0::2], parts[1::2]):
+        if k == b'st_size':
+            return int(v)
+    return -1
+
+
+def push_tar(reconnect_fn, jb_root):
+    """--tar (11-20): the prefix as ONE file, Media/jb.tar, which init extracts once into Media/.jb (src/init.c,
+    extract_tar: ustar, its name prefix read too) -- 6925 files one by one stalled the USB link again and again. A drop
+    is resumed: the phone asked how much arrived, the rest appended (AFC open mode 5)."""
+    import tarfile
+    tmp = tempfile.NamedTemporaryFile(suffix='.tar', delete=False)
+    tmp.close()
+    with tarfile.open(tmp.name, 'w', format=tarfile.USTAR_FORMAT) as t:
+        for name in sorted(os.listdir(jb_root)):
+            t.add(os.path.join(jb_root, name), arcname=name, recursive=True)
+    total = os.path.getsize(tmp.name)
+    print('afc-push-jb: jb.tar of %d MB' % (total >> 20))
+    afc = reconnect_fn()
+    afc.remove('.jb')
+    afc.remove('jb.tar')
+    done, mode, t0 = 0, 3, time.time()
+    while done < total:
+        try:
+            _, data = afc.call(AFC_OPEN, struct.pack('<Q', mode) + b'jb.tar\0')
+            handle = data[:8]
+            with open(tmp.name, 'rb') as f:
+                f.seek(done)
+                while True:
+                    part = f.read(1 << 16)
+                    if not part:
+                        break
+                    afc.call(AFC_WRITE, handle, part)
+                    done += len(part)
+                    if (done >> 20) % 8 == 0 and len(part) == 1 << 16 and (done & ((1 << 20) - 1)) == 0:
+                        print('\r  %d of %d MB ...' % (done >> 20, total >> 20), end='', flush=True)
+            afc.call(AFC_CLOSE, handle)
+        except (EOFError, OSError, ConnectionError) as e:
+            print('\n  resuming after %r at %d MB ...' % (e, done >> 20))
+            time.sleep(3)
+            afc = reconnect_fn()
+            have = remote_size(afc, 'jb.tar')
+            done = max(0, have)
+            mode = 5 if have > 0 else 3
+    print('\r  jb.tar: %d MB in %.0f s; on the phone: %d bytes' % (total >> 20, time.time() - t0, remote_size(afc, 'jb.tar')))
+    os.unlink(tmp.name)
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--tar':
+        jb_root = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, 'jb', 'root', 'var', 'jb')
+        state = {}
+
+        def reconnect_tar():
+            afc, td = connect_afc()
+            state['td'] = td
+            return afc
+        push_tar(reconnect_tar, jb_root)
+        print('afc-push-jb: done; the next start extracts it (init) -- a minute or so more that once')
+        return
     jb_root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'jb', 'root', 'var', 'jb')
     if not os.path.isdir(jb_root):
         sys.exit('afc-push-jb: %s: not a directory (run tools/mk-jb.sh first)' % jb_root)

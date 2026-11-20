@@ -599,7 +599,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# the system image, so mkjobs.py judges "is this daemon's program there" by the listing of the volume
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
-	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist com.hakios.ptp.plist com.hakios.locfeed.plist root/LaunchDaemons/
+	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermalstate.plist com.hakios.ptp.plist com.hakios.locfeed.plist com.hakios.apps.plist root/LaunchDaemons/
 	[ -f obj/klogsave ] && cp com.hakios.klogsave.plist root/LaunchDaemons/
 	[ -f obj/memsay ] && cp com.hakios.memsay.plist root/LaunchDaemons/
 	VOLUME=""

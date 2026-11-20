@@ -9,6 +9,8 @@
 #import <Foundation/Foundation.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
@@ -33,7 +35,16 @@ main(int argc, char **argv)
 {
 	@autoreleasepool {
 		LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
-		int failed = 0;
+		int failed = 0, tries = 1;
+
+		/* -w SECONDS APP.app ... (11-20, com.hakios.apps at every start): wait that long first, and try a registration
+		 * that fails again every 5 s, five times -- LaunchServices may not be up yet */
+		if (argc >= 4 && strcmp(argv[1], "-w") == 0) {
+			sleep((unsigned)atoi(argv[2]));
+			argv += 2;
+			argc -= 2;
+			tries = 6;
+		}
 
 		if (argc == 3 && strcmp(argv[1], "-u") == 0) {
 			LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:@(argv[2])];
@@ -80,16 +91,22 @@ main(int argc, char **argv)
 				printf("lsreg: %s: registered already (%s)\n", identifier.UTF8String, argv[i]);
 				continue;
 			}
-			ok = [workspace registerApplicationDictionary:@{
-				@"ApplicationType": @"System",
-				@"CFBundleIdentifier": identifier,
-				@"CodeInfoIdentifier": identifier,
-				@"CompatibilityState": @0,
-				@"IsDeletable": @NO,
-				@"IsAdHocSigned": @YES,
-				@"Path": path,
-				@"_LSBundlePlugins": @{},
-			}];
+			for (int t = 0; t < tries; t++) {
+				if (t > 0)
+					sleep(5);
+				ok = [workspace registerApplicationDictionary:@{
+					@"ApplicationType": @"System",
+					@"CFBundleIdentifier": identifier,
+					@"CodeInfoIdentifier": identifier,
+					@"CompatibilityState": @0,
+					@"IsDeletable": @NO,
+					@"IsAdHocSigned": @YES,
+					@"Path": path,
+					@"_LSBundlePlugins": @{},
+				}];
+				if (ok)
+					break;
+			}
 			printf("lsreg: %s at %s: %s\n", identifier.UTF8String, argv[i], ok ? "registered" : "NOT registered");
 			failed += !ok;
 		}

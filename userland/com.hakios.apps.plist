@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.apps</string>
+	<!-- the applications the image carries told to LaunchServices at EVERY start, whatever the job file (11-20, the
+	     tester: "perma enable metal test and sileo"; rc.jobs.quiet did it for the installed image alone): the Metal test
+	     application (share/system-apps) and Sileo (the package manager's prefix, when it is there). lsreg -w: 25 s in,
+	     a failed registration tried again. Registered already: said so, nothing done. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/lsreg</string>
+		<string>-w</string>
+		<string>25</string>
+		<string>/private/preboot/redwood/share/system-apps/MetalTest.app</string>
+		<string>/private/preboot/jb-rw/procursus/Applications/Sileo.app</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>

@@ -644,7 +644,7 @@ own_tree(const char *path, int uid)
  * Extract a tar archive (tools/afc-push-jb.py uploads it as a single file via AFC, since AFC
  * does not support symlinks and drops after too many per-file operations).  Standard POSIX tar:
  * 512-byte headers, name at 0 (100), mode at 100 (8), size at 124 (12), type at 156 (1),
- * link target at 157 (100).  Types: '0'/'\0' = file, '2' = symlink, '5' = directory.
+ * link target at 157 (100), ustar's name prefix at 345 (155).  Types: '0'/'\0' = file, '2' = symlink, '5' = directory.
  */
 static int
 extract_tar(const char *archive, const char *to)
@@ -661,11 +661,23 @@ extract_tar(const char *archive, const char *to)
 	while ((n = read(fd, hdr, 512)) == 512) {
 		if (hdr[0] == 0)
 			break;
-		/* name */
-		memcpy(path + 0, to, strlen(to));
-		path[strlen(to)] = '/';
-		memcpy(path + strlen(to) + 1, hdr, 100);
-		path[strlen(to) + 1 + 100] = 0;
+		/* name: ustar's prefix (155 bytes at 345), a '/', then the name (100 at 0) -- 11-20: three of the prefix's paths are
+		 * 104 characters, longer than the name field alone */
+		{
+			size_t at = strlen(to), pl = 0;
+
+			memcpy(path, to, at);
+			path[at++] = '/';
+			if (memcmp(hdr + 257, "ustar", 5) == 0 && hdr[345] != 0) {
+				while (pl < 155 && hdr[345 + pl] != 0)
+					pl++;
+				memcpy(path + at, hdr + 345, pl);
+				at += pl;
+				path[at++] = '/';
+			}
+			memcpy(path + at, hdr, 100);
+			path[at + 100] = 0;
+		}
 		/* strip trailing ./ prefix from tar entries */
 		{
 			char *name = path + strlen(to) + 1;
