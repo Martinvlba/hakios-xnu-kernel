@@ -381,6 +381,7 @@ static void
 types_init(void)
 {
 	glsl_type_singleton_init_or_ref();
+#ifdef __APPLE__        /* (the host build, tools/mesa/pan/mali_stage_host, has no boot-args) */
 	{
 		/* boot-arg metal_nossara (a test, 11-20): the compiler's older register allocator (BIFROST_DBG_NOSSARA) */
 		char args[1024] = {0};
@@ -397,6 +398,7 @@ types_init(void)
 			setenv("BIFROST_MESA_DEBUG", strstr(args, "metal_nossara=2") != NULL ? "nossara,spill" : "nossara", 1);     /* (read once, at the first compile) */
 		}
 	}
+#endif
 }
 
 /*
@@ -441,7 +443,12 @@ lower_vertex_fetch(nir_builder *b, nir_intrinsic_instr *in, void *data)
 		if (say < 0) {
 			char args[1024] = {0};
 			size_t size = sizeof(args) - 1;
+#ifdef __APPLE__
 			say = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_fetchsay") != NULL;
+#else
+			(void)args; (void)size;
+			say = getenv("METAL_FETCHSAY") != NULL;
+#endif
 		}
 		if (say) {
 			fprintf(stderr, "hakios-metal: fetch: %s: attribute %u, MTLVertexFormat %u at %u of buffer %u (stride %u, step %u) into base type %d x%u, %u bits\n",

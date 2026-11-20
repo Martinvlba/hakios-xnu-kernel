@@ -803,6 +803,24 @@ add_resource(struct air_ctx *c, enum air_resource_kind kind, unsigned index, uns
    };
 }
 
+unsigned
+air_null_texture_slot(struct air_ctx *c)
+{
+   if (c->null_texture_slot_plus1)
+      return c->null_texture_slot_plus1 - 1;
+   unsigned slot = 0;
+   for (unsigned i = 0; i < c->info->num_resources; i++) {
+      const struct air_resource *r = &c->info->resources[i];
+      if ((r->kind == AIR_RESOURCE_TEXTURE || r->kind == AIR_RESOURCE_IMAGE) && r->index + 1 > slot)
+         slot = r->index + 1;
+   }
+   if (slot >= 32)
+      return air_error(c, "interface: no texture index left for the null texture (the function uses up to 31)"), ~0u;
+   add_resource(c, AIR_RESOURCE_TEXTURE, slot, AIR_NULL_TEXTURE, true, false, ~0u, NULL);
+   c->null_texture_slot_plus1 = slot + 1;
+   return slot;
+}
+
 static nir_variable *
 make_io_var(struct air_ctx *c, nir_variable_mode mode, const struct air_type *t,
             unsigned location, const char *name)
@@ -896,8 +914,15 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
    }
 
    if (md_key(node, "air.texture") >= 0) {
-      uint64_t index = 0;
+      uint64_t index = 0, count = 1;
       md_key_int(node, "air.location_index", &index);
+      /* an array of textures (array<texture2d<...>, N>: "air.location_index", first, N): N indices from the first,
+       * each a resource; the shader reads a handle out of it (OP_LOAD of a pointer from a texture pointer, below) */
+      int li = md_key(node, "air.location_index");
+      if (li >= 0 && !md_int(node, li + 2, &count))
+         count = 1;
+      if (count < 1 || count > 32)
+         return air_error(c, "interface: an array of %u textures", (unsigned)count);
       bool sample = md_key(node, "air.sample") >= 0;
       bool read = md_key(node, "air.read") >= 0;
       bool write = md_key(node, "air.write") >= 0 || md_key(node, "air.read_write") >= 0;
@@ -909,8 +934,9 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
          .binding = index,
          .is_image = write,
       };
-      add_resource(c, write ? AIR_RESOURCE_IMAGE : AIR_RESOURCE_TEXTURE, index, 0,
-                   sample || read, write, param, node);
+      for (uint64_t k = 0; k < count; k++)
+         add_resource(c, write ? AIR_RESOURCE_IMAGE : AIR_RESOURCE_TEXTURE, index + k, 0,
+                      sample || read, write, param, node);
       c->params[param] = air_val_ptr(c, p);
       return true;
    }
@@ -1709,6 +1735,25 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
          if (!agg)
             return false;
          air_set(c, &in->base, agg);
+         return true;
+      }
+      if (in->base.type && in->base.type->kind == AIR_TYPE_POINTER &&
+          (p->ptr.class == AIR_PTR_TEXTURE || p->ptr.class == AIR_PTR_SAMPLER)) {
+         /* A HANDLE OUT OF AN ARRAY OF TEXTURES (11-20: NRFV3's srlV2FaceSparseHistogramLivePhotos and
+          * FuseLumaTopBand_Frag, array<texture2d, N> indexed by a loop's counter): element k (8 bytes a handle, a
+          * struct metal::texture2d holding one pointer) is the texture at the array's first index + k -- k known
+          * here, or computed while the shader runs (binding_def: the tex instruction's texture_offset) */
+         struct air_ptr e = p->ptr;
+         e.offset = NULL;
+         if (p->ptr.offset) {
+            nir_def *k = nir_ushr_imm(&c->b, p->ptr.offset, 3);
+            if (nir_def_is_const(k) && !p->ptr.binding_def) {
+               e.binding = p->ptr.binding + nir_const_value_as_uint(nir_def_as_load_const(k)->value[0], k->bit_size);
+            } else {
+               e.binding_def = nir_iadd(&c->b, ptr_binding(c, p->ptr), k);
+            }
+         }
+         air_set(c, &in->base, air_val_ptr(c, e));
          return true;
       }
       nir_def *res = air_load_ptr(c, p->ptr, in->base.type, in->align);
@@ -2732,7 +2777,22 @@ translate_body_blocks(struct air_ctx *c)
                p.offset = nir_load_reg(&c->b, reg);
                if (mixed)
                   p.class = AIR_PTR_SSBO;
-               if (by_buffer && (p.class == AIR_PTR_SSBO || p.class == AIR_PTR_UBO) && !p.is_image) {
+               if (by_buffer && p.class == AIR_PTR_TEXTURE && !chosen->ptr.binding_def) {
+                  /* TEXTURES CHOSEN BY THE ROAD TAKEN (11-20: NRFV3's BlinkDetection, three textures or the null one):
+                   * the index through a register, the tex instructions' texture_offset; the null texture's edge
+                   * stores the index reserved for it (air_null_texture_slot) */
+                  nir_def *breg = nir_decl_reg(&entry, 1, 32, 0);
+
+                  _mesa_hash_table_insert(c->phi_bind_regs, in, breg);
+                  if (p.binding == AIR_NULL_TEXTURE) {
+                     unsigned ns = air_null_texture_slot(c);
+                     if (ns == ~0u)
+                        return false;
+                     p.binding = ns;
+                  }
+                  p.offset = NULL;
+                  p.binding_def = nir_load_reg(&c->b, breg);
+               } else if (by_buffer && (p.class == AIR_PTR_SSBO || p.class == AIR_PTR_UBO) && !p.is_image) {
                   nir_def *breg = nir_decl_reg(&entry, 1, 32, 0);
 
                   _mesa_hash_table_insert(c->phi_bind_regs, in, breg);
@@ -2910,8 +2970,14 @@ translate_body_blocks(struct air_ctx *c)
                    (!be && (pv->ptr.binding != own->ptr.binding || pv->ptr.binding_def)))
                   return air_error(c, "instruction: a phi between pointers into different buffers chosen while the "
                                       "shader runs");
-               if (be)
+               if (be && pv->ptr.class == AIR_PTR_TEXTURE && !pv->ptr.binding_def && pv->ptr.binding == AIR_NULL_TEXTURE) {
+                  unsigned ns = air_null_texture_slot(c);
+                  if (ns == ~0u)
+                     return false;
+                  nir_store_reg(&c->b, nir_imm_int(&c->b, ns), be->data);
+               } else if (be) {
                   nir_store_reg(&c->b, ptr_binding(c, pv->ptr), be->data);
+               }
                val = pv->ptr.offset ? pv->ptr.offset : nir_imm_int(&c->b, 0);
             } else {
                val = air_get_ssa(c, in->operands[k]);

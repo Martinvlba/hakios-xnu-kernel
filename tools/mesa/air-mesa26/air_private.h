@@ -92,6 +92,9 @@ struct air_ctx {
     * where they go (translate_body): what a phi between pointers chooses from
     */
    struct set *reachable;
+   /* a texture chosen while the shader runs that may be Metal's null texture (BlinkDetection, 11-20): the index
+    * reserved for it, plus one (0: none yet) -- a resource the driver always binds its zero texture at */
+   unsigned null_texture_slot_plus1;
 
    /* A call of another function in the module becomes a nir_call, and
     * nir_inline_functions folds it in afterwards. These two carry the state
@@ -205,6 +208,11 @@ nir_def *air_load_ptr(struct air_ctx *c, struct air_ptr ptr, const struct air_ty
                       unsigned align);
 bool air_store_ptr(struct air_ctx *c, struct air_ptr ptr, nir_def *value, unsigned align);
 nir_def *ptr_binding(struct air_ctx *c, struct air_ptr ptr);
+/* air.get_null_texture_*'s binding (no [[texture(n)]] has it) */
+#define AIR_NULL_TEXTURE 0xfffeu
+/* the index reserved for the null texture in a texture chosen while the shader runs (a resource whose size is
+ * AIR_NULL_TEXTURE: the driver binds its zero texture there whatever is bound); ~0u with the error set */
+unsigned air_null_texture_slot(struct air_ctx *c);
 struct air_ptr air_ptr_add(struct air_ctx *c, struct air_ptr ptr, nir_def *bytes);
 
 /* air.* and llvm.* calls; the result is set on the instruction by the callee */

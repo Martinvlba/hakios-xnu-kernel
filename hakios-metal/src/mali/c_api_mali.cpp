@@ -284,7 +284,7 @@ struct hakios_metal_device {
     // (mirrorOf), shared by every texture over that surface; copied from the surface on the GPU when made and when the
     // plug-in says the CPU changed the surface, copied back by each command buffer that draws into it (at its commit)
     struct Mirror { hakios_metal_texture *tex; int refs; uint64_t surface_va; uint32_t row_bytes, row_words, rows; };
-    std::map<unsigned, Mirror> mirrors;
+    std::map<uint64_t, Mirror> mirrors;     // by mirrorKey: the surface's id, a later plane's place in it above (11-20)
     std::mutex mirror_lock;
     hakios_metal_queue *mirror_queue = nullptr;
     struct Surface { Bo bo; SurfaceInfo info; int refs; };
@@ -765,6 +765,7 @@ struct hakios_metal_texture {
     unsigned origin = 0;                        // 0 its own memory, 1 an IOSurface's, 2 a buffer's, 4 a view's
     unsigned surface = 0;                       // the IOSurface's ID (origin 1)
     bool mirrored = false;                      // ... its memory the surface's mirror (Mirror), not the surface's own
+    uint64_t mirror_key = 0;                    // ... that mirror's key: the surface's id, | a later plane's offset << 32
     bool memoryless = false;                    // Metal's memoryless storage (hakios_metal_texture_set_memoryless): an
                                                 //  extra colour attachment of it lives in the tile buffer alone
     std::atomic<unsigned> widest_rts{0};        // the most targets a draw with it as colour attachment 1 had (passWide)
@@ -813,7 +814,7 @@ struct hakios_metal_sampler {
     uint32_t words[8];                          // genxml v10 "Sampler"
 };
 
-static void mirrorRelease(hakios_metal_device *d, unsigned surface);
+static void mirrorRelease(hakios_metal_device *d, uint64_t key);
 
 void
 hakios_metal_texture::release()
@@ -825,7 +826,7 @@ hakios_metal_texture::release()
         device->freeBo(bo);
     } else if (origin == 1) {
         if (mirrored) {
-            mirrorRelease(device, surface);
+            mirrorRelease(device, mirror_key);
         }
         device->surfaceRelease(surface);
     }
@@ -1984,7 +1985,7 @@ struct hakios_metal_cb {
     void (*scheduled)(hakios_metal_cb *, void *) = nullptr;  // (hakios_metal_cb_on_scheduled: after the submission)
     void *scheduled_context = nullptr;
     std::vector<unsigned> busy;                         // the IOSurfaces it draws into, marked busy (HakiosGPU 0x7d)
-    std::vector<unsigned> mirror_out;                   // ... of them, those drawn through a mirror: copied back at commit
+    std::vector<uint64_t> mirror_out;                   // ... of them, those drawn through a mirror (their keys): copied back at commit
     hakios_metal_device *busy_device = nullptr;         // ... the device the marks were made through
     std::chrono::steady_clock::time_point committed_at; // (boot-arg metal_stats)
     Bo timestamps;                                      // ... the GPU's timestamp at each Mali pass's start and end
@@ -3161,11 +3162,15 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
         j.buffers[res.slot] = b->bo.va + offset;        // (its slot in the push constants: the index, under 16)
     }
     // textures and samplers the kernel declares: bound, and of a kind it can use
-    uint32_t nothing_at = 0;
+    uint32_t nothing_at = 0, null_at = 0;
     for (unsigned r = 0; r < k->binary.num_resources; r++) {
         const mali_kernel_resource &res = k->binary.resources[r];
+        if (res.kind == HAKIOS_METAL_RESOURCE_TEXTURE && res.size == 0xfffe && res.index < MALI_KERNEL_TEXTURES) {
+            /* (11-20) the front end's reserved index for Metal's null texture in a texture chosen while the shader runs (a resource of size 0xfffe, air_null_texture_slot): the zero texture there, whatever is bound */
+            null_at |= 1u << res.index;
+        }
         if (res.kind == HAKIOS_METAL_RESOURCE_TEXTURE || res.kind == HAKIOS_METAL_RESOURCE_IMAGE) {
-            if (res.index >= texture_count || textures[res.index] == nullptr) {
+            if (res.index >= texture_count || textures[res.index] == nullptr || (null_at & 1u << res.index)) {
                 // (nothing bound: the device's 4x4 of zeroes stands for it)
                 if (res.index >= MALI_KERNEL_TEXTURES || nothingTexture(cb->queue->device) == nullptr) {
                     fail("dispatch of %s: nothing bound at [[texture(%u)]]", k->binary.name, res.index);
@@ -3201,7 +3206,7 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
         j.samplers[0][0] = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
     }
     for (unsigned t = 0; t < j.texture_count; t++) {
-        j.textures[t] = t < texture_count && textures[t] != nullptr ? textures[t] :
+        j.textures[t] = (null_at & 1u << t) ? nothingTexture(cb->queue->device) : t < texture_count && textures[t] != nullptr ? textures[t] :
             (nothing_at & 1u << t) ? nothingTexture(cb->queue->device) : nullptr;
         { hakios_metal_texture *rt_ = (j.textures[t]); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     }
@@ -4780,8 +4785,8 @@ markBusy(hakios_metal_cb *cb, hakios_metal_device *d, hakios_metal_texture *t)
     if (t == nullptr || t->origin != 1 || t->surface == 0) {
         return;
     }
-    if (t->mirrored && std::find(cb->mirror_out.begin(), cb->mirror_out.end(), t->surface) == cb->mirror_out.end()) {
-        cb->mirror_out.push_back(t->surface);
+    if (t->mirrored && std::find(cb->mirror_out.begin(), cb->mirror_out.end(), t->mirror_key) == cb->mirror_out.end()) {
+        cb->mirror_out.push_back(t->mirror_key);
     }
     for (unsigned sid : cb->busy) {
         if (sid == t->surface) {
@@ -5319,11 +5324,14 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         dj.fs_fau[MALI_DRAW_BLEND_COLOR + 1] = half[2] | (uint32_t)half[3] << 16;
     }
     // the fragment stage's textures and samplers, as a dispatch's
-    uint32_t fs_nothing_at = 0;
+    uint32_t fs_nothing_at = 0, fs_null_at = 0;
     for (unsigned r = 0; r < p->fs.num_resources; r++) {
         const mali_kernel_resource &res = p->fs.resources[r];
+        if (res.kind == HAKIOS_METAL_RESOURCE_TEXTURE && res.size == 0xfffe && res.index < MALI_KERNEL_TEXTURES) {
+            fs_null_at |= 1u << res.index;     /* (the null texture's reserved index: see the dispatch's) */
+        }
         if (res.kind == HAKIOS_METAL_RESOURCE_TEXTURE) {
-            if (res.index >= fs_texture_count || fs_textures[res.index] == nullptr) {
+            if (res.index >= fs_texture_count || fs_textures[res.index] == nullptr || (fs_null_at & 1u << res.index)) {
                 // (nothing bound: the device's 4x4 of zeroes stands for it)
                 if (res.index >= MALI_KERNEL_TEXTURES || nothingTexture(d) == nullptr) {
                     fail("draw with %s: nothing bound at [[texture(%u)]]", p->name, res.index);
@@ -5353,7 +5361,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
         dj.samplers[0][0] = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
     }
     for (unsigned i = 0; i < dj.texture_count; i++) {
-        dj.textures[i] = i < fs_texture_count && fs_textures[i] != nullptr ? fs_textures[i] :
+        dj.textures[i] = (fs_null_at & 1u << i) ? nothingTexture(d) : i < fs_texture_count && fs_textures[i] != nullptr ? fs_textures[i] :
             (fs_nothing_at & 1u << i) ? nothingTexture(d) : nullptr;
         { hakios_metal_texture *rt_ = (dj.textures[i]); while (rt_ != nullptr && rt_->origin == 4) rt_ = rt_->parent; if (rt_ != nullptr) rt_->reads++; }
     }
@@ -5375,7 +5383,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     // the vertex stage's, the same way from what the command buffer was given (hakios_metal_cb_set_vertex_textures)
     {
         const uint32_t nearest = 1 | 9u << 8 | 9u << 12 | 9u << 16 | 1u << 21 | 1u << 25 | 1u << 26 | 1u << 27 | 1u << 28;
-        uint32_t vs_nothing_at = 0;
+        uint32_t vs_nothing_at = 0, vs_null_at = 0;
         for (unsigned r = 0; r < p->vs.num_resources; r++) {
             const mali_kernel_resource &res = p->vs.resources[r];
             if (res.kind == HAKIOS_METAL_RESOURCE_TEXTURE) {
@@ -5383,7 +5391,8 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
                     fail("draw with %s: nothing bound at the vertex function's [[texture(%u)]]", p->name, res.index);
                     return -1;
                 }
-                if (cb->vs_textures[res.index] == nullptr) vs_nothing_at |= 1u << res.index;
+                if (cb->vs_textures[res.index] == nullptr || res.size == 0xfffe) vs_nothing_at |= 1u << res.index;
+                if (res.size == 0xfffe) vs_null_at |= 1u << res.index;     /* (the null texture's reserved index) */
                 dj.vs_texture_count = res.index + 1 > dj.vs_texture_count ? res.index + 1 : dj.vs_texture_count;
             } else if (res.kind == HAKIOS_METAL_RESOURCE_SAMPLER) {
                 if (res.index >= MALI_KERNEL_TEXTURES) {
@@ -5411,7 +5420,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
             dj.vs_samplers[0][0] = nearest;
         }
         for (unsigned i = 0; i < dj.vs_texture_count; i++) {
-            hakios_metal_texture *t = cb->vs_textures[i] != nullptr ? cb->vs_textures[i] : (vs_nothing_at & 1u << i) ? nothingTexture(d) : nullptr;
+            hakios_metal_texture *t = (vs_null_at & 1u << i) ? nothingTexture(d) : cb->vs_textures[i] != nullptr ? cb->vs_textures[i] : (vs_nothing_at & 1u << i) ? nothingTexture(d) : nullptr;
             dj.vs_textures[i] = t;
             if (t != nullptr) {
                 hakios_metal_texture *rt_ = t;
@@ -5824,7 +5833,7 @@ mirrorFill(hakios_metal_device *d, const hakios_metal_device::Mirror &m)
 }
 
 static hakios_metal_texture *
-mirrorOf(hakios_metal_device *d, unsigned id, const Bo &bo, const hakios_metal_device::SurfaceInfo &info, const MaliFormat *f,
+mirrorOf(hakios_metal_device *d, uint64_t id, const Bo &bo, const hakios_metal_device::SurfaceInfo &info, const MaliFormat *f,
     unsigned pixel_format)
 {
     std::lock_guard<std::mutex> g(d->mirror_lock);
@@ -5839,7 +5848,7 @@ mirrorOf(hakios_metal_device *d, unsigned id, const Bo &bo, const hakios_metal_d
         if (say) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
-            fprintf(stderr, "tl: M %u again at %llu\n", id, (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000);
+            fprintf(stderr, "tl: M %u again at %llu\n", (unsigned)id, (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000);
         }
         return it->second.tex;
     }
@@ -5851,29 +5860,30 @@ mirrorOf(hakios_metal_device *d, unsigned id, const Bo &bo, const hakios_metal_d
     m.refs = 1;
     m.surface_va = bo.va + info.offset;
     m.row_bytes = info.row_bytes;
-    m.row_words = info.width * f->bytes / 4;
+    m.row_words = (info.width * f->bytes + 3) / 4;      /* (a row of 94 bytes copied as 24 words: the row's own padding) */
     m.rows = info.height;
     if (!mirrorFill(d, m)) {
         m.tex->release();
-        fail("IOSurface %u's mirror could not be filled", id);
+        fail("IOSurface %u's mirror could not be filled", (unsigned)id);
         return nullptr;
     }
     static unsigned told;
     if (told++ < 8) {
-        fprintf(stderr, "hakios-metal: IOSurface %u (%ux%u, rows of %u bytes) sampled through a mirror of rows of %u, "
-            "copied on the GPU\n", id, info.width, info.height, info.row_bytes, m.tex->stride);
+        fprintf(stderr, "hakios-metal: IOSurface %u%s (%ux%u, rows of %u bytes) sampled through a mirror of rows of %u, "
+            "copied on the GPU\n", (unsigned)id, id >> 32 ? " (a later plane)" : "", info.width, info.height, info.row_bytes,
+            m.tex->stride);
     }
     d->mirrors[id] = m;
     return m.tex;
 }
 
 static void
-mirrorRelease(hakios_metal_device *d, unsigned surface)
+mirrorRelease(hakios_metal_device *d, uint64_t key)
 {
     hakios_metal_texture *gone = nullptr;
     {
         std::lock_guard<std::mutex> g(d->mirror_lock);
-        auto it = d->mirrors.find(surface);
+        auto it = d->mirrors.find(key);
         if (it == d->mirrors.end() || --it->second.refs > 0) {
             return;
         }
@@ -5890,7 +5900,7 @@ mirrorsBack(hakios_metal_cb *cb, hakios_metal_device *d)
         return;
     }
     std::lock_guard<std::mutex> g(d->mirror_lock);
-    for (unsigned id : cb->mirror_out) {
+    for (uint64_t id : cb->mirror_out) {
         auto it = d->mirrors.find(id);
         if (it != d->mirrors.end()) {
             cb->blits.push_back(mirrorJob(it->second, false));
@@ -5912,7 +5922,7 @@ hakios_metal_texture_surface_changed(hakios_metal_texture *t)
     }
     hakios_metal_device *d = t->device;
     std::lock_guard<std::mutex> g(d->mirror_lock);
-    auto it = d->mirrors.find(t->surface);
+    auto it = d->mirrors.find(t->mirror_key);
     if (it != d->mirrors.end()) {
         mirrorFill(d, it->second);
     }
@@ -5952,6 +5962,32 @@ hakios_metal_texture_new_iosurface_plane(hakios_metal_device *d, unsigned surfac
         return nullptr;
     }
     const uint64_t offset = info.offset + plane_delta;
+    static const bool no_mirror = bootArg("metal_nomirror");
+    if (((row_bytes & 63) || (offset & 63)) && !no_mirror && ((row_bytes | offset) & 3) == 0 && offset < (1ull << 32) &&
+        ((width * f->bytes + 3) & ~3u) <= row_bytes && offset + (uint64_t)row_bytes * height <= info.size) {
+        /*
+         * A LATER PLANE'S MIRROR (11-20): the Camera's photos came out GREEN -- VideoToolbox's Metal transfer
+         * (VTMTSComputeFunction) writes a '420f' surface's CbCr plane as R16Uint, and that plane's rows (1456 bytes) are no
+         * multiple of 64: refused, the chroma stayed zero. As plane 0's (mirrorOf): a texture of 64-byte rows, filled from
+         * the plane and copied back after a command buffer writes it; its own mirror, keyed by the plane's place too.
+         */
+        hakios_metal_device::SurfaceInfo pinfo = info;
+        pinfo.offset = (uint32_t)offset;
+        pinfo.row_bytes = row_bytes;
+        pinfo.width = width;
+        pinfo.height = height;
+        const uint64_t key = surface_id | plane_delta << 32;
+        hakios_metal_texture *m = mirrorOf(d, key, bo, pinfo, f, pixel_format);
+        if (m == nullptr) {
+            d->surfaceRelease(surface_id);
+            return nullptr;
+        }
+        hakios_metal_texture *t = textureOver(d, m->bo, m->offset, m->stride, 2, f, pixel_format, width, height, usage, 1);
+        t->surface = surface_id;
+        t->mirrored = true;
+        t->mirror_key = key;
+        return t;
+    }
     if ((uint64_t)width * f->bytes > row_bytes || offset + (uint64_t)row_bytes * (height - 1) + (uint64_t)width * f->bytes > info.size ||
         (row_bytes & 63) || (offset & 63)) {
         d->surfaceRelease(surface_id);
@@ -5989,7 +6025,7 @@ hakios_metal_texture_new_iosurface(hakios_metal_device *d, unsigned surface_id, 
     }
     static const bool no_mirror = bootArg("metal_nomirror");
     if (((info.row_bytes & 63) || (info.offset & 63)) && !no_mirror && f->bw == 1 && f->bh == 1 &&
-        ((info.row_bytes | info.offset | info.width * f->bytes) & 3) == 0) {
+        ((info.row_bytes | info.offset) & 3) == 0 && ((info.width * f->bytes + 3) & ~3u) <= info.row_bytes) {
         hakios_metal_texture *m = mirrorOf(d, surface_id, bo, info, f, pixel_format);
         if (m == nullptr) {
             d->surfaceRelease(surface_id);
@@ -5998,6 +6034,7 @@ hakios_metal_texture_new_iosurface(hakios_metal_device *d, unsigned surface_id, 
         hakios_metal_texture *t = textureOver(d, m->bo, m->offset, m->stride, 2, f, pixel_format, width, height, usage, 1);
         t->surface = surface_id;
         t->mirrored = true;
+        t->mirror_key = surface_id;
         return t;
     }
     if ((info.row_bytes & 63) || (info.offset & 63)) {

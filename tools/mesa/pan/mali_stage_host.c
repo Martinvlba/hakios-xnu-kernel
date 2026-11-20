@@ -93,7 +93,7 @@ main(int argc, char **argv)
 	void *file, *mem = ralloc_context(NULL);
 
 	if (argc < 4) {
-		fprintf(stderr, "usage: mali_stage_host LIB.metallib VERTEX FRAGMENT [\"VS-CONSTANTS\"] [\"FS-CONSTANTS\"]\n");
+		fprintf(stderr, "usage: mali_stage_host LIB.metallib VERTEX FRAGMENT [\"VS-CONSTANTS\"] [\"FS-CONSTANTS\"] | LIB.metallib -k KERNEL [\"CONSTANTS\"]\n");
 		return 1;
 	}
 	if (getenv("MALI_STAGE_BT")) {
@@ -105,6 +105,23 @@ main(int argc, char **argv)
 	if (file == NULL || !air_metallib_parse(mem, file, size, &lib, &error)) {
 		fprintf(stderr, "mali_stage_host: %s: %s\n", argv[1], file ? error : "unreadable");
 		return 1;
+	}
+	if (strcmp(argv[2], "-k") == 0) {
+		/* mali_stage_host LIB -k KERNEL ["CONSTANTS"] (11-20): a compute function, through mali_kernel_compile */
+		unsigned kn = parse(argc > 4 ? argv[4] : "", fc, 64);
+		const void *kb = function(&lib, argv[3], &fs_size);
+		if (kb == NULL) {
+			fprintf(stderr, "mali_stage_host: %s not in the library\n", argv[3]);
+			return 1;
+		}
+		double k0 = now();
+		if (mali_kernel_compile(kb, fs_size, fc, kn, &fs, why, sizeof(why)) != 0) {
+			printf("kernel %s (%zu bytes of AIR, %u constants): REFUSED in %.2f s: %s\n", argv[3], fs_size, kn, now() - k0, why);
+			return 2;
+		}
+		printf("kernel %s (%zu bytes of AIR, %u constants): %zu bytes of code in %.2f s\n", argv[3], fs_size, kn, fs.size,
+		    now() - k0);
+		return 0;
 	}
 	unsigned vn = parse(argc > 4 ? argv[4] : "", vc, 64), fn = parse(argc > 5 ? argv[5] : "", fc, 64);
 	const void *vb = function(&lib, argv[2], &vs_size), *fb = function(&lib, argv[3], &fs_size);

@@ -24,7 +24,10 @@ extern "C" {
 #endif
 
 #define MALI_KERNEL_BUFFERS         16
-#define MALI_KERNEL_TEXTURES        16      /* textures, images and samplers: indices 0 to 15 */
+#define MALI_KERNEL_TEXTURES        32      /* textures, images and samplers: indices 0 to 31 (11-20: 16 before -- NRFV3's
+                                             * FuseLumaTopBand_Frag binds array<texture2d, 4>s up to [[texture(18)]],
+                                             * srlV2FaceSparseHistogramLivePhotos an array<texture2d, 16> from 7 to 22;
+                                             * the tables are sized by the count a draw uses, so only its arrays grow) */
 #define MALI_TABLE_SAMPLER          3       /* the resource table's tables (gallium panfrost's numbering) */
 #define MALI_TABLE_TEXTURE          4
 #define MALI_TABLE_IMAGE            5

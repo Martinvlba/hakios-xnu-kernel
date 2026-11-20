@@ -821,7 +821,7 @@ query_texture(struct air_ctx *c, const struct air_ptr *tex, const struct air_tex
               nir_texop op, nir_def *lod, unsigned comps)
 {
    if (tex->is_image) {
-      nir_def *index = nir_imm_int(&c->b, tex->binding);
+      nir_def *index = ptr_binding(c, *tex);
       switch (op) {
       case nir_texop_txs: {
          /* an image size has as many components as the image has dimensions;
@@ -842,7 +842,8 @@ query_texture(struct air_ctx *c, const struct air_ptr *tex, const struct air_tex
       }
    }
 
-   nir_tex_instr *q = nir_tex_instr_create(c->nir, lod ? 1 : 0);
+   unsigned qsrcs = (lod ? 1 : 0) + (tex->binding_def ? 1 : 0), qn = 0;
+   nir_tex_instr *q = nir_tex_instr_create(c->nir, qsrcs);
    q->op = op;
    q->sampler_dim = t->dim;
    q->is_array = t->is_array;
@@ -850,7 +851,10 @@ query_texture(struct air_ctx *c, const struct air_ptr *tex, const struct air_tex
    q->texture_index = tex->binding;
    q->sampler_index = 0;
    if (lod)
-      q->src[0] = (nir_tex_src){ .src_type = nir_tex_src_lod, .src = nir_src_for_ssa(lod) };
+      q->src[qn++] = (nir_tex_src){ .src_type = nir_tex_src_lod, .src = nir_src_for_ssa(lod) };
+   if (tex->binding_def)   /* (a texture out of an array chosen while the shader runs) */
+      q->src[qn++] = (nir_tex_src){ .src_type = nir_tex_src_texture_offset,
+                                    .src = nir_src_for_ssa(nir_iadd_imm(&c->b, tex->binding_def, -(int64_t)tex->binding)) };
    /* NIR fixes the size of a query's result itself -- txs is two components
     * for a 2D texture whatever the caller asks one of them for -- so it is
     * asked here and the component picked afterwards.
@@ -880,7 +884,6 @@ all_zero(nir_def *def)
  * texture at a reserved index instead). CoreAnimation's generic uber shaders
  * pick it, on a function constant, for the textures a pipeline does not use.
  */
-#define AIR_NULL_TEXTURE 0xfffeu
 
 /* texture_op's "is the number a level" flag, forced (0, 1) while it translates one sample both ways; -1: as the call says */
 static __thread int tex_level_forced = -1;
@@ -899,6 +902,12 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
          return false;
       if (tv->kind != AIR_VAL_PTR || tv->ptr.class != AIR_PTR_TEXTURE)
          return air_error(c, "intrinsic: air.%s of something that is not a texture", n->part[0]);
+      if (tv->ptr.binding_def) {
+         /* (one chosen while the shader runs: null where the reserved index was chosen) */
+         air_set(c, &in->base, air_val_ssa(c, c->null_texture_slot_plus1 ?
+                 nir_ieq_imm(&c->b, tv->ptr.binding_def, c->null_texture_slot_plus1 - 1) : nir_imm_false(&c->b)));
+         return true;
+      }
       air_set(c, &in->base, air_val_ssa(c, nir_imm_bool(&c->b, tv->ptr.binding == AIR_NULL_TEXTURE)));
       return true;
    }
@@ -1005,7 +1014,7 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
       if (!tex.is_image)
          return air_error(c, "intrinsic: air.%s to a texture the interface says is not "
                              "written", n->part[0]);
-      nir_image_store(&c->b, nir_imm_int(&c->b, tex.binding),
+      nir_image_store(&c->b, ptr_binding(c, tex),
                       nir_pad_vector(&c->b, nir_u2u32(&c->b, coord), 4),
                       nir_imm_int(&c->b, 0), nir_pad_vector(&c->b, value, 4),
                       nir_imm_int(&c->b, 0),
@@ -1042,7 +1051,7 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
       uint64_t extra;
       if (!tex_flag(c, in, arg, &extra))
          return false;
-      nir_def *res = nir_image_load(&c->b, 4, dest_bits, nir_imm_int(&c->b, tex.binding),
+      nir_def *res = nir_image_load(&c->b, 4, dest_bits, ptr_binding(c, tex),
                                     nir_pad_vector(&c->b, nir_u2u32(&c->b, coord), 4),
                                     nir_imm_int(&c->b, t.is_ms ? extra : 0),
                                     nir_imm_int(&c->b, t.is_ms ? 0 : extra),
@@ -1052,7 +1061,7 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
       return true;
    }
 
-   nir_tex_src srcs[6];
+   nir_tex_src srcs[7];
    unsigned nsrc = 0;
    srcs[nsrc++] = (nir_tex_src){ .src_type = nir_tex_src_coord,
                                  .src = nir_src_for_ssa(coord_is_float ? coord : nir_u2u32(&c->b, coord)) };
@@ -1151,6 +1160,11 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
       };
    }
 
+   if (tex.binding_def) {
+      /* a texture out of an array chosen while the shader runs: the base index plus this */
+      srcs[nsrc++] = (nir_tex_src){ .src_type = nir_tex_src_texture_offset,
+                                    .src = nir_src_for_ssa(nir_iadd_imm(&c->b, tex.binding_def, -(int64_t)tex.binding)) };
+   }
    nir_tex_instr *tex_instr = nir_tex_instr_create(c->nir, nsrc);
    tex_instr->op = op;
    tex_instr->sampler_dim = t.dim;
