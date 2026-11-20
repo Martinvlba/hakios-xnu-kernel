@@ -1261,11 +1261,32 @@ accelerometer_feed(__unused void *unused)
 	int orientation = -1;
 
 	for (;;) {
+		if (!accel_fake_on) {
+			/* the real accelerometer (kern.hakios.motion, the AoC's): m/s2 as Android has it -- the reaction to gravity,
+			 * +9.8 on z face up -- where an iPhone reports g the other way (face up: z = -1) */
+			struct { uint32_t version, accel_seq, light_seq, proximity_seq; uint64_t accel_ns; float accel[3], lux, proximity; } m;
+			size_t n = sizeof(m);
+
+			if (sysctlbyname("kern.hakios.motion", &m, &n, NULL, 0) == 0 && n == sizeof(m) && m.accel_seq != 0) {
+				static bool first = true;
+
+				for (int k = 0; k < 3; k++) {
+					accel_fake[k] = -m.accel[k] / 9.80665;
+				}
+				if (first) {
+					first = false;
+					say("hakios: sensors: the AoC's accelerometer reached (%.2f %.2f %.2f g)\n", accel_fake[0], accel_fake[1], accel_fake[2]);
+				}
+			}
+		}
 		int now = orientation_of(accel_fake, orientation < 0 ? ORIENT_PORTRAIT : orientation);
 
 		/* (and again every half second: a client that subscribes later -- CoreMotion's, seconds after the service is
 		 * there -- gets no event dispatched before it did) */
 		if (now != orientation || sent % 25 == 0) {
+			if (now != orientation) {
+				say("hakios: sensors: the orientation now %d (%.2f %.2f %.2f g)\n", now, accel_fake[0], accel_fake[1], accel_fake[2]);
+			}
 			orientation = now;
 			send_orientation(orientation);
 		}
@@ -1296,7 +1317,14 @@ sensor_services(IOHIDEventSystemClientRef client)
 		accel_fake_on = true;
 	}
 	if (!accel_fake_on) {
-		return;                 /* (nothing to give yet: no service, so that nothing waits on one that stays still) */
+		/* the real one when the kernel has the AoC's sensors (usf=2: kern.hakios.motion); else no service at all, so
+		 * that nothing waits on one that stays still */
+		size_t n = 0;
+
+		if (sysctlbyname("kern.hakios.motion", NULL, &n, NULL, 0) != 0 || n == 0) {
+			return;
+		}
+		accel_fake[1] = -1;     /* (upright until the first sample) */
 	}
 	if ((at = strstr(args, "orient_base=")) != NULL) {
 		orient_base = (unsigned)strtoul(at + 12, NULL, 0);
