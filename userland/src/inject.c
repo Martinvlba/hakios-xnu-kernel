@@ -1086,9 +1086,22 @@ service_set_property(__unused void *target, void *refcon, __unused IOHIDServiceC
 }
 
 static void
-service_notification(__unused void *target, __unused void *refcon, __unused IOHIDServiceClientRef service,
-    __unused uint32_t type, __unused CFDictionaryRef property)
+service_notification(__unused void *target, void *refcon, __unused IOHIDServiceClientRef service,
+    uint32_t type, CFDictionaryRef property)
 {
+	/* (the sensor services: what the event server tells them -- clients coming and going, with what it says of them) */
+	CFStringRef product = refcon ? CFDictionaryGetValue(((struct service *)refcon)->properties, CFSTR("Product")) : NULL;
+	char pname[64] = "", text[400] = "";
+	static unsigned said;
+
+	if (product != NULL && CFStringGetCString(product, pname, sizeof(pname), kCFStringEncodingUTF8) &&
+	    (strstr(pname, "accelerometer") || strstr(pname, "orientation")) && said++ < 30) {
+		CFStringRef d = property ? CFCopyDescription(property) : NULL;
+
+		if (d) { CFStringGetCString(d, text, sizeof(text), kCFStringEncodingUTF8); CFRelease(d); }
+		for (char *c = text; *c; c++) if (*c == '\n') *c = ' ';
+		say("hakios: sensors: \"%s\" notification %u: %.300s\n", pname, type, text);
+	}
 }
 
 static IOHIDEventRef sensor_copy_event(void *target, void *refcon, IOHIDServiceClientRef service, uint32_t type,
