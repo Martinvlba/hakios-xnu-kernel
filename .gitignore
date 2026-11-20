@@ -78,6 +78,8 @@ __pycache__/
 /xnu-deps/hostinc/mach-o/nlist.h
 /xnu-deps/hostinc/mach-o/fat.h
 !/xnu-deps/iig-impl/
+!/xnu-deps/compat-12377/
+/xnu-deps/compat-12377/include/TrustCache/
 !/xnu-deps/host/
 /xnu-deps/host/*
 !/xnu-deps/host/bin/

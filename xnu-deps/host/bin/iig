@@ -3,7 +3,8 @@
 # Headers: taken pre-generated from the macOS 13.3 SDK (same xnu-8796 family).
 # Implementation: taken from $XNUDEPS/iig-impl/<name>.iig.cpp if present, else an empty TU.
 XNUDEPS=${XNUDEPS:-$(cd "$(dirname "$0")/../.." && pwd)}
-SDKH="$XNUDEPS/MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework/Headers"
+# XNU_IIG_SDK: the SDK whose DriverKit headers match the XNU being built (MacOSX26.1.sdk for xnu-12377)
+SDKH="$XNUDEPS/${XNU_IIG_SDK:-MacOSX13.3.sdk}/System/Library/Frameworks/Kernel.framework/Headers"
 def=""; hdr=""; impl=""
 while [ $# -gt 0 ]; do case "$1" in
   --def) def="$2"; shift 2;; --header) hdr="$2"; shift 2;; --impl) impl="$2"; shift 2;;
@@ -12,6 +13,8 @@ name="$(basename "$def" .iig)"
 src="$(find "$SDKH" -name "$name.h" -path '*DriverKit*' | head -1)"
 [ -z "$src" ] && src="$(find "$SDKH" -name "$name.h" | xargs grep -l 'iig(DriverKit' 2>/dev/null | head -1)"
 if [ -z "$src" ]; then echo "iig shim: no pre-generated header for $name" >&2; exit 1; fi
-cp "$src" "$hdr"
+# XNU_IIG_OVERRIDE/<name>.py SRC OUT: a script that brings the SDK's header up to a newer .iig (xnu-deps/compat-12377/iig)
+if [ -n "$XNU_IIG_OVERRIDE" ] && [ -f "$XNU_IIG_OVERRIDE/$name.py" ]; then python3 "$XNU_IIG_OVERRIDE/$name.py" "$src" "$hdr" || exit 1
+else cp "$src" "$hdr"; fi
 if [ -f "$XNUDEPS/iig-impl/$name.iig.cpp" ]; then cp "$XNUDEPS/iig-impl/$name.iig.cpp" "$impl"
 else echo "/* $name: no DriverKit implementation generated (iig shim) */" > "$impl"; fi
