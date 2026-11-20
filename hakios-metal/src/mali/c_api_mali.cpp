@@ -128,7 +128,14 @@ struct hakios_metal_device {
     io_connect_t connection = 0;
     uint64_t gpu_id = 0, shaders = 0, tiler = 0;
     uint32_t max_threads = 0, max_tasks = 0, core_range = 0;   // a core's threads and tasks; highest core id + 1
-    Bo wls, tls;                                // threadgroup memory and spill space, grown as dispatches need
+    Bo wls;                                     // threadgroup memory, grown as dispatches need
+    // (11-20) SPILL SPACE, A BUFFER FOR EACH SIZE A THREAD (16 << n bytes): the thread storage descriptor gives the GPU a
+    // base and that size, and thread t of core c takes base + (c * threads + t) * size. One buffer for every size made
+    // threads of two jobs that run at once share bytes -- a fragment job with 16- or 64-byte slots wrote into the
+    // 512-byte slots of the vertex job beside it: Maps' terrain vertex shader (the first that spills much, 288 bytes)
+    // got its buffers' addresses and its vertex index back from there as noise -- GPU page faults at addresses made of
+    // floats, the queue restarted over and over. (Mesa: one size, the largest, for a whole command buffer.)
+    Bo tls[12];
     std::vector<Bo> retired;                    // grown out of (a command buffer in flight may use one): freed at close
     uint32_t vm = 0, group = 0;
     uint64_t next_va = 0x100000000ULL;          // our addresses: the lower half is the program's
@@ -1783,8 +1790,8 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
         memset(ls, 0, 32);
         ls[0] = log2u((dj.tls_size + 15) / 16);
         ls[1] = 31;
-        ls[2] = (uint32_t)(d->tls.va >> 8);
-        ls[3] = (uint32_t)(d->tls.va >> 40) | 1u << 28;
+        ls[2] = (uint32_t)(d->tls[ls[0]].va >> 8);
+        ls[3] = (uint32_t)(d->tls[ls[0]].va >> 40) | 1u << 28;
         s[n++] = move48(24, area_va + ls_at);
     } else {
         s[n++] = move48(24, d->descriptors.va + 0x1200);                       // local storage: none
@@ -2385,7 +2392,7 @@ hakios_metal_close(hakios_metal_device *d)
         d->call(0x4c /* TILER_HEAP_DESTROY */, &td, sizeof(td));
     }
     d->freeBo(d->wls);
-    d->freeBo(d->tls);
+    for (Bo &b : d->tls) d->freeBo(b);
     for (Bo &b : d->retired) {
         d->freeBo(b);
     }
@@ -2762,8 +2769,8 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
                         memset(ls, 0, 32);
                         if (k.tls_size != 0) {
                             ls[0] = log2u((k.tls_size + 15) / 16);
-                            ls[2] = (uint32_t)(d->tls.va >> 8);
-                            ls[3] = (uint32_t)(d->tls.va >> 40) | 1u << 28;
+                            ls[2] = (uint32_t)(d->tls[ls[0]].va >> 8);
+                            ls[3] = (uint32_t)(d->tls[ls[0]].va >> 40) | 1u << 28;
                         }
                         if (b.wls_size != 0) {
                             ls[1] = log2u(b.wls_instances) | (log2u(b.wls_size) + 1) << 8;
@@ -3183,8 +3190,8 @@ dispatchGrid(hakios_metal_cb *cb, hakios_metal_kernel *k, const unsigned groups[
             return -1;
         }
     }
-    if (k->binary.tls_size != 0 &&
-        !grow(d, d->tls, (uint64_t)npot((k->binary.tls_size + 15) & ~15u) * d->max_threads * d->core_range)) {
+    if (k->binary.tls_size != 0 && (log2u((k->binary.tls_size + 15) / 16) >= 12 ||
+        !grow(d, d->tls[log2u((k->binary.tls_size + 15) / 16)], (uint64_t)npot((k->binary.tls_size + 15) & ~15u) * d->max_threads * d->core_range))) {
         return -1;
     }
     j.shader = DISPATCH;
@@ -5370,7 +5377,8 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     {
         uint32_t tls = p->vs.tls_size > p->fs.tls_size ? p->vs.tls_size : p->fs.tls_size;
         if (tls != 0) {
-            if (!grow(d, d->tls, (uint64_t)npot((tls + 15) & ~15u) * d->max_threads * d->core_range)) {
+            if (log2u((tls + 15) / 16) >= 12 ||
+                !grow(d, d->tls[log2u((tls + 15) / 16)], (uint64_t)npot((tls + 15) & ~15u) * d->max_threads * d->core_range)) {
                 fail("draw with %s: no memory for %u bytes of spilled registers a thread", p->name, tls);
                 return -1;
             }
