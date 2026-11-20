@@ -583,7 +583,7 @@ index 95192dd62449..b00da803b5b4 100644
  
  	/*
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 1d71c66629fb..0386d4d48105 100644
+index 1d71c66629fb..e040aab43375 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -1157,6 +1157,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
@@ -849,7 +849,7 @@ index 1d71c66629fb..0386d4d48105 100644
  
  	/* flag exec has occurred, notify only if it has not failed due to FP Key error */
  	if (exec_done && ((p->p_lflag & P_LTERM_DECRYPTFAIL) == 0)) {
-@@ -5586,10 +5711,75 @@ bad:
+@@ -5586,10 +5711,77 @@ bad:
   * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
@@ -863,7 +863,9 @@ index 1d71c66629fb..0386d4d48105 100644
 + * from a job description, which is why the kernel adds this one. Set once by our init (from
 + * etc/inject.conf) before it hands over to launchd.
 + */
-+static char exec_inject_conf[512];
++/* 4 KB (11-20): 512 was too small -- the default list is ~460 bytes, and one more line (INJECT_LOG) made init's write
++ * fail with EINVAL, so NOTHING was inserted: backboardd without our library, the boot logo for ever. init reads 4 KB. */
++static char exec_inject_conf[4096];
 +SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, exec_inject_conf, sizeof(exec_inject_conf),
 +    "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
 +
@@ -925,7 +927,7 @@ index 1d71c66629fb..0386d4d48105 100644
  	int error = 0;
  	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
  	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
-@@ -5759,6 +5949,33 @@ exec_extract_strings(struct image_params *imgp)
+@@ -5759,6 +5951,33 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}
  
@@ -959,7 +961,7 @@ index 1d71c66629fb..0386d4d48105 100644
  	/* Save space for envv[] NULL terminator */
  	if (imgp->ip_argspace < new_ptr_size) {
  		error = E2BIG;
-@@ -6636,7 +6853,23 @@ handle_mac_transition:
+@@ -6636,7 +6855,23 @@ handle_mac_transition:
  	}
  
  	/* Update the process' identity version and set the security token */
@@ -984,7 +986,7 @@ index 1d71c66629fb..0386d4d48105 100644
  	task_set_uniqueid(task);
  	set_security_token_task_internal(p, task);
  
-@@ -7538,6 +7771,11 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -7538,6 +7773,11 @@ process_signature(proc_t p, struct image_params *imgp)
  	}
  
  done:

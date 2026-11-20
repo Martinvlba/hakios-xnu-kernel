@@ -540,6 +540,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		*) echo "$library $names" ;;
 		esac
 	done > root/etc/inject.conf
+	# (the kernel's kern.exec_inject holds 4 KB, init reads as much: a longer list is refused whole -- nothing inserted)
+	[ "$(wc -c < root/etc/inject.conf)" -lt 4000 ] || { echo "build.sh: etc/inject.conf is $(wc -c < root/etc/inject.conf) bytes: over the kernel's 4 KB"; exit 1; }
 	# path B Apple ID: akd anisette inject reads this file for BOTH its gate (existence) and the anisette
 	# URL -- bypasses sysctl kern.bootargs, which akd's sandbox may block. Only when HAKIOS_ANISETTE_URL is set.
 	[ -n "${HAKIOS_ANISETTE_URL:-}" ] && printf '%s' "$HAKIOS_ANISETTE_URL" > root/etc/anisette-url
