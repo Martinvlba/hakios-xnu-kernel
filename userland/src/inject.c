@@ -176,10 +176,34 @@ my_begin_update(void *display, void *update)
 	return r;
 }
 
+/*
+ * After each display update: the kernel told the frame is recorded, every stage of it (kern.hakios.ws_frame): the
+ * display then shows its surface as soon as the GPU is done with it, without the grace it waits for a later stage
+ * otherwise (2.5 ms: frames whose GPU work ended past ~5.6 ms into a refresh missed it).
+ */
+static void
+tell_frame_recorded(void)
+{
+	static int mib[4];
+	static size_t mib_length;
+	static int state;       /* 0 not looked up, 1 there, -1 not */
+	int one = 1;
+
+	if (state == 0) {
+		mib_length = 4;
+		state = sysctlnametomib("kern.hakios.ws_frame", mib, &mib_length) == 0 ? 1 : -1;
+	}
+	if (state == 1) {
+		sysctl(mib, (u_int)mib_length, NULL, NULL, &one, sizeof(one));
+	}
+}
+
 static uintptr_t
 my_finish_update(void *display, void *update, unsigned flags)
 {
 	uintptr_t r = orig_finish_update(display, update, flags);
+
+	tell_frame_recorded();
 
 	if (calls_finish++ < 6) {
 		say("hakios: finish_update(%#x) -> %#lx\n", flags, r);
