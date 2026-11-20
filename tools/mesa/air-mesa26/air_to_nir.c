@@ -700,7 +700,7 @@ enum air_sysval {
    AIR_SV_FRONT_FACING, AIR_SV_SAMPLE_ID, AIR_SV_SAMPLE_MASK_IN, AIR_SV_POINT_COORD,
    AIR_SV_THREAD_POS_GRID, AIR_SV_THREAD_POS_TG, AIR_SV_TG_POS_GRID,
    AIR_SV_THREADS_PER_TG, AIR_SV_TGS_PER_GRID, AIR_SV_THREAD_INDEX_TG,
-   AIR_SV_THREADS_PER_GRID, AIR_SV_SIMD_LANE, AIR_SV_SIMD_INDEX, AIR_SV_SIMD_WIDTH,
+   AIR_SV_THREADS_PER_GRID, AIR_SV_SIMD_LANE, AIR_SV_SIMD_INDEX, AIR_SV_SIMD_WIDTH, AIR_SV_SIMDGROUPS,
    AIR_SV_VIEWPORT_INDEX, AIR_SV_AMPLIFICATION_ID,
 };
 
@@ -723,6 +723,7 @@ static const struct { const char *key; enum air_sysval sv; } sysvals[] = {
    { "air.thread_index_in_simdgroup", AIR_SV_SIMD_LANE },
    { "air.simdgroup_index_in_threadgroup", AIR_SV_SIMD_INDEX },
    { "air.threads_per_simdgroup", AIR_SV_SIMD_WIDTH },
+   { "air.simdgroups_per_threadgroup", AIR_SV_SIMDGROUPS },
    { "air.viewport_array_index", AIR_SV_VIEWPORT_INDEX },
    { "air.amplification_id", AIR_SV_AMPLIFICATION_ID },
 };
@@ -759,6 +760,17 @@ load_sysval(struct air_ctx *c, enum air_sysval sv)
    case AIR_SV_SIMD_LANE: return nir_load_subgroup_invocation(&c->b);
    case AIR_SV_SIMD_INDEX: return nir_load_subgroup_id(&c->b);
    case AIR_SV_SIMD_WIDTH: return nir_load_subgroup_size(&c->b);
+   case AIR_SV_SIMDGROUPS: {
+      /* (11-20: compute_apl_fast) the SIMD groups of a threadgroup: its threads over the SIMD width, rounded up */
+      nir_def *tg = load_sysval(c, AIR_SV_THREADS_PER_TG);
+      if (!tg)
+         return NULL;
+      tg = nir_u2u32(&c->b, tg);
+      nir_def *n = nir_imul(&c->b, nir_imul(&c->b, nir_channel(&c->b, tg, 0), nir_channel(&c->b, tg, 1)),
+                            nir_channel(&c->b, tg, 2));
+      nir_def *w = nir_load_subgroup_size(&c->b);
+      return nir_udiv(&c->b, nir_iadd(&c->b, n, nir_iadd_imm(&c->b, w, -1)), w);
+   }
    /* a fragment function's [[viewport_array_index]] input: which viewport its primitive went to. The drivers
     * under this front end serve one viewport (-setViewports:count: with more than one is refused), so it is 0 --
     * CoreRE's fragment functions (17 in iOS 16.7.16) read it for their stereo passes and were refused whole. */
@@ -1503,6 +1515,36 @@ translate_instruction(struct air_ctx *c, const struct air_inst *in)
          nir_def *pcond = air_get_ssa(c, in->operands[0]);
          if (!pcond)
             return false;
+         if (pcond->num_components == 1 && !nir_def_is_const(pcond) && pa->kind == AIR_VAL_PTR && pb->kind == AIR_VAL_PTR &&
+             pa->ptr.class == AIR_PTR_TEXTURE && pb->ptr.class == AIR_PTR_TEXTURE && pa->ptr.is_image == pb->ptr.is_image &&
+             (pa->ptr.binding != pb->ptr.binding || pa->ptr.binding_def || pb->ptr.binding_def)) {
+            /* TWO TEXTURES CHOSEN WHILE THE SHADER RUNS (11-20: STF's saveLtcsTo1D, one of two 3D textures on a flag
+             * in a buffer): the index chosen, the tex instructions' texture_offset; Metal's null texture its reserved
+             * index (air_null_texture_slot), as a phi's */
+            struct air_ptr p = pa->ptr;
+            nir_def *ia, *ib;
+            if (!pa->ptr.binding_def && pa->ptr.binding == AIR_NULL_TEXTURE) {
+               unsigned ns = air_null_texture_slot(c);
+               if (ns == ~0u)
+                  return false;
+               ia = nir_imm_int(&c->b, ns);
+               p.binding = ns;
+            } else {
+               ia = ptr_binding(c, pa->ptr);
+            }
+            if (!pb->ptr.binding_def && pb->ptr.binding == AIR_NULL_TEXTURE) {
+               unsigned ns = air_null_texture_slot(c);
+               if (ns == ~0u)
+                  return false;
+               ib = nir_imm_int(&c->b, ns);
+            } else {
+               ib = ptr_binding(c, pb->ptr);
+            }
+            p.offset = NULL;
+            p.binding_def = nir_bcsel(&c->b, pcond, ia, ib);
+            air_set(c, &in->base, air_val_ptr(c, p));
+            return true;
+         }
          if (pcond->num_components == 1 && !nir_def_is_const(pcond) && pa->kind == AIR_VAL_PTR && pb->kind == AIR_VAL_PTR &&
              pa->ptr.class == pb->ptr.class && pa->ptr.is_image == pb->ptr.is_image &&
              ((pa->ptr.binding == pb->ptr.binding && !pa->ptr.binding_def && !pb->ptr.binding_def) ||

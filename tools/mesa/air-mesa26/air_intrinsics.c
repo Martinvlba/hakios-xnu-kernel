@@ -61,6 +61,135 @@ is_signed_part(const char *s)
 
 /* -- the families ------------------------------------------------------- */
 
+/*
+ * SIMD GROUPS AND QUADS (11-20): Metal's simd_* and quad_* functions as NIR's subgroup intrinsics, which the Mali's
+ * compiler lowers itself (bifrost_nir.c: nir_lower_subgroups -- shuffles onto CLPER, reductions, scans, quads):
+ *   simd_shuffle(_down|_up|_xor), simd_broadcast        shuffle / shuffle_down / shuffle_up / shuffle_xor
+ *   quad_shuffle(_down|_up|_xor), quad_broadcast         a shuffle at the lane's quad's own lanes
+ *   simd_sum/product/min/max/and/or/xor                  reduce; quad_* the same over clusters of 4
+ *   simd_prefix_(inclusive|exclusive)_sum/product        inclusive_scan / exclusive_scan
+ *   simd_all, simd_any, simd_ballot, simd_is_first        vote_all, vote_any, ballot, elect
+ * (the camera's texMinMkwlog: simd_shuffle_down; compute_apl_fast: simd_sum; a quad_shuffle in two others)
+ */
+static bool
+simd_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, bool *handled)
+{
+   const char *op = n->part[0];
+   const bool quad = !strncmp(op, "quad_", 5);
+   if (!quad && strncmp(op, "simd_", 5)) {
+      *handled = false;
+      return true;
+   }
+   const char *what = op + 5;
+   unsigned argc = in->num_operands - 1;
+   nir_def *a[2] = { 0 };
+   for (unsigned i = 0; i < argc && i < 2; i++)
+      if (!(a[i] = air_get_ssa(c, in->operands[1 + i])))
+         return false;
+   *handled = true;
+   const bool is_float = in->base.type && air_type_is_float(air_type_scalar(in->base.type));
+   const bool is_signed = n->num >= 3 ? !strcmp(n->part[1], "s") : true;
+   nir_builder *b = &c->b;
+   nir_def *r = NULL;
+
+   if (!strcmp(what, "shuffle") || !strcmp(what, "broadcast") || !strcmp(what, "shuffle_down") ||
+       !strcmp(what, "shuffle_up") || !strcmp(what, "shuffle_xor") || !strcmp(what, "shuffle_rotate_down") ||
+       !strcmp(what, "shuffle_rotate_up")) {
+      if (!a[0] || !a[1])
+         return air_error(c, "intrinsic: air.%s with %u arguments", op, argc);
+      nir_def *v = a[0], *d = nir_u2u32(b, a[1]);
+      bool as_bool = v->bit_size == 1;
+      if (as_bool)
+         v = nir_b2i32(b, v);
+      if (quad) {
+         /* the lane's quad: lanes 4q .. 4q + 3; a lane past either end keeps its own value */
+         nir_def *id = nir_load_subgroup_invocation(b);
+         nir_def *base = nir_iand_imm(b, id, ~3u), *own = nir_iand_imm(b, id, 3), *lane;
+         if (!strcmp(what, "shuffle") || !strcmp(what, "broadcast")) {
+            lane = nir_ior(b, base, nir_iand_imm(b, d, 3));
+         } else if (!strcmp(what, "shuffle_xor")) {
+            lane = nir_ior(b, base, nir_ixor(b, own, nir_iand_imm(b, d, 3)));
+         } else if (!strcmp(what, "shuffle_down")) {
+            nir_def *t = nir_iadd(b, own, d);
+            lane = nir_bcsel(b, nir_ult_imm(b, t, 4), nir_iadd(b, base, t), id);
+         } else if (!strcmp(what, "shuffle_up")) {
+            lane = nir_bcsel(b, nir_uge(b, own, d), nir_isub(b, id, d), id);
+         } else if (!strcmp(what, "shuffle_rotate_down")) {
+            lane = nir_ior(b, base, nir_iand_imm(b, nir_iadd(b, own, d), 3));
+         } else {
+            lane = nir_ior(b, base, nir_iand_imm(b, nir_isub(b, own, d), 3));
+         }
+         r = nir_shuffle(b, v, lane);
+      } else if (!strcmp(what, "shuffle") || !strcmp(what, "broadcast")) {
+         r = nir_shuffle(b, v, d);
+      } else if (!strcmp(what, "shuffle_down")) {
+         r = nir_shuffle_down(b, v, d);
+      } else if (!strcmp(what, "shuffle_up")) {
+         r = nir_shuffle_up(b, v, d);
+      } else if (!strcmp(what, "shuffle_xor")) {
+         r = nir_shuffle_xor(b, v, d);
+      } else {
+         /* rotate: the lane d further on (or back), round the SIMD group */
+         nir_def *id = nir_load_subgroup_invocation(b), *w = nir_load_subgroup_size(b);
+         nir_def *t = !strcmp(what, "shuffle_rotate_down") ? nir_iadd(b, id, d) : nir_iadd(b, id, nir_isub(b, w, nir_umod(b, d, w)));
+         r = nir_shuffle(b, v, nir_umod(b, t, w));
+      }
+      if (as_bool)
+         r = nir_ine_imm(b, r, 0);
+   } else if (!strcmp(what, "sum") || !strcmp(what, "product") || !strcmp(what, "min") || !strcmp(what, "max") ||
+              !strcmp(what, "and") || !strcmp(what, "or") || !strcmp(what, "xor") ||
+              !strncmp(what, "prefix_inclusive_", 17) || !strncmp(what, "prefix_exclusive_", 17)) {
+      if (!a[0])
+         return air_error(c, "intrinsic: air.%s without a value", op);
+      const bool scan = !strncmp(what, "prefix_", 7);
+      const bool exclusive = scan && what[7] == 'e';
+      const char *f = scan ? what + 17 : what;
+      nir_op rop;
+      if (!strcmp(f, "sum"))
+         rop = is_float ? nir_op_fadd : nir_op_iadd;
+      else if (!strcmp(f, "product"))
+         rop = is_float ? nir_op_fmul : nir_op_imul;
+      else if (!strcmp(f, "min"))
+         rop = is_float ? nir_op_fmin : is_signed ? nir_op_imin : nir_op_umin;
+      else if (!strcmp(f, "max"))
+         rop = is_float ? nir_op_fmax : is_signed ? nir_op_imax : nir_op_umax;
+      else if (!strcmp(f, "and"))
+         rop = nir_op_iand;
+      else if (!strcmp(f, "or"))
+         rop = nir_op_ior;
+      else if (!strcmp(f, "xor"))
+         rop = nir_op_ixor;
+      else
+         return air_error(c, "intrinsic: air.%s (a SIMD-group operation this does not know)", op);
+      if (scan && quad)
+         return air_error(c, "intrinsic: air.%s (a quad's prefix, not yet)", op);
+      if (scan)
+         r = exclusive ? nir_exclusive_scan(b, a[0], .reduction_op = rop) : nir_inclusive_scan(b, a[0], .reduction_op = rop);
+      else
+         r = nir_reduce(b, a[0], .reduction_op = rop, .cluster_size = quad ? 4 : 0);
+   } else if (!quad && (!strcmp(what, "all") || !strcmp(what, "any"))) {
+      if (!a[0])
+         return air_error(c, "intrinsic: air.%s without a value", op);
+      nir_def *v = a[0]->bit_size == 1 ? a[0] : nir_ine_imm(b, a[0], 0);
+      r = !strcmp(what, "all") ? nir_vote_all(b, 1, v) : nir_vote_any(b, 1, v);
+   } else if (!quad && (!strcmp(what, "ballot") || !strcmp(what, "active_threads_mask"))) {
+      nir_def *v = !strcmp(what, "ballot") ? (a[0] ? (a[0]->bit_size == 1 ? a[0] : nir_ine_imm(b, a[0], 0)) : NULL)
+                                          : nir_imm_true(b);
+      if (!v)
+         return air_error(c, "intrinsic: air.%s without a value", op);
+      unsigned bits = in->base.type ? air_nir_bit_size(c, in->base.type) : 32;
+      r = nir_ballot(b, 1, 32, v);
+      if (bits != 32)
+         r = nir_u2uN(b, r, bits);
+   } else if (!quad && !strcmp(what, "is_first")) {
+      r = nir_elect(b, 1);
+   } else {
+      return air_error(c, "intrinsic: air.%s (a SIMD-group operation this does not know)", op);
+   }
+   air_set(c, &in->base, air_val_ssa(c, r));
+   return true;
+}
+
 static bool
 math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, bool *handled)
 {
@@ -1273,6 +1402,10 @@ air_translate_call(struct air_ctx *c, const struct air_inst *in, const char *nam
       return atomic_op(c, in, &n);
 
    bool handled = false;
+   if (!simd_op(c, in, &n, &handled))
+      return false;
+   if (handled)
+      return true;
    if (!math_op(c, in, &n, &handled))
       return false;
    if (handled)
@@ -1311,6 +1444,36 @@ air_translate_call(struct air_ctx *c, const struct air_inst *in, const char *nam
             return false;
          nir_def *r = x8 ? (un ? nir_unpack_unorm_4x8(&c->b, w) : nir_unpack_snorm_4x8(&c->b, w))
                          : (un ? nir_unpack_unorm_2x16(&c->b, w) : nir_unpack_snorm_2x16(&c->b, w));
+         if (air_nir_bit_size(c, in->base.type) == 16)
+            r = nir_f2f16(&c->b, r);
+         air_set(c, &in->base, air_val_ssa(c, r));
+         return true;
+      }
+      /* (11-20) air.pack.unorm.rgb10a2.v4f{16,32} / air.unpack the other way: Metal's pack_float_to_unorm10a2 and
+       * kin -- red in bits 0-9, green 10-19, blue 20-29, alpha 30-31, each clamped to [0, 1], scaled and rounded to
+       * nearest (as the 4x8 ones); unpack: each field over its maximum (PhotosUI's and the camera's 10-bit buffers) */
+      if (!strcmp(f, "unorm") && n.num >= 3 && !strcmp(n.part[2], "rgb10a2")) {
+         nir_def *v = in->num_operands > 1 ? air_get_ssa(c, in->operands[1]) : NULL;
+         if (!v)
+            return false;
+         static const unsigned shift[4] = { 0, 10, 20, 30 }, max[4] = { 1023, 1023, 1023, 3 };
+         if (!strcmp(op, "pack")) {
+            if (v->bit_size != 32)
+               v = nir_f2f32(&c->b, v);
+            nir_def *w = nir_imm_int(&c->b, 0);
+            for (unsigned i = 0; i < 4 && i < v->num_components; i++) {
+               nir_def *x = nir_fsat(&c->b, nir_channel(&c->b, v, i));
+               nir_def *q = nir_f2u32(&c->b, nir_fround_even(&c->b, nir_fmul_imm(&c->b, x, max[i])));
+               w = nir_ior(&c->b, w, nir_ishl_imm(&c->b, q, shift[i]));
+            }
+            air_set(c, &in->base, air_val_ssa(c, w));
+            return true;
+         }
+         nir_def *w = nir_u2u32(&c->b, v), *parts[4];
+         for (unsigned i = 0; i < 4; i++)
+            parts[i] = nir_fmul_imm(&c->b, nir_u2f32(&c->b, nir_ubitfield_extract_imm(&c->b, w, shift[i], i == 3 ? 2 : 10)),
+                                    1.0 / max[i]);
+         nir_def *r = nir_vec(&c->b, parts, 4);
          if (air_nir_bit_size(c, in->base.type) == 16)
             r = nir_f2f16(&c->b, r);
          air_set(c, &in->base, air_val_ssa(c, r));
