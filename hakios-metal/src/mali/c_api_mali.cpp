@@ -129,6 +129,8 @@ struct hakios_metal_device {
     uint64_t gpu_id = 0, shaders = 0, tiler = 0;
     uint32_t max_threads = 0, max_tasks = 0, core_range = 0;   // a core's threads and tasks; highest core id + 1
     Bo wls;                                     // threadgroup memory, grown as dispatches need
+    std::mutex wide_lock;                       // the most targets a draw had, by kind of target (passWide)
+    std::map<uint64_t, unsigned> wide_kinds;
     // (11-20) SPILL SPACE, A BUFFER FOR EACH SIZE A THREAD (16 << n bytes): the thread storage descriptor gives the GPU a
     // base and that size, and thread t of core c takes base + (c * threads + t) * size. One buffer for every size made
     // threads of two jobs that run at once share bytes -- a fragment job with 16- or 64-byte slots wrote into the
@@ -2609,6 +2611,42 @@ passElide(hakios_metal_cb *cb)
     }
 }
 
+/*
+ * DEPTH AND STENCIL A LATER PASS LOADS ARE STORED (11-20): Maps draws a frame in several passes on one multisample depth
+ * and stencil texture -- the first clears them with a draw and ends with store DontCare, the next ones begin with load
+ * Load and test against them. On the phone's own GPU what the first pass left is there for the second; here nothing was
+ * written back, the second pass loaded memory nobody had written (zeroes), and every fragment of the terrain failed its
+ * lessEqual: the map was the clear colour with labels (metal_nozs: the land is there). So within a command buffer a
+ * pass's depth or stencil that a later draw loads is written back whatever its store action says. metal_nozskeep: not.
+ */
+static void
+zsKeep(hakios_metal_cb *cb)
+{
+    static const bool off = bootArg("metal_nozskeep");
+    if (off) return;
+    size_t z_from = 0, s_from = 0;              // (everything before was looked at for an earlier load)
+    for (size_t j = 0; j < cb->blits.size(); j++) {
+        if (cb->blits[j].shader != DRAW) continue;
+        const DrawJob &dj = cb->draws[cb->blits[j].dst];
+        if (dj.has_z && dj.z_load) {
+            for (size_t i = z_from; i < j; i++) {
+                if (cb->blits[i].shader != DRAW) continue;
+                DrawJob &e = cb->draws[cb->blits[i].dst];
+                if (e.has_z && e.z_va == dj.z_va) e.z_write = true;
+            }
+            z_from = j;
+        }
+        if (dj.has_s && dj.s_load) {
+            for (size_t i = s_from; i < j; i++) {
+                if (cb->blits[i].shader != DRAW) continue;
+                DrawJob &e = cb->draws[cb->blits[i].dst];
+                if (e.has_s && e.s_va == dj.s_va) e.s_write = true;
+            }
+            s_from = j;
+        }
+    }
+}
+
 unsigned
 hakios_metal_cb_surfaces_written(hakios_metal_cb *cb, unsigned *out, unsigned max)
 {
@@ -2635,6 +2673,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
     cb->context = context;
     cb->committed_at = std::chrono::steady_clock::now();
     mirrorsBack(cb, d);
+    zsKeep(cb);
     passElide(cb);
     // NOT INTO THE SURFACE ON THE PANEL (11-10): the GPU service holds this until the panel has left each surface it draws
     // into (HakiosGPU 0x80, at most 25 ms) -- CoreAnimation records its next frame into the one still shown, and the GPU
@@ -5119,6 +5158,18 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
     if (refused == nullptr && !no_wide && t != nullptr) {
         hakios_metal_texture *key = rts > 1 && pass->more[0].texture != nullptr ? pass->more[0].texture : t;
         unsigned seen = key->widest_rts.load();
+        if (key == t) {
+            // (11-20) ... AND BY THE KIND OF TARGET where there is no attachment 1 to key on: Maps draws each frame into
+            // a NEW multisample texture, so nothing was remembered -- its clear, atmosphere and stars (one target) and
+            // then its terrain (a second output with no attachment) were two Mali passes every frame, the depth and
+            // stencil of four samples stored and loaded between them (and not even stored: the pass ends DontCare --
+            // zsKeep), the terrain coming out a quarter there over the sky.
+            std::lock_guard<std::mutex> g(d->wide_lock);
+            unsigned &kind = d->wide_kinds[(uint64_t)t->width | (uint64_t)t->height << 16 | (uint64_t)t->format << 32 |
+                (uint64_t)t->samples << 48];
+            if (rts > kind) kind = rts;
+            else if (kind > seen) seen = kind;
+        }
         if (rts > seen) {
             key->widest_rts.store(rts);
         } else if (seen > rts) {

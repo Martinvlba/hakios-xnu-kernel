@@ -123,6 +123,18 @@ static int hm_print_fd = -1;    /* where hm_print writes: stderr, the console, o
  * the processes that reach a refusal are the ones that then abort, and a line not written dies with them. */
 static bool hm_boot_arg_set(const char *what);
 
+/* metal_dumpvs's NAME[,fs] against a program's name */
+static bool
+hm_dumpvs_match(const char *name, const char *program)
+{
+	char only[64];
+	size_t n = strlen(name);
+
+	snprintf(only, sizeof(only), "%s", name);
+	if (n >= 3 && strcmp(name + n - 3, ",fs") == 0) only[n - 3] = '\0';
+	return strstr(program, only) != NULL;
+}
+
 static void
 hm_print(const char *fmt, ...)
 {
@@ -3965,8 +3977,10 @@ hm_compile_queue(void)
 			size_t size = sizeof(args) - 1;
 
 			if (dumped < 3 && sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "metal_dumpvs=")) != NULL &&
-			    sscanf(at + 13, "%63[^ ]", name) == 1 && strstr(hakios_metal_program_name(program), name) != NULL) {
-				NSData *vair = hm_bitcode_for([descriptor vertexFunction], [descriptor label], NO);
+			    sscanf(at + 13, "%63[^ ]", name) == 1 && hm_dumpvs_match(name, hakios_metal_program_name(program))) {
+				/* (metal_dumpvs=NAME,fs: the fragment function's instead) */
+				const BOOL fragment = strncmp(at + 13 + strlen(name) - (strlen(name) >= 3 ? 3 : 0), ",fs", 3) == 0;
+				NSData *vair = hm_bitcode_for(fragment ? [descriptor fragmentFunction] : [descriptor vertexFunction], [descriptor label], NO);
 				const uint8_t *vb = (const uint8_t *)[vair bytes];
 
 				dumped++;
@@ -6410,9 +6424,14 @@ hm_fs_on(void)
 		const char *at;
 
 		from = -1;
-		if (strcmp(getprogname(), "backboardd") == 0 && sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 &&
-		    (at = strstr(args, "metal_framesay=")) != NULL) {
-			from = atof(at + 15);
+		/* (the window server's frames; metal_framesayproc=NAME: that process's instead) */
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "metal_framesay=")) != NULL) {
+			const char *who = strstr(args, "metal_framesayproc=");
+			const char *me = getprogname();
+
+			if (who != NULL ? strncmp(who + 19, me, strlen(me)) == 0 : strcmp(me, "backboardd") == 0) {
+				from = atof(at + 15);
+			}
 		}
 	}
 	if (from < 0) return NO;
@@ -6515,9 +6534,11 @@ hm_fs_begin(MTLRenderPassDescriptor *descriptor)
 
 	hm_fs_draws = hm_fs_views = 0;
 	hm_fs_last = NULL;
-	hm_fs_at = snprintf(hm_fs_line, sizeof(hm_fs_line), "pass %.4f target %lux%lu fmt %lu surface %u load %lu store %lu",
+	hm_fs_at = snprintf(hm_fs_line, sizeof(hm_fs_line), "pass %.4f target %lux%lu fmt %lu surface %u load %lu store %lu depth %06lx load %lu store %lu",
 	    hm_now(), (unsigned long)[texture width], (unsigned long)[texture height], (unsigned long)[texture pixelFormat],
-	    surface != NULL ? IOSurfaceGetID(surface) : 0, (unsigned long)[c loadAction], (unsigned long)[c storeAction]);
+	    surface != NULL ? IOSurfaceGetID(surface) : 0, (unsigned long)[c loadAction], (unsigned long)[c storeAction],
+	    (unsigned long)((uintptr_t)[[descriptor depthAttachment] texture] & 0xffffff), (unsigned long)[[descriptor depthAttachment] loadAction],
+	    (unsigned long)[[descriptor depthAttachment] storeAction]);
 	if (hm_fs_ntargets < 24) hm_fs_targets[hm_fs_ntargets++] = [texture retain];
 	hm_fs_capture = [texture pixelFormat] == 43;
 	hm_fs_det_at = snprintf(hm_fs_det, sizeof(hm_fs_det), "%.4f target %06lx", hm_now(), (unsigned long)((uintptr_t)texture & 0xffffff));
@@ -9361,8 +9382,14 @@ hm_spec_off(void)
 - (void)setRenderPipelineState:(id)state
 {
 	if (hm_fs_at > 0 && state != nil) {
-		const char *label = [[(id)state label] UTF8String] ?: "?";
+		const char *label = [[(id)state label] UTF8String];
 
+		/* (a pipeline with no label: its program's name, the fragment function's part) */
+		if (label == NULL && [(id)state respondsToSelector:@selector(hakiosProgram)] && [(id)state hakiosProgram] != NULL) {
+			label = hakios_metal_program_name([(id)state hakiosProgram]);
+			if (strchr(label, '+') != NULL) label = strchr(label, '+') + 1;
+		}
+		if (label == NULL) label = "?";
 		if (hm_fs_last == NULL || strcmp(hm_fs_last, label) != 0) {
 			hm_fs_add(" | %d: %s", hm_fs_draws, label);
 			hm_fs_last = label;
@@ -10293,13 +10320,29 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 				}
 			}
 			hm_print("%s\n", line);
+			if (said <= 4) {
+				/* (the first draws' data: each small vertex buffer whole, the first 60 bytes of the big ones, in hex) */
+				for (unsigned i = 0; i < _vsHighest; i++) {
+					if (_vsBuffers[i] == nil) continue;
+					const uint8_t *bytes = (const uint8_t *)[_vsBuffers[i] contents] + _vsOffsets[i];
+					NSUInteger have = [_vsBuffers[i] length] - _vsOffsets[i], n = have > 96 ? (i == 0 ? 60 : 96) : have;
+					char hex[220];
+					size_t at2 = 0;
+
+					for (NSUInteger k = 0; k < n; k++) at2 += (size_t)snprintf(hex + at2, sizeof(hex) - at2, "%02x", bytes[k]);
+					hm_print("drawsay %d data v%u: %s\n", said - 1, i, hex);
+				}
+			}
 			hm_print("drawsay %d state: depth %s compare %u write %d; stencil %s front cmp %u pass %u zfail %u fail %u rmask %#x wmask %#x ref %u; "
-			    "cull %u winding %u; viewport %s %g %g %g %g z %g..%g; scissor %s %u %u %u %u; pass load %u store %u\n", said - 1,
+			    "cull %u winding %u; viewport %s %g %g %g %g z %g..%g; scissor %s %u %u %u %u; pass load %u store %u, depth load %u store %u clear %g, "
+			    "stencil load %u store %u clear %u\n", said - 1,
 			    _pass.depth_state_set ? "set" : "unset", _pass.depth_compare, _pass.depth_write, _pass.stencil_state_set ? "set" : "unset",
 			    _pass.stencil_front.compare, _pass.stencil_front.pass, _pass.stencil_front.depth_fail, _pass.stencil_front.stencil_fail,
 			    _pass.stencil_front.read_mask, _pass.stencil_front.write_mask, _pass.stencil_front_reference, _pass.cull_mode, _pass.winding,
 			    _hasViewport ? "set" : "unset", _viewport.x, _viewport.y, _viewport.width, _viewport.height, _viewport.znear, _viewport.zfar,
-			    _hasScissor ? "set" : "unset", _scissor.x, _scissor.y, _scissor.width, _scissor.height, _pass.load_action, _pass.store_action);
+			    _hasScissor ? "set" : "unset", _scissor.x, _scissor.y, _scissor.width, _scissor.height, _pass.load_action, _pass.store_action,
+			    _pass.depth_load_action, _pass.depth_store_action, (double)_pass.clear_depth, _pass.stencil_load_action, _pass.stencil_store_action,
+			    (unsigned)_pass.clear_stencil);
 		}
 	}
 	const double coreBegan = hm_fps_on() ? hm_now() : 0;
