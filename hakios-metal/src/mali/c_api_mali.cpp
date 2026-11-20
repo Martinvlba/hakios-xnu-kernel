@@ -4428,6 +4428,17 @@ hakios_metal_program_resource(hakios_metal_program *p, unsigned stage, unsigned 
     return 0;
 }
 
+const char *
+hakios_metal_program_resource_name(hakios_metal_program *p, unsigned stage, unsigned i, unsigned *type_size)
+{
+    const mali_kernel_binary *b = p == nullptr ? nullptr : stage == 0 ? &p->vs : &p->fs;
+    if (b == nullptr || i >= b->num_resources) {
+        return nullptr;
+    }
+    if (type_size) *type_size = b->resources[i].type_size;
+    return b->resources[i].name;
+}
+
 // (recorded; a draw refuses what the Mali build does not serve yet, by name)
 int
 hakios_metal_program_set_vertex_attribute(hakios_metal_program *p, unsigned index, unsigned format, unsigned offset,

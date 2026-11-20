@@ -1277,6 +1277,12 @@ unsigned hakios_metal_program_resource_count(hakios_metal_program* p, unsigned s
     return s != nullptr ? unsigned(s->resources.size()) : 0;
 }
 
+// (11-20) the Adreno build keeps no argument names: no reflection from it
+const char* hakios_metal_program_resource_name(hakios_metal_program*, unsigned, unsigned, unsigned* typeSize) {
+    if (typeSize) *typeSize = 0;
+    return nullptr;
+}
+
 int hakios_metal_program_resource(hakios_metal_program* p, unsigned stage, unsigned i, unsigned* kind, unsigned* index, unsigned* sizeBytes) {
     const CompiledStage* s = stageOf(p, stage);
     if (s == nullptr || i >= s->resources.size()) return -1;

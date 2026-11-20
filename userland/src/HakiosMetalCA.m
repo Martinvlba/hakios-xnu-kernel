@@ -1959,6 +1959,104 @@ hm_dump_refused(const char *label, id function)
 	hm_dump_function(label, function, "metal_dump=refused", NULL, 0);
 }
 
+/*
+ * A RENDER PIPELINE'S REFLECTION (11-20): Freeform asks -newRenderPipelineStateWithDescriptor:options:reflection:error:
+ * for it and ASSERTS when it is nil ("Failed to create pipeline reflection object", CRLMetalShader.m:192 -- the app
+ * quit as its canvas came). Metal's own comes out of Apple's GPU compiler; here it is made from what the compiled
+ * program says of each stage's resources: the argument's name (air.arg_name), kind, index and its type's size --
+ * vertexArguments / fragmentArguments of MTLArgument-like objects (and the MTLBinding names of iOS 16 for the same).
+ * Struct members (bufferStructType) are not described: nil.
+ */
+@interface HakiosMetalArgument : NSObject {
+@public
+	NSString *_name;
+	MTLArgumentType _type;
+	MTLArgumentAccess _access;
+	NSUInteger _index, _size;
+}
+@end
+
+@implementation HakiosMetalArgument
+- (void)dealloc { [_name release]; [super dealloc]; }
+- (NSString *)name { return _name; }
+- (MTLArgumentType)type { return _type; }
+- (MTLBindingType)bindingType { return (MTLBindingType)_type; }
+- (MTLArgumentAccess)access { return _access; }
+- (NSUInteger)index { return _index; }
+- (BOOL)isActive { return YES; }
+- (BOOL)isUsed { return YES; }
+- (BOOL)isArgument { return NO; }
+- (NSUInteger)bufferAlignment { return _type == MTLArgumentTypeBuffer ? 16 : 0; }
+- (NSUInteger)bufferDataSize { return _type == MTLArgumentTypeBuffer ? _size : 0; }
+- (MTLDataType)bufferDataType { return _type == MTLArgumentTypeBuffer ? (_size ? MTLDataTypeStruct : MTLDataTypeNone) : MTLDataTypeNone; }
+- (MTLStructType *)bufferStructType { return nil; }
+- (MTLPointerType *)bufferPointerType { return nil; }
+- (NSUInteger)threadgroupMemoryAlignment { return 0; }
+- (NSUInteger)threadgroupMemoryDataSize { return 0; }
+- (MTLTextureType)textureType { return MTLTextureType2D; }
+- (MTLDataType)textureDataType { return MTLDataTypeFloat; }
+- (BOOL)isDepthTexture { return NO; }
+- (NSUInteger)arrayLength { return 1; }
+- (NSString *)description { return [NSString stringWithFormat:@"<HakiosMetalArgument %@ type %lu index %lu size %lu>", _name,
+					       (unsigned long)_type, (unsigned long)_index, (unsigned long)_size]; }
+@end
+
+@interface HakiosMetalRenderReflection : NSObject {
+	NSArray *_vertex, *_fragment;
+}
+- (instancetype)initWithProgram:(hakios_metal_program *)program;
+@end
+
+@implementation HakiosMetalRenderReflection
+static NSArray *
+hm_arguments_of(hakios_metal_program *program, unsigned stage)
+{
+	NSMutableArray *args = [NSMutableArray array];
+	unsigned n = program != NULL ? hakios_metal_program_resource_count(program, stage) : 0;
+
+	for (unsigned i = 0; i < n; i++) {
+		unsigned kind = 0, index = 0, size = 0, type_size = 0;
+		const char *name = hakios_metal_program_resource_name(program, stage, i, &type_size);
+
+		if (hakios_metal_program_resource(program, stage, i, &kind, &index, &size) != 0)
+			continue;
+		HakiosMetalArgument *a = [[HakiosMetalArgument alloc] init];
+		a->_name = [[NSString alloc] initWithUTF8String:name != NULL && name[0] ? name : "unnamed"];
+		a->_index = index;
+		a->_size = type_size ? type_size : size;
+		switch (kind) {
+		case HAKIOS_METAL_RESOURCE_CONSTANT_BUFFER: a->_type = MTLArgumentTypeBuffer; a->_access = MTLArgumentAccessReadOnly; break;
+		case HAKIOS_METAL_RESOURCE_DEVICE_BUFFER: a->_type = MTLArgumentTypeBuffer; a->_access = MTLArgumentAccessReadWrite; break;
+		case HAKIOS_METAL_RESOURCE_THREADGROUP_BUFFER: a->_type = MTLArgumentTypeThreadgroupMemory; a->_access = MTLArgumentAccessReadWrite; break;
+		case HAKIOS_METAL_RESOURCE_TEXTURE: a->_type = MTLArgumentTypeTexture; a->_access = MTLArgumentAccessReadOnly; break;
+		case HAKIOS_METAL_RESOURCE_IMAGE: a->_type = MTLArgumentTypeTexture; a->_access = MTLArgumentAccessWriteOnly; break;
+		default: a->_type = MTLArgumentTypeSampler; a->_access = MTLArgumentAccessReadOnly; break;
+		}
+		[args addObject:a];
+		[a release];
+	}
+	return args;
+}
+
+- (instancetype)initWithProgram:(hakios_metal_program *)program
+{
+	if ((self = [super init]) != nil) {
+		_vertex = [hm_arguments_of(program, 0) retain];
+		_fragment = [hm_arguments_of(program, 1) retain];
+	}
+	return self;
+}
+- (void)dealloc { [_vertex release]; [_fragment release]; [super dealloc]; }
+- (NSArray *)vertexArguments { return _vertex; }
+- (NSArray *)fragmentArguments { return _fragment; }
+- (NSArray *)tileArguments { return @[]; }
+- (NSArray *)vertexBindings { return _vertex; }
+- (NSArray *)fragmentBindings { return _fragment; }
+- (NSArray *)tileBindings { return @[]; }
+- (NSArray *)objectBindings { return @[]; }
+- (NSArray *)meshBindings { return @[]; }
+@end
+
 @implementation HakiosMetalDevice
 
 /* Declared at +load because Metal loads this bundle and is therefore already in the process; -initWithAcceleratorPort:
@@ -4030,7 +4128,16 @@ hm_compile_queue(void)
 	if (reflection != NULL) {
 		*reflection = nil;
 	}
-	return [self newRenderPipelineStateWithDescriptor:descriptor error:error];
+	id state = [self newRenderPipelineStateWithDescriptor:descriptor error:error];
+	if (reflection != NULL && state != nil && [state respondsToSelector:@selector(hakiosProgram)]) {
+		/* (11-20) made from the program's resources: Freeform asserts on a nil one (see HakiosMetalRenderReflection) */
+		HakiosMetalRenderReflection *r = [[HakiosMetalRenderReflection alloc]
+						  initWithProgram:((hakios_metal_program * (*)(id, SEL))objc_msgSend)(state, @selector(hakiosProgram))];
+		*reflection = (MTLAutoreleasedRenderPipelineReflection)[r autorelease];
+		HM_ONCE("a render pipeline's reflection asked for: made from the program's resources (names, kinds, indices, sizes; no "
+			"struct members)\n");
+	}
+	return state;
 }
 
 /* The handler forms are answered synchronously, inside the call: Metal promises only that the handler runs, not when,
@@ -4053,10 +4160,11 @@ hm_compile_queue(void)
 			   completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)handler
 {
 	NSError *error = nil;
-	id state = [self newRenderPipelineStateWithDescriptor:descriptor options:options reflection:NULL error:&error];
+	MTLAutoreleasedRenderPipelineReflection reflection = nil;
+	id state = [self newRenderPipelineStateWithDescriptor:descriptor options:options reflection:&reflection error:&error];
 
 	if (handler != NULL) {
-		handler(state, nil, error);
+		handler(state, reflection, error);
 	}
 	[state release];
 }

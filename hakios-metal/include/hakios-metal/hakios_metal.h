@@ -317,6 +317,10 @@ void hakios_metal_program_set_label(hakios_metal_program *program, const char *l
 unsigned hakios_metal_program_resource_count(hakios_metal_program *program, unsigned stage);
 int hakios_metal_program_resource(hakios_metal_program *program, unsigned stage, unsigned i,
     unsigned *kind, unsigned *index, unsigned *size_bytes);
+/* (11-20) resource I of STAGE: the function's name for the argument ("" when the metadata has none) and its type's size
+ * in bytes (air.arg_type_size; 0 when not given) -- what a pipeline's reflection says (MTLArgument's name, bufferDataSize).
+ * NULL past the count; the Adreno build answers NULL. */
+const char *hakios_metal_program_resource_name(hakios_metal_program *program, unsigned stage, unsigned i, unsigned *type_size);
 
 /* the program's vertex descriptor (MTLRenderPipelineDescriptor.vertexDescriptor), Metal's numbers: [[attribute(INDEX)]]
  * is FORMAT (MTLVertexFormat; Float..Float4, Half2, Half4, UChar4Normalized served) at OFFSET bytes into each vertex of

@@ -56,6 +56,8 @@ struct mali_kernel_resource {
 	unsigned slot;                  /* a buffer's: the push constants' words 2 slot, 2 slot + 1 hold its address -- its
 	                                 * index when that is under MALI_KERNEL_BUFFERS, else a slot the function's other
 	                                 * buffers leave free (11-12: Metal's [[buffer(16)]] .. [[buffer(30)]]) */
+	char name[48];                  /* (11-20) the argument's name (air.arg_name; "" when none): a pipeline's reflection */
+	unsigned type_size;             /* ... and its type's size (air.arg_type_size; 0 when not given): bufferDataSize */
 };
 
 struct mali_kernel_binary {

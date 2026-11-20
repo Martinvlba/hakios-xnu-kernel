@@ -1224,6 +1224,10 @@ compile_stage(const void *bitcode, size_t size, const struct mali_constant *cons
 		out->resources[out->num_resources++] = (struct mali_kernel_resource){ r->kind, r->index, r->size, r->read, r->write,
 		    r->inline_sampler ? 1u : 0u, r->sampler_state,
 		    r->kind == AIR_RESOURCE_DEVICE_BUFFER || r->kind == AIR_RESOURCE_CONSTANT_BUFFER ? slot_of[r->index] : 0u };
+		/* (11-20) its name and type's size, for a pipeline's reflection (Freeform asserts without one) */
+		if (r->name != NULL)
+			snprintf(out->resources[out->num_resources - 1].name, sizeof(out->resources[0].name), "%s", r->name);
+		out->resources[out->num_resources - 1].type_size = r->type_size;
 	}
 	out->threadgroup_bytes = air_info.threadgroup_bytes;
 	out->threadgroup_arg_base = air_info.has_threadgroup_arg ? air_info.threadgroup_arg_base : ~0u;

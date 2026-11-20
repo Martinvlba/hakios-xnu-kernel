@@ -813,6 +813,9 @@ add_resource(struct air_ctx *c, enum air_resource_kind kind, unsigned index, uns
       .name = md_key_str(node, "air.arg_name"),
       .type_name = md_key_str(node, "air.arg_type_name"),
    };
+   uint64_t ts = 0;
+   if (md_key_int(node, "air.arg_type_size", &ts))
+      info->resources[info->num_resources - 1].type_size = (unsigned)ts;
 }
 
 /* the threadgroup's width and height, 32-bit (an imageblock's: IMAGEBLOCKS) */

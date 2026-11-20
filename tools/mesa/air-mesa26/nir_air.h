@@ -73,6 +73,7 @@ struct air_resource {
    unsigned param;   /* the entry point's parameter; ~0u for an inline sampler */
    const char *name; /* air.arg_name */
    const char *type_name;
+   unsigned type_size; /* air.arg_type_size (11-20: a pipeline's reflection, bufferDataSize), 0 when not given */
 
    /* A sampler the shader declares itself (Metal's constexpr sampler) rather
     * than one the API binds: the runtime has to create it from this state
