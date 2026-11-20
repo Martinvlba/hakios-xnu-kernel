@@ -10,6 +10,7 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <os/log.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -205,9 +206,34 @@ impl_hooked(void *dso, os_log_t log, os_log_type_t type, const char *format, uin
 	impl_trampoline(dso, log, type, format, buf, size);
 }
 
+/*
+ * An application's standard error goes nowhere (/dev/null, or nothing): there it is pointed at the console, as
+ * libhakios.app.dylib does for the applications it is in -- the App Store's lines were lost so (11-20). A daemon's,
+ * which mkjobs.py points at the console already, or a file, is left as it is.
+ */
+#include <sys/stat.h>
+
+static void
+stderr_to_console(void)
+{
+	struct stat st;
+
+	if (fstat(2, &st) != 0 || (S_ISCHR(st.st_mode) && !isatty(2))) {
+		int fd = open("/dev/console", O_WRONLY);
+
+		if (fd >= 0) {
+			dup2(fd, 2);
+			if (fd != 2) {
+				close(fd);
+			}
+		}
+	}
+}
+
 __attribute__((constructor)) static void
 hook_the_cache(void)
 {
+	stderr_to_console();
 	uintptr_t impl = (uintptr_t)__builtin_ptrauth_strip(dlsym(RTLD_DEFAULT, "_os_log_impl"), 0);
 	uintptr_t enabled = (uintptr_t)__builtin_ptrauth_strip(dlsym(RTLD_DEFAULT, "os_log_type_enabled"), 0);
 	uint32_t first[4], *trampoline;

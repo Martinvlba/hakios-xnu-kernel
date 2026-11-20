@@ -1,0 +1,4 @@
+# The phone unlocked and left alone for a person to open the App Store, with INJECT_LOG="AppStore appstored itunesstored
+# amsaccountsd ..." putting the store's os_log lines on the console (its "Cannot Connect to App Store").
+# (lsreg -o com.apple.AppStore does not open it from a job: "NOT opened" -- no entitlement to launch applications.)
+/redwood/bin/rwtouch wait 8 notify com.hakios.unlock wait 2 swipe 0.5 0.985 0.5 0.3 200 wait 600
