@@ -119,10 +119,10 @@ index 4b83160780c3..8997af1f0e1b 100644
  include $(MakeInc_rule)
  include $(MakeInc_dir)
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..469d371e969c 100644
+index 44274016a4cf..cea9532f8663 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,76 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,80 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -178,10 +178,14 @@ index 44274016a4cf..469d371e969c 100644
 +bsd/dev/hakios.akita_torch.c             optional hakios_akita_torch
 +bsd/dev/hakios.akita_camera.c            optional hakios_akita_camera
 +bsd/dev/hakios.akita_display.c           optional hakios_akita_display
++bsd/dev/hakios.akita_gnss.c              optional hakios_akita_gnss
 +bsd/dev/hakios.akita_mali.c              optional hakios_akita_mali
 +bsd/dev/hakios.akita_haptic.c            optional hakios_akita_haptic
 +bsd/dev/hakios.akita_keys.c              optional hakios_akita_keys
 +bsd/dev/hakios.akita_touch.c             optional hakios_akita_touch
++bsd/dev/hakios.akita_modem.c             optional hakios_akita_modem
++bsd/dev/hakios.akita_modem_fs.c          optional hakios_akita_modem
++bsd/dev/hakios.akita_pcie0.c             optional hakios_akita_modem
 +bsd/dev/hakios.akita_battery.c           optional hakios_akita_battery
 +bsd/dev/hakios.akita_acpm.c              optional hakios_akita_acpm
 +bsd/dev/hakios.akita_thermal.c           optional hakios_akita_thermal
@@ -199,7 +203,7 @@ index 44274016a4cf..469d371e969c 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +225,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +229,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -252,7 +256,7 @@ index 44274016a4cf..469d371e969c 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +477,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +481,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -260,7 +264,7 @@ index 44274016a4cf..469d371e969c 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +500,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +504,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
