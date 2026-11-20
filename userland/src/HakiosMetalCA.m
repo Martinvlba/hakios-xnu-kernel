@@ -10293,6 +10293,13 @@ hm_trace_draw(const void *which, const char *program, const struct hakios_metal_
 				}
 			}
 			hm_print("%s\n", line);
+			hm_print("drawsay %d state: depth %s compare %u write %d; stencil %s front cmp %u pass %u zfail %u fail %u rmask %#x wmask %#x ref %u; "
+			    "cull %u winding %u; viewport %s %g %g %g %g z %g..%g; scissor %s %u %u %u %u; pass load %u store %u\n", said - 1,
+			    _pass.depth_state_set ? "set" : "unset", _pass.depth_compare, _pass.depth_write, _pass.stencil_state_set ? "set" : "unset",
+			    _pass.stencil_front.compare, _pass.stencil_front.pass, _pass.stencil_front.depth_fail, _pass.stencil_front.stencil_fail,
+			    _pass.stencil_front.read_mask, _pass.stencil_front.write_mask, _pass.stencil_front_reference, _pass.cull_mode, _pass.winding,
+			    _hasViewport ? "set" : "unset", _viewport.x, _viewport.y, _viewport.width, _viewport.height, _viewport.znear, _viewport.zfar,
+			    _hasScissor ? "set" : "unset", _scissor.x, _scissor.y, _scissor.width, _scissor.height, _pass.load_action, _pass.store_action);
 		}
 	}
 	const double coreBegan = hm_fps_on() ? hm_now() : 0;
