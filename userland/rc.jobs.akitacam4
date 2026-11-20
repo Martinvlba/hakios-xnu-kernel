@@ -1,0 +1,9 @@
+# Commands run by the launchd job com.hakios.demo (see com.hakios.demo.plist).
+# The Pixel 8a's camera in Camera.app (RC_JOBS=rc.jobs.akitacam2, with camera=13): what AVFoundation lists, then the
+# application opened from the home screen as a finger opens it (first page, top right) and its preview left running for a
+# (akitacam4, 11-20: Camera.app opened by its identifier and its preview left running, for a screen recording -- tearing, TODO 97)
+# page --, a photograph with the back camera, the cameras exchanged, a photograph with the front one)
+/redwood/bin/sound_test springboard
+/redwood/bin/rwtouch wait 8 notify com.hakios.unlock wait 2 swipe 0.5 0.985 0.5 0.3 200 wait 4
+/redwood/bin/lsreg -o com.apple.camera
+/redwood/bin/rwtouch wait 120

@@ -427,6 +427,7 @@ struct output {
 	bool            said_shape;
 	uint64_t        delivered, refused;
 	CVPixelBufferRef held[HELD];            /* the pictures given last, kept from the pool (see deliver) */
+	CVPixelBufferRef stage;                 /* where a moving picture is drawn before it is copied into the pool's (deliver) */
 	unsigned        held_next;
 	bool            said_pool;
 };
@@ -1043,6 +1044,34 @@ let_go(struct output *out)
 			out->held[i] = NULL;
 		}
 	}
+	if (out->stage != NULL) {
+		CVPixelBufferRelease(out->stage);
+		out->stage = NULL;
+	}
+}
+
+/* every plane of FROM into TO, row by row (the same size and format; their rows may be apart differently) */
+static void
+copy_planes(CVPixelBufferRef from, CVPixelBufferRef to)
+{
+	size_t planes = CVPixelBufferGetPlaneCount(from);
+
+	if (planes == 0) {
+		uint8_t *s = CVPixelBufferGetBaseAddress(from), *d = CVPixelBufferGetBaseAddress(to);
+		size_t ss = CVPixelBufferGetBytesPerRow(from), ds = CVPixelBufferGetBytesPerRow(to), h = CVPixelBufferGetHeight(from);
+		size_t n = ss < ds ? ss : ds;
+
+		for (size_t y = 0; y < h; y++) memcpy(d + y * ds, s + y * ss, n);
+		return;
+	}
+	for (size_t p = 0; p < planes; p++) {
+		uint8_t *s = CVPixelBufferGetBaseAddressOfPlane(from, p), *d = CVPixelBufferGetBaseAddressOfPlane(to, p);
+		size_t ss = CVPixelBufferGetBytesPerRowOfPlane(from, p), ds = CVPixelBufferGetBytesPerRowOfPlane(to, p);
+		size_t h = CVPixelBufferGetHeightOfPlane(from, p), n = ss < ds ? ss : ds;
+
+		if (s == NULL || d == NULL) continue;
+		for (size_t y = 0; y < h; y++) memcpy(d + y * ds, s + y * ss, n);
+	}
 }
 
 static void
@@ -1119,12 +1148,49 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 		CVPixelBufferRelease(pb);
 		return;
 	}
-	CVPixelBufferLockBaseAddress(pb, 0);
+	/*
+	 * (11-20) A MOVING PICTURE IS DRAWN INTO A BUFFER OF ITS OWN, THEN COPIED: drawn straight into the pool's buffer, it
+	 * was locked and half written for the ~30 ms the drawing takes, and mediaserverd's stage (the scaler copying it for
+	 * the preview) could take it meanwhile -- the tester's "half old frame and half new one" (TODO 97; never in a screen
+	 * recording). Now the pool's buffer is written in the 1-2 ms of a copy. boot-arg camera_direct: as before.
+	 */
+	static int direct = -1;
 
-	struct render_job job = { isp, f, raw, pb, pf, width, height, 8, strcmp(out->name, "StillImage") == 0 && pf != PF_BGRA };
+	if (direct < 0) {
+		char args[1024] = {0};
+		size_t size = sizeof(args) - 1;
+
+		direct = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "camera_direct") != NULL;
+	}
+	CVPixelBufferRef target = pb;
+	bool staged = false;
+
+	if (!direct && strcmp(out->name, "StillImage") != 0) {
+		if (out->stage != NULL && (CVPixelBufferGetWidth(out->stage) != width || CVPixelBufferGetHeight(out->stage) != height ||
+		    CVPixelBufferGetPixelFormatType(out->stage) != pf)) {
+			CVPixelBufferRelease(out->stage);
+			out->stage = NULL;
+		}
+		if (out->stage == NULL && CVPixelBufferCreate(NULL, width, height, pf, NULL, &out->stage) != kCVReturnSuccess) {
+			out->stage = NULL;
+		}
+		if (out->stage != NULL) {
+			target = out->stage;
+			staged = true;
+		}
+	}
+	CVPixelBufferLockBaseAddress(target, 0);
+
+	struct render_job job = { isp, f, raw, target, pf, width, height, 8, strcmp(out->name, "StillImage") == 0 && pf != PF_BGRA };
 	uint64_t began = mach_absolute_time();
 
 	dispatch_apply_f(job.pieces, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), &job, render_piece);
+	if (staged) {
+		CVPixelBufferLockBaseAddress(pb, 0);
+		copy_planes(target, pb);
+		CVPixelBufferUnlockBaseAddress(pb, 0);
+		CVPixelBufferUnlockBaseAddress(target, 0);
+	}
 	if (job.still) {
 		static mach_timebase_info_data_t tb;
 
@@ -1134,7 +1200,9 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 		say("%s: %ux%u made of every pixel in %.0f ms", out->name, width, height,
 		    (double)(mach_absolute_time() - began) * tb.numer / tb.denom / 1e6);
 	}
-	CVPixelBufferUnlockBaseAddress(pb, 0);
+	if (!staged) {
+		CVPixelBufferUnlockBaseAddress(pb, 0);
+	}
 	CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
 	CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
 	CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2,
