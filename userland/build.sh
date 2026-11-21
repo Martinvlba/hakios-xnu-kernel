@@ -575,6 +575,21 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# Metal's compiled shader stages (HakiosMetalCA.m: HM_CACHE_DIR): in /var/db so that var_store keeps them (it
 	# leaves tmp out), open to every user like tmp, since the window server may not be root
 	printf 'd\t1777\t0\t0\t/private/var/db/hakios-metal-cache\n' >> root/etc/var.skel
+	# iOS 27's usermanagerd aborts at start ("Daemon failed to load persona manifest") when /private/var/keybags/persona.kb
+	# is missing: only its --init boot task makes it, and launchd runs no boot tasks here (rd=md0). An empty version-1
+	# manifest (no users: "may be first creation/erase install") lets it start; it rewrites the file itself afterwards.
+	mkdir -p root/var/keybags
+	cat > root/var/keybags/persona.kb <<'PERSONA'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>UsePersonaManifestVersion</key><integer>1</integer>
+<key>UsePersonaGenerationID</key><integer>1</integer>
+<key>UserPersonaDictionary</key><dict/>
+</dict></plist>
+PERSONA
+	printf 'd\t700\t0\t0\t/private/var/keybags\n' >> root/etc/var.skel
+	printf 'f\t600\t0\t0\t/private/var/keybags/persona.kb\t/var/keybags/persona.kb\n' >> root/etc/var.skel
 	# A key of ours for root, when there is one: ssh/authorized_keys, never in the repository (like
 	# fw-*). dropbear from the package manager's prefix reads it and lets us in over the phone's
 	# Wi-Fi, which saves rebuilding an image for every question one wants to ask a running Darwin. It
