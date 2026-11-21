@@ -3153,6 +3153,39 @@ hm_print_callers(const char *what)
  * dimension alone may be that large, the product may not, and the dispatch refuses one that is, by name */
 - (MTLSize)maxThreadsPerThreadgroup { return MTLSizeMake(1024, 1024, 1024); }
 
+/* --- the device's architecture, as iOS 27's Metal asks it --- */
+
+/*
+ * +[MTLLoader sliceIDForDevice:legacyDriverVersion:airntDriverVersion:] (iOS 27) takes the device's
+ * -targetDeviceArchitecture to pick a slice of a binary archive (CoreAnimation loads one of Apple GPU binaries when it
+ * makes its Metal context) and asserts when there is none: backboardd aborted. An architecture of no Apple GPU (CPU type
+ * 0x7f000048, "HH": HakiOS's own) matches no slice of an archive, which is then left alone, and the shaders are compiled
+ * from their source as before. The class is private; taken from the runtime by name, its fields set by key.
+ */
+- (id)targetDeviceArchitecture
+{
+	static id architecture;
+	static dispatch_once_t once;
+
+	dispatch_once(&once, ^{
+		Class cls = objc_getClass("MTLTargetDeviceArchitecture");
+
+		if (cls != Nil) {
+			architecture = [[cls alloc] init];
+			@try {
+				[architecture setValue:@(0x7f000048u) forKey:@"cpuType"];
+				[architecture setValue:@(0) forKey:@"subType"];
+				[architecture setValue:@(0) forKey:@"version"];
+				[architecture setValue:@(0) forKey:@"driverVersion"];
+			} @catch (NSException *e) {
+				hm_print("targetDeviceArchitecture: %s\n", [[e reason] UTF8String]);
+			}
+		}
+		HM_ONCE("targetDeviceArchitecture: %s\n", architecture != nil ? "HakiOS's own (CPU type 0x7f000048): no binary archive slice matches" : "no MTLTargetDeviceArchitecture class here");
+	});
+	return architecture;
+}
+
 /* --- command queues --- */
 
 /* Apple's own -newCommandQueue and -newCommandQueueWithMaxCommandBufferCount: build a descriptor and end here. The
