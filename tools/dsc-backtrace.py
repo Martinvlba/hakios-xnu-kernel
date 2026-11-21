@@ -29,7 +29,7 @@ for line in sys.stdin:
     print(line.split('called from:')[0].strip()[-90:])
     for a in re.findall(r'0x[0-9a-f]+', line.split('called from:')[1]):
         u = int(a, 16) - slide
-        if not 0x180000000 <= u < 0x280000000:
+        if not 0x180000000 <= u < 0x340000000:   # (the shared region: 0x180000000 + 0x1C0000000 since iOS 27)
             print('    %s (not in the cache)' % a)
             continue
         v, strx = syms[bisect.bisect_right(keys, u) - 1]
