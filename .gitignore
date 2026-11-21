@@ -35,6 +35,7 @@
 !/userland/
 !/sysimage/
 !/xnu/
+!/xnu-12377/
 !/xnu-deps/
 !/prebuilt/
 !/wifi/

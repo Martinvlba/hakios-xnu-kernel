@@ -1,3 +1,35 @@
+--- a/bsd/hfs/hfs.h
++++ b/bsd/hfs/hfs.h
+@@ -77,6 +77,29 @@
+ 
+ __BEGIN_DECLS
+ 
++#if __has_include(<vm/vm_kern_xnu.h>)
++/*
++ * HakiOS: xnu-12377 dropped nspace_snapshot_event() and resolve_nspace_item(). The first was already
++ * a no-op returning 0 in xnu-8796; the second becomes 12377's own dataless-file entry points
++ * (which strip the event-type bits from op themselves). HAKIOS-12377: offset 0 / size 0 = the whole
++ * file, as resolve_nspace_item did; only reached for dataless (cloud) files, which HakiOS never has.
++ */
++#include <sys/fsctl.h>
++static inline int
++nspace_snapshot_event(__unused vnode_t vp, __unused time_t ctime, __unused uint64_t op_type, __unused void *arg)
++{
++	return 0;
++}
++static inline int
++resolve_nspace_item(struct vnode *vp, uint64_t op)
++{
++	if (vnode_isdir(vp)) {
++		return vfs_materialize_dir(vp, op, NULL, 0);
++	}
++	return vfs_materialize_file(vp, op, 0, 0);
++}
++#endif
++
+ #if CONFIG_PROTECT
+ /* Forward declare the cprotect struct */
+ struct cprotect;
 --- a/bsd/hfs/hfs_iokit.h
 +++ b/bsd/hfs/hfs_iokit.h
 @@ -30,7 +30,9 @@

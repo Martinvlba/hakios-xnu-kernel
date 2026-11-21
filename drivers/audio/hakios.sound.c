@@ -80,6 +80,9 @@
 #include <sys/systm.h>
 #include <sys/hakios.audio.h>
 #include <vm/vm_kern.h>
+#if __has_include(<vm/vm_kern_xnu.h>)
+#include <vm/vm_kern_xnu.h>   /* HakiOS: kmem_alloc and KMA_* moved here in xnu-12377 */
+#endif
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);

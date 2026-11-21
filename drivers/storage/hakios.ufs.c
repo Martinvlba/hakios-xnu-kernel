@@ -64,7 +64,12 @@
 
 extern processor_t thread_bind(processor_t processor);
 extern processor_t cpu_to_processor(int cpu);
+#if __has_include(<vm/vm_kern_xnu.h>)
+extern int boot_cpu_id;                 /* xnu-12377's name for master_cpu (the boot processor's number) */
+#define master_cpu boot_cpu_id
+#else
 extern int master_cpu;
+#endif
 extern wait_result_t thread_block(thread_continue_t continuation);
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern void IOSleep(unsigned int milliseconds);

@@ -40,6 +40,9 @@
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <vm/vm_kern.h>
+#if __has_include(<vm/vm_kern_xnu.h>)
+#include <vm/vm_kern_xnu.h>   /* HakiOS: kmem_alloc and KMA_* moved here in xnu-12377 */
+#endif
 
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 
