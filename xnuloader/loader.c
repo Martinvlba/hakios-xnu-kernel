@@ -2010,7 +2010,7 @@ ufs_survey(void)
  * whatever userdata the phone has, with a GUID of its own (BLOCK_DARWIN_FIRST/LAST and _UNIQ were
  * the first phone's, and no write was ever served on another); they are printed instead.
  */
-#define BLOCK_WRITE_FIRST  2359296ULL                  /* darwin's blocks of 4096: past both cryptexes -- 9 GiB for d16ap (iPhone14,4 arm64e cryptexes end at 2208768); was 8 GiB/2097152 for d22ap (16.7.16 ended 2048000). Must match hakios.ufs.c UFS_WRITE_FIRST */
+#define BLOCK_WRITE_FIRST  4194304ULL                  /* darwin's blocks of 4096: past both cryptexes -- 16 GiB for iOS 27.2.1 d16ap (its root + cryptexes end at 3881984); 9 GiB/2359296 for 16.6.1 d16ap (iPhone14,4 arm64e cryptexes end at 2208768); was 8 GiB/2097152 for d22ap (16.7.16 ended 2048000). Must match hakios.ufs.c UFS_WRITE_FIRST */
 #define BLOCK_DARWIN_MIN   5242875ULL                  /* blocks of 4096: the first phone's darwin, the layout's */
 #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
 
@@ -3751,7 +3751,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t cntfrq = timer_hz();
 	uint64_t ranges[3] = { 0, plat->io_base, plat->io_size };
 	uint64_t reg2[2];
-	uint8_t seed[64];
+	uint8_t seed[256];      /* xnu-12377 asks for 256 bytes (osfmk/prng/prng_random.c panics on fewer); 8796 took 64 */
 
 	for (unsigned i = 0; i < sizeof(seed); i++) {
 		seed[i] = (uint8_t)(READ_SYSREG(CNTVCT_EL0) >> (i & 7)) ^ (uint8_t)(i * 37);
@@ -3886,6 +3886,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u32(&w, "production-cert", 1);
 	dt_prop_u32(&w, "development-cert", 0);
 	dt_prop_u32(&w, "embedded-panic-log-size", PANIC_LOG_SIZE);
+	dt_prop_u32(&w, "kernel-ctrr-to-be-enabled", 0);   /* no CTRR here; xnu-12377 asserts the property exists (ml_unsafe_kernel_text) */
 	/* An empty but well-formed NVRAM image: IOKit refuses to start without it. */
 	static uint8_t nvram_image[NVRAM_BANK_SIZE];
 	build_nvram_image(nvram_image);

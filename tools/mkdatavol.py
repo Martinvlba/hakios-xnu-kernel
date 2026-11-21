@@ -27,7 +27,7 @@ import tempfile
 
 BS = 4096
 DARWIN_BLOCKS = int(os.environ.get('DARWIN_BLOCKS', 5242875))   # darwin, in blocks of 4096 (README, "The port's partition")
-DATA_FIRST = int(os.environ.get("DATA_FIRST", 2359296))   # where the volume begins: drivers/storage/hakios.ufs.c, UFS_WRITE_FIRST (2042368 until 11-13; 2097152 until 11-16; 2359296 for d16ap's larger arm64e cryptexes)
+DATA_FIRST = int(os.environ.get("DATA_FIRST", 4194304))   # where the volume begins: drivers/storage/hakios.ufs.c, UFS_WRITE_FIRST (2042368 until 11-13; 2097152 until 11-16; 2359296 for 16.6.1 d16ap; 4194304 since 11-20 for iOS 27.2.1)
 MAGIC, RAW, FILL, DONT_CARE = 0xED26FF3A, 0xCAC1, 0xCAC2, 0xCAC3
 
 

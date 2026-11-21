@@ -48,7 +48,7 @@
 
 #define BLOCK           4096
 #define BUFFER          (4u << 20)              /* the loader's own buffer: one request a write */
-#define STORE_AT        9663676416LL            /* darwin's block 2359296 (= UFS_WRITE_FIRST): past d16ap's arm64e cryptexes (end 2208768); was 8 GiB/2097152 for d22ap */
+#define STORE_AT        17179869184LL           /* darwin's block 4194304 (= UFS_WRITE_FIRST): past iOS 27.2.1's root + cryptexes (end 3881984); 2359296 for 16.6.1, 8 GiB/2097152 for d22ap */
 #define SLOT_BYTES      0x80000000LL            /* 2 GiB a slot, two slots */
 #define SLOTS           2
 #define DEVICE          "/dev/rufs_darwin"
