@@ -98,7 +98,14 @@ CACHE=$DARWIN/$( (. $DARWIN/build.conf 2>/dev/null; echo ${CACHE:-20F66__iPhone1
 ARCH=$( (. $DARWIN/build.conf 2>/dev/null; echo ${ARCH:-arm64e}) )
 CC="xnu-clang -arch $ARCH -Os -static -nostdlib -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra"
 LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
-DYN="xnu-clang -arch $ARCH -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
+# the SDK our own programs are built against: the one of the unpacked iOS's major version when there is one
+# (iOS 27: ~/theos/sdks/iPhoneOS27.2.sdk), else 16.5. USER_SDK=NAME overrides.
+IOS_VERSION=$( (. $DARWIN/build.conf 2>/dev/null; echo ${VERSION:-16.5}) )
+if [ -z "$USER_SDK" ]; then
+	USER_SDK=iPhoneOS16.5.sdk
+	for s in "${THEOS:-$HOME/theos}"/sdks/iPhoneOS${IOS_VERSION%%.*}.*.sdk; do [ -d "$s" ] && USER_SDK=$(basename "$s"); done
+fi
+DYN="xnu-clang -arch $ARCH -isysroot ${THEOS:-$HOME/theos}/sdks/$USER_SDK -O1"
 # which build the hooks' addresses are taken for (src/inject*.c, AT()): src/ios_build.h, written when it changes
 IOS_BUILD=$( (. $DARWIN/build.conf 2>/dev/null; echo ${BUILD:-20F66}) )
 echo "#define HAKIOS_IOS_$IOS_BUILD 1        /* build.sh: $DARWIN/build.conf */" > src/ios_build.h.new
@@ -326,7 +333,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		{ ${LDID:-ldid} -Ssrc/lsreg.entitlements obj/lsreg 2>/dev/null || echo "build.sh: no ldid: lsreg is unsigned"; }
 		# ... and inside lockdownd: the services it keeps for an activated phone (src/inject_lockdown.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.lockdown.dylib -framework CoreFoundation \
-			-F${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks -framework MobileActivation \
+			-F${THEOS:-$HOME/theos}/sdks/$USER_SDK/System/Library/PrivateFrameworks -framework MobileActivation \
 			-o obj/libhakios.lockdown.dylib src/inject_lockdown.c
 		# ... and inside akd (Apple's AuthKit daemon): our externally-provisioned Anisette so iOS's native
 		# Apple ID sign-in works (src/inject_akd.c). Behind the gate (boot-arg hakios_appleid=1, or the file
@@ -479,7 +486,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/font_test ] && cp obj/font_test root/bin/
 	[ -f obj/metal_test ] && cp obj/metal_test root/bin/
 	[ -f obj/lsreg ] && cp obj/lsreg root/bin/
-	[ -f obj/mali_draw_test ] && cp obj/mali_draw_test root/bin/
+	# (11.7 MB: only when the job file runs it -- the boot image holds 63 MB and xnu-12377's kernel is 3 MB bigger)
+	[ -f obj/mali_draw_test ] && grep -qs mali_draw_test "${RC_JOBS:-rc.jobs}" && cp obj/mali_draw_test root/bin/
 	[ -f obj/fps_info ] && cp obj/fps_info root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
@@ -768,6 +776,20 @@ done
 rm -rf root/hal/BTAudioHALPlugin.driver
 if [ "${BLUETOOTH-0}" != 0 ] && [ -d $DARWIN/rootfs/System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver ]; then
 	cp -R $DARWIN/rootfs/System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver root/hal/
+fi
+# Every program and library of ours ad-hoc signed (ldid -S) unless it is signed already (an entitlements signature is
+# kept): iOS 27's dyld refuses an inserted library with no code signature ("missing code signature"; 16.x let it in).
+SIGN=${LDID:-$HOME/theos/toolchain/linux/iphone/bin/ldid}
+if [ -x "$SIGN" ] || command -v "$SIGN" >/dev/null; then
+	nsigned=0
+	while IFS= read -r f; do
+		head -c 4 "$f" | od -An -tx1 | grep -qE 'cf fa ed fe|ca fe ba be' || continue
+		../xnu-deps/host/bin/otool -l "$f" 2>/dev/null | grep -q LC_CODE_SIGNATURE && continue
+		"$SIGN" -S "$f" && nsigned=$((nsigned + 1))
+	done < <(find root -type f -perm -u+x 2>/dev/null; find root -type f -name '*.dylib' 2>/dev/null)
+	echo "build.sh: $nsigned programs and libraries ad-hoc signed"
+else
+	echo "build.sh: no ldid ($SIGN): our libraries stay unsigned, and iOS 27's dyld will not insert them"
 fi
 # Programs and libraries of more than 4 MB (Turnip, UniXNU's Metal on Vulkan: TURNIP=1, M2V=1) live in the system
 # image, in /usr/local/redwood, with a link in their place here: the small image is loaded with the kernel, in the
